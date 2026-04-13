@@ -47,9 +47,26 @@ pip install -e ".[dev]"
 - **Windows (runtime):** поместите `tesseract.exe` и DLL в `resources/tesseract/`, а `rus.traineddata` + `eng.traineddata` — в `resources/tessdata/`.
 - **Dev на Linux/macOS:** установите системный `tesseract` (`apt install tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng`).
 
-Запуск:
+Запуск GUI:
 ```bash
 python -m src.main
+# или, после pip install -e .
+ocr-studio
+```
+
+Запуск из командной строки (без GUI):
+```bash
+# Одиночный файл
+python -m src.cli document.pdf
+
+# Пакет, 4 параллельных процесса
+python -m src.cli --workers 4 ~/scans/
+
+# С выбором профиля и экспортом в TXT/DOCX
+python -m src.cli -p low_quality_scan --txt --docx -o out.pdf in.pdf
+
+# Список доступных профилей
+python -m src.cli --list-profiles
 ```
 
 ## Сборка Windows-инсталлятора

@@ -6,6 +6,26 @@
 ## [Unreleased]
 
 ### Added
+- **CLI-режим** (`src/cli.py`): `python -m src.cli file.pdf`
+  или `ocr-cli` после установки. Поддерживает:
+  - одиночный файл с `-o`;
+  - пакет из файлов и директорий (рекурсивный поиск `*.pdf`);
+  - `--profile` для выбора профиля;
+  - `--workers` для параллельной обработки;
+  - `--txt` / `--docx` для дополнительных форматов;
+  - `--list-profiles` / `--version` / `-v`/`-vv`.
+- 20 unit-тестов CLI (парсинг, обнаружение файлов, dispatcher,
+  process_single с mocked-пайплайном).
+- Smoke-тесты `SettingsPanel` (4) и `ResultsPanel` (3).
+- **CI-workflow** (GitHub Actions): lint (ruff), compileall + import
+  smoke, pytest-матрица Ubuntu + Windows × Python 3.11/3.12.
+- `ParallelProcessor.cancel_job` / `cancel_all` / `active_job_count`.
+- Toolbar Pause (Ctrl+P) / Stop (Ctrl+.) — в MainWindow.
+- Queue statistics live label в status bar.
+- Типизированные исключения пайплайна для повреждённых / защищённых /
+  пустых PDF.
+
+### Added (предыдущие итерации)
 - SVG-иконки для тулбара (Открыть, Старт, Сохранить) и приложения (`app.svg`).
 - `src/ui/icons.py` — загрузчик тинтованных SVG через подмену `currentColor`.
 - Интеграционные тесты `ImagePreprocessor` на синтетических изображениях

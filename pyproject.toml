@@ -38,6 +38,7 @@ dev = [
 
 [project.scripts]
 ocr-studio = "src.main:main"
+ocr-cli = "src.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
