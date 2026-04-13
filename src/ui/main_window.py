@@ -36,6 +36,7 @@ from src.shared.constants import (
 from src.shared.types import ExportFormat
 from src.application.recovery_manager import RecoveryManager
 from src.infrastructure.file_utils import safe_unique_path, suggest_output_path
+from src.ui.icons import app_icon, load_icon
 from src.ui.pdf_viewer import PDFViewer
 from src.ui.postprocess_panel import PostprocessPanel
 from src.ui.preferences_dialog import PreferencesDialog
@@ -80,6 +81,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
         self.setAcceptDrops(True)
         self.resize(1400, 900)
+        self.setWindowIcon(app_icon())
 
         self._build_widgets()
         self._build_docks()
@@ -129,6 +131,7 @@ class MainWindow(QMainWindow):
         q_layout.addWidget(self.queue_panel, 1)
 
         self.queue_dock = QDockWidget("Очередь обработки", self)
+        self.queue_dock.setObjectName("queueDock")
         self.queue_dock.setWidget(queue_wrapper)
         self.queue_dock.setAllowedAreas(
             Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.TopDockWidgetArea
@@ -137,6 +140,7 @@ class MainWindow(QMainWindow):
 
         # Results dock (bottom, tabbed with queue)
         self.results_dock = QDockWidget("Результаты распознавания", self)
+        self.results_dock.setObjectName("resultsDock")
         self.results_dock.setWidget(self.results_panel)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.results_dock)
         self.tabifyDockWidget(self.queue_dock, self.results_dock)
@@ -148,7 +152,7 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         self.addToolBar(tb)
 
-        self.action_open = QAction("Открыть PDF", self)
+        self.action_open = QAction(load_icon("open"), "Открыть PDF", self)
         self.action_open.setShortcut(QKeySequence.StandardKey.Open)
         self.action_open.triggered.connect(self._on_open_file)
         tb.addAction(self.action_open)
@@ -162,12 +166,12 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        self.action_start = QAction("Старт", self)
+        self.action_start = QAction(load_icon("start"), "Старт", self)
         self.action_start.setShortcut(QKeySequence(Qt.Key.Key_Space))
         self.action_start.triggered.connect(self._on_start)
         tb.addAction(self.action_start)
 
-        self.action_save = QAction("Сохранить результат", self)
+        self.action_save = QAction(load_icon("save"), "Сохранить результат", self)
         self.action_save.setShortcut(QKeySequence.StandardKey.Save)
         self.action_save.triggered.connect(self._on_save)
         tb.addAction(self.action_save)

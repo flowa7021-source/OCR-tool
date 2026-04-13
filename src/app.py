@@ -49,6 +49,14 @@ def create_application(argv: list[str]) -> tuple[QApplication, "MainWindow"]:
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to apply theme: %s", exc)
 
+    # Set application-wide icon
+    try:
+        from src.ui.icons import app_icon
+
+        app.setWindowIcon(app_icon())
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Could not set app icon: %s", exc)
+
     # Soft-verify Tesseract (non-fatal)
     try:
         from src.infrastructure.tesseract_wrapper import TesseractWrapper

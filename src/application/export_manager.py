@@ -159,13 +159,13 @@ class ExportManager:
         """Copy ``text`` to the system clipboard via Qt.
 
         Qt is imported lazily so that non-UI callers (tests, headless runs)
-        can import this module without PyQt6 installed.
+        can import this module without PySide6 installed.
 
         Raises:
             RuntimeError: If no Qt application instance is available.
         """
         try:
-            from PyQt6.QtWidgets import QApplication  # type: ignore[import-not-found]
+            from PySide6.QtWidgets import QApplication  # type: ignore[import-not-found]
         except ImportError as exc:
             raise RuntimeError("Clipboard requires Qt runtime") from exc
 
