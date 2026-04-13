@@ -1,0 +1,389 @@
+"""Dataclass models used across all application layers.
+
+All models are serializable to/from JSON (via dataclasses.asdict / from_dict
+helpers) so they can be persisted as profiles or transferred between processes.
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from src.shared.constants import (
+    DEFAULT_ADAPTIVE_BLOCK_SIZE,
+    DEFAULT_ADAPTIVE_C,
+    DEFAULT_CLAHE_CLIP,
+    DEFAULT_CLAHE_TILE,
+    DEFAULT_CONFIDENCE_THRESHOLD,
+    DEFAULT_DPI,
+    DEFAULT_GAUSSIAN_SIGMA,
+    DEFAULT_LANGUAGE,
+    DEFAULT_MEDIAN_KSIZE,
+    DEFAULT_MORPH_KSIZE,
+    DEFAULT_NLM_H,
+    DEFAULT_SAUVOLA_K,
+    DEFAULT_SAUVOLA_WINDOW,
+    DEFAULT_TESSERACT_TIMEOUT_SEC,
+)
+from src.shared.types import (
+    BinarizationMethod,
+    DenoiseMethod,
+    JobStatus,
+    OEM,
+    OptimizeLevel,
+    PSM,
+)
+
+
+# ---------------------------------------------------------------------------
+# Preprocessing
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DeskewConfig:
+    """Skew correction parameters."""
+
+    enabled: bool = True
+    auto_detect: bool = True
+    manual_angle: float = 0.0  # used when auto_detect=False
+    max_angle: float = 45.0
+
+
+@dataclass
+class DewarpConfig:
+    """Page dewarping (cubic sheet model via page-dewarp)."""
+
+    enabled: bool = False
+    # page-dewarp internal parameters; only tweak when needed
+    text_min_width: int = 15
+    text_min_height: int = 2
+    text_min_aspect: float = 1.5
+    focal_length: float = 1.2
+
+
+@dataclass
+class BinarizationConfig:
+    """Binarization parameters."""
+
+    method: BinarizationMethod = BinarizationMethod.OTSU
+    adaptive_block_size: int = DEFAULT_ADAPTIVE_BLOCK_SIZE  # must be odd
+    adaptive_c: int = DEFAULT_ADAPTIVE_C
+    sauvola_window: int = DEFAULT_SAUVOLA_WINDOW
+    sauvola_k: float = DEFAULT_SAUVOLA_K
+
+
+@dataclass
+class DenoiseStep:
+    """Single denoising step; allows chaining multiple methods."""
+
+    method: DenoiseMethod
+    enabled: bool = True
+    # generic params; only relevant ones are used per method
+    ksize: int = DEFAULT_MEDIAN_KSIZE
+    sigma: float = DEFAULT_GAUSSIAN_SIGMA
+    h: int = DEFAULT_NLM_H
+    morph_ksize: int = DEFAULT_MORPH_KSIZE
+
+
+@dataclass
+class DenoiseConfig:
+    """Ordered pipeline of denoising steps."""
+
+    enabled: bool = False
+    steps: list[DenoiseStep] = field(default_factory=list)
+
+
+@dataclass
+class ContrastConfig:
+    """Contrast/brightness enhancement."""
+
+    clahe_enabled: bool = False
+    clahe_clip: float = DEFAULT_CLAHE_CLIP
+    clahe_tile: int = DEFAULT_CLAHE_TILE
+    manual_enabled: bool = False
+    alpha: float = 1.0  # contrast multiplier
+    beta: int = 0  # brightness offset
+
+
+@dataclass
+class BackgroundConfig:
+    """Shadow/background removal."""
+
+    enabled: bool = False
+    blur_kernel: int = 55  # large odd kernel for background estimation
+
+
+@dataclass
+class PreprocessConfig:
+    """Complete preprocessing pipeline configuration."""
+
+    deskew: DeskewConfig = field(default_factory=DeskewConfig)
+    dewarp: DewarpConfig = field(default_factory=DewarpConfig)
+    binarization: BinarizationConfig = field(default_factory=BinarizationConfig)
+    denoise: DenoiseConfig = field(default_factory=DenoiseConfig)
+    contrast: ContrastConfig = field(default_factory=ContrastConfig)
+    background: BackgroundConfig = field(default_factory=BackgroundConfig)
+
+
+# ---------------------------------------------------------------------------
+# OCR settings
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OCRConfig:
+    """Tesseract / OCRmyPDF configuration."""
+
+    languages: list[str] = field(default_factory=lambda: ["rus", "eng"])
+    primary_language: str = "rus"  # determines priority order in OCR string
+    psm: PSM = PSM.AUTO
+    oem: OEM = OEM.LSTM_ONLY
+    dpi: int = DEFAULT_DPI
+    char_whitelist: str = ""
+    char_blacklist: str = ""
+    confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
+    tesseract_timeout: int = DEFAULT_TESSERACT_TIMEOUT_SEC
+    optimize_level: OptimizeLevel = OptimizeLevel.LOSSLESS
+    skip_text: bool = True  # don't re-OCR pages with existing text
+
+    @property
+    def tesseract_language_string(self) -> str:
+        """Return language string in OCRmyPDF/Tesseract format (e.g. 'rus+eng')."""
+        ordered = [self.primary_language] + [
+            lang for lang in self.languages if lang != self.primary_language
+        ]
+        return "+".join(ordered)
+
+
+# ---------------------------------------------------------------------------
+# Text post-processing
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RegexRule:
+    """A single user-defined find/replace rule."""
+
+    pattern: str
+    replacement: str
+    enabled: bool = True
+    description: str = ""
+    is_regex: bool = True
+    case_sensitive: bool = True
+
+
+@dataclass
+class PostprocessConfig:
+    """Text post-processing configuration."""
+
+    autocorrect_russian: bool = True
+    autocorrect_english: bool = True
+    merge_hyphenated: bool = True
+    normalize_whitespace: bool = True
+    normalize_unicode: bool = True
+    remove_artifacts: bool = True
+    custom_rules: list[RegexRule] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Profiles
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ProfileData:
+    """Complete settings profile: preprocessing + OCR + postprocessing."""
+
+    name: str
+    description: str = ""
+    preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
+    ocr: OCRConfig = field(default_factory=OCRConfig)
+    postprocess: PostprocessConfig = field(default_factory=PostprocessConfig)
+    builtin: bool = False
+    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-friendly dict."""
+        return _dataclass_to_dict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ProfileData:
+        """Deserialize from a JSON-loaded dict."""
+        return _dict_to_dataclass(cls, data)
+
+
+# ---------------------------------------------------------------------------
+# Job / Queue
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OCRJobConfig:
+    """Full configuration for a single OCR job (one file)."""
+
+    input_path: str
+    output_path: str
+    profile: ProfileData
+    export_formats: list[str] = field(default_factory=lambda: ["pdf"])
+    priority: int = 0
+
+    @property
+    def input(self) -> Path:
+        return Path(self.input_path)
+
+    @property
+    def output(self) -> Path:
+        return Path(self.output_path)
+
+
+@dataclass
+class PageResult:
+    """Result for a single page."""
+
+    page_number: int  # 1-based
+    text: str = ""
+    mean_confidence: float = 0.0
+    low_confidence_words: list[str] = field(default_factory=list)
+    processing_time_sec: float = 0.0
+    error: str | None = None
+    skew_angle: float = 0.0
+
+
+@dataclass
+class JobResult:
+    """Aggregated result for a completed job."""
+
+    job_id: str
+    status: JobStatus
+    input_path: str
+    output_path: str
+    pages: list[PageResult] = field(default_factory=list)
+    total_time_sec: float = 0.0
+    error: str | None = None
+
+    @property
+    def page_count(self) -> int:
+        return len(self.pages)
+
+    @property
+    def average_confidence(self) -> float:
+        if not self.pages:
+            return 0.0
+        vals = [p.mean_confidence for p in self.pages if p.mean_confidence > 0]
+        return sum(vals) / len(vals) if vals else 0.0
+
+
+@dataclass
+class QueueItem:
+    """A single file in the processing queue."""
+
+    job_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    config: OCRJobConfig | None = None
+    status: JobStatus = JobStatus.PENDING
+    progress_current: int = 0  # current page
+    progress_total: int = 0  # total pages
+    error_message: str = ""
+    started_at: str | None = None
+    finished_at: str | None = None
+
+    @property
+    def file_name(self) -> str:
+        if self.config is None:
+            return "(unknown)"
+        return Path(self.config.input_path).name
+
+    @property
+    def progress_pct(self) -> float:
+        if self.progress_total <= 0:
+            return 0.0
+        return min(100.0, 100.0 * self.progress_current / self.progress_total)
+
+
+# ---------------------------------------------------------------------------
+# Serialization helpers
+# ---------------------------------------------------------------------------
+
+
+def _dataclass_to_dict(obj: Any) -> dict[str, Any]:
+    """Recursively convert dataclass → dict with enum coercion."""
+    raw = asdict(obj)
+    return _coerce_enums(raw)
+
+
+def _coerce_enums(value: Any) -> Any:
+    """Convert Enum → value recursively."""
+    import enum
+
+    if isinstance(value, dict):
+        return {k: _coerce_enums(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_coerce_enums(v) for v in value]
+    if isinstance(value, enum.Enum):
+        return value.value
+    return value
+
+
+def _dict_to_dataclass(cls: type, data: dict[str, Any]) -> Any:
+    """Reconstruct a dataclass (possibly nested) from a dict.
+
+    Handles nested dataclasses, lists of dataclasses, and Enums via type hints.
+    """
+    import dataclasses
+    import typing
+
+    if not dataclasses.is_dataclass(cls):
+        return data
+
+    type_hints = typing.get_type_hints(cls)
+    kwargs: dict[str, Any] = {}
+    fields_info = {f.name: f for f in dataclasses.fields(cls)}
+
+    for name, f in fields_info.items():
+        if name not in data:
+            continue
+        raw_value = data[name]
+        field_type = type_hints.get(name, f.type)
+        kwargs[name] = _convert_value(raw_value, field_type)
+    return cls(**kwargs)
+
+
+def _convert_value(value: Any, target_type: Any) -> Any:
+    """Convert a raw JSON value to the target type (dataclass, Enum, or primitive)."""
+    import dataclasses
+    import enum
+    import typing
+
+    if value is None:
+        return None
+
+    origin = typing.get_origin(target_type)
+    args = typing.get_args(target_type)
+
+    # list[X]
+    if origin is list and args:
+        elem_type = args[0]
+        return [_convert_value(v, elem_type) for v in value]
+
+    # Union / Optional
+    if origin is typing.Union:
+        non_none = [a for a in args if a is not type(None)]
+        if non_none:
+            return _convert_value(value, non_none[0])
+        return value
+
+    # Enum
+    try:
+        if isinstance(target_type, type) and issubclass(target_type, enum.Enum):
+            return target_type(value)
+    except TypeError:
+        pass
+
+    # Nested dataclass
+    if dataclasses.is_dataclass(target_type) and isinstance(value, dict):
+        return _dict_to_dataclass(target_type, value)
+
+    return value

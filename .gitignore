@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Build artifacts
+/build/
+/dist/
+*.spec
+
+# PyInstaller
+*.manifest
+
+# Installer outputs
+installer/Output/
+installer/tmp/
+
+# Logs
+*.log
+logs/
+
+# Temp files
+tmp/
+temp/
+*.tmp
+
+# Tessdata binary files (too large for repo)
+resources/tessdata/*.traineddata
+resources/tessdata/*.bin
+
+# Tesseract binary (bundled at build time)
+resources/tesseract/
+
+# Test outputs
+tests/test_data/*_ocr.pdf
+tests/test_data/output/
+
+# OS
+Thumbs.db
+desktop.ini

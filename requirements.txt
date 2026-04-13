@@ -1,0 +1,11 @@
+PySide6>=6.6
+ocrmypdf>=16.0
+pytesseract>=0.3.10
+opencv-python>=4.9
+PyMuPDF>=1.24
+deskew>=1.5
+page-dewarp>=0.1
+python-docx>=1.1
+numpy>=1.26
+scikit-image>=0.22
+Pillow>=10.0

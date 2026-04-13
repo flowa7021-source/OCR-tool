@@ -1,0 +1,68 @@
+{
+  "name": "english_text",
+  "description": "English documents with clean layout (eng, OTSU, light CLAHE)",
+  "preprocess": {
+    "deskew": {
+      "enabled": true,
+      "auto_detect": true,
+      "manual_angle": 0.0,
+      "max_angle": 45.0
+    },
+    "dewarp": {
+      "enabled": false,
+      "text_min_width": 15,
+      "text_min_height": 2,
+      "text_min_aspect": 1.5,
+      "focal_length": 1.2
+    },
+    "binarization": {
+      "method": "otsu",
+      "adaptive_block_size": 31,
+      "adaptive_c": 10,
+      "sauvola_window": 25,
+      "sauvola_k": 0.2
+    },
+    "denoise": {
+      "enabled": false,
+      "steps": []
+    },
+    "contrast": {
+      "clahe_enabled": true,
+      "clahe_clip": 2.0,
+      "clahe_tile": 8,
+      "manual_enabled": false,
+      "alpha": 1.0,
+      "beta": 0
+    },
+    "background": {
+      "enabled": false,
+      "blur_kernel": 55
+    }
+  },
+  "ocr": {
+    "languages": [
+      "eng"
+    ],
+    "primary_language": "eng",
+    "psm": 3,
+    "oem": 1,
+    "dpi": 300,
+    "char_whitelist": "",
+    "char_blacklist": "",
+    "confidence_threshold": 60.0,
+    "tesseract_timeout": 120,
+    "optimize_level": 1,
+    "skip_text": true
+  },
+  "postprocess": {
+    "autocorrect_russian": true,
+    "autocorrect_english": true,
+    "merge_hyphenated": true,
+    "normalize_whitespace": true,
+    "normalize_unicode": true,
+    "remove_artifacts": true,
+    "custom_rules": []
+  },
+  "builtin": true,
+  "created_at": "2026-04-13T19:58:44.683248"
+}
