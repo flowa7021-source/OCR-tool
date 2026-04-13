@@ -16,8 +16,10 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QSplitter,
+    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -34,6 +36,8 @@ from src.shared.constants import (
 from src.shared.types import ExportFormat
 from src.infrastructure.file_utils import safe_unique_path, suggest_output_path
 from src.ui.pdf_viewer import PDFViewer
+from src.ui.postprocess_panel import PostprocessPanel
+from src.ui.preferences_dialog import PreferencesDialog
 from src.ui.preprocessing_panel import PreprocessingPanel
 from src.ui.progress_widget import ProgressWidget
 from src.ui.queue_panel import QueuePanel
@@ -90,14 +94,19 @@ class MainWindow(QMainWindow):
         self.pdf_viewer = PDFViewer(self)
         self.settings_panel = SettingsPanel(self)
         self.preprocessing_panel = PreprocessingPanel(self)
+        self.postprocess_panel = PostprocessPanel(self)
         self.queue_panel = QueuePanel(self)
         self.progress_widget = ProgressWidget(self)
         self.results_panel = ResultsPanel(self)
 
-        # Right side: settings on top, preprocessing below
+        # Right side: settings on top, then preprocessing / postprocessing tabs below
         right_splitter = QSplitter(Qt.Orientation.Vertical, self)
         right_splitter.addWidget(self.settings_panel)
-        right_splitter.addWidget(self.preprocessing_panel)
+
+        self.right_tabs = QTabWidget(self)
+        self.right_tabs.addTab(self.preprocessing_panel, "Предобработка")
+        self.right_tabs.addTab(self.postprocess_panel, "Постобработка")
+        right_splitter.addWidget(self.right_tabs)
         right_splitter.setStretchFactor(0, 1)
         right_splitter.setStretchFactor(1, 2)
 
@@ -168,6 +177,15 @@ class MainWindow(QMainWindow):
         folder_act = QAction("Открыть папку…", self)
         folder_act.triggered.connect(self._on_open_folder)
         file_menu.addAction(folder_act)
+        file_menu.addSeparator()
+        self.recent_menu = QMenu("Недавние файлы", self)
+        file_menu.addMenu(self.recent_menu)
+        self._rebuild_recent_menu()
+        file_menu.addSeparator()
+        prefs_act = QAction("Настройки…", self)
+        prefs_act.setShortcut(QKeySequence("Ctrl+,"))
+        prefs_act.triggered.connect(self._on_preferences)
+        file_menu.addAction(prefs_act)
         file_menu.addSeparator()
         exit_act = QAction("Выход", self)
         exit_act.setShortcut(QKeySequence.StandardKey.Quit)
@@ -264,6 +282,7 @@ class MainWindow(QMainWindow):
         self._current_profile = copy.deepcopy(profile)
         self.settings_panel.set_config(profile.ocr)
         self.preprocessing_panel.set_config(profile.preprocess)
+        self.postprocess_panel.set_config(profile.postprocess)
         self.status_profile_label.setText(f"Профиль: {profile.name}")
         try:
             self._profile_manager.set_current(profile.name)
@@ -279,6 +298,7 @@ class MainWindow(QMainWindow):
         clone = copy.deepcopy(base)
         clone.ocr = self.settings_panel.get_config()
         clone.preprocess = self.preprocessing_panel.get_config()
+        clone.postprocess = self.postprocess_panel.get_config()
         return clone
 
     # ------------------------------------------------------------ actions
@@ -288,7 +308,12 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        self.pdf_viewer.open(Path(path))
+        self._open_pdf(Path(path))
+
+    def _open_pdf(self, path: Path) -> None:
+        """Open a PDF file in the viewer and push it onto the recent list."""
+        self.pdf_viewer.open(path)
+        self._add_to_recent(path)
 
     def _on_open_folder(self) -> None:
         directory = QFileDialog.getExistingDirectory(self, "Выбрать папку с PDF")
@@ -328,6 +353,7 @@ class MainWindow(QMainWindow):
                 item = QueueItem(config=job_cfg, progress_total=0)
                 self._queue_manager.add(item)
                 self._submit_job(item)
+                self._add_to_recent(input_path)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Failed to enqueue %s: %s", input_path, exc)
                 QMessageBox.critical(self, APP_NAME, f"Не удалось добавить {input_path.name}:\n{exc}")
@@ -473,6 +499,64 @@ class MainWindow(QMainWindow):
             self._profile_manager.export_profile(self._current_profile.name, Path(path))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, APP_NAME, f"Ошибка экспорта: {exc}")
+
+    # ------------------------------------------------------------ recent
+    def _add_to_recent(self, path: Path) -> None:
+        try:
+            settings = self._settings_storage.load()
+            p = str(path.resolve())
+            recent = [r for r in settings.recent_files if r != p]
+            recent.insert(0, p)
+            settings.recent_files = recent[:10]
+            self._settings_storage.save(settings)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not update recent files: %s", exc)
+        self._rebuild_recent_menu()
+
+    def _rebuild_recent_menu(self) -> None:
+        if not hasattr(self, "recent_menu"):
+            return
+        self.recent_menu.clear()
+        try:
+            settings = self._settings_storage.load()
+            recent = list(settings.recent_files)
+        except Exception:  # noqa: BLE001
+            recent = []
+        if not recent:
+            act = QAction("(пусто)", self)
+            act.setEnabled(False)
+            self.recent_menu.addAction(act)
+            return
+        for idx, item in enumerate(recent):
+            label = f"{idx + 1}. {Path(item).name}"
+            act = QAction(label, self)
+            act.setToolTip(item)
+            act.triggered.connect(lambda _checked=False, p=item: self._open_pdf(Path(p)))
+            self.recent_menu.addAction(act)
+        self.recent_menu.addSeparator()
+        clear_act = QAction("Очистить список", self)
+        clear_act.triggered.connect(self._clear_recent)
+        self.recent_menu.addAction(clear_act)
+
+    def _clear_recent(self) -> None:
+        try:
+            settings = self._settings_storage.load()
+            settings.recent_files = []
+            self._settings_storage.save(settings)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not clear recent files: %s", exc)
+        self._rebuild_recent_menu()
+
+    # ------------------------------------------------------------ preferences
+    def _on_preferences(self) -> None:
+        dlg = PreferencesDialog(self._settings_storage, self)
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            QMessageBox.information(
+                self,
+                APP_NAME,
+                "Настройки сохранены. Некоторые изменения (например, число воркеров) "
+                "вступят в силу после перезапуска.",
+            )
 
     # ------------------------------------------------------------ help
     def _on_about(self) -> None:
