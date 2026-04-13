@@ -71,11 +71,43 @@ python -m src.cli --list-profiles
 
 ## Сборка Windows-инсталлятора
 
+### Вариант 1 — через GitHub Actions (рекомендуется)
+
+В репозитории есть workflow `.github/workflows/build-installer.yml`, который
+собирает полностью готовый инсталлятор на `windows-latest`:
+
+1. **Ручной запуск**: Actions → *Build Windows Installer* → *Run workflow*
+   (можно переопределить версию Tesseract и версию самого инсталлятора).
+2. **Автоматический релиз по тегу**: `git tag v1.0.0 && git push --tags`.
+   В результате на соответствующий GitHub Release прикрепится инсталлятор
+   `OCRStudio-Setup-1.0.0.exe` вместе с `.sha256`.
+
+Что делает workflow:
+- скачивает **Tesseract 5.5.0** от UB Mannheim и распаковывает `tesseract.exe`
+  + DLL в `resources/tesseract/`;
+- скачивает **tessdata_best** для `rus` + `eng` + `osd`;
+- генерирует `app.ico` из `app.svg`;
+- запускает unit-тесты и `compileall`;
+- запускает `PyInstaller --onedir`;
+- компилирует `installer/setup.iss` через Inno Setup 6;
+- верифицирует, что Tesseract и tessdata попали в собранный пакет;
+- считает SHA-256 и аплодит артефакт на 30 дней.
+
+Артефакт: `OCRStudio-Installer-<version>` (два файла: `.exe` + `.sha256`).
+
+### Вариант 2 — локальная сборка на Windows
+
 ```bash
-python build.py           # PyInstaller onedir → dist/OCRStudio/
+# 1. Скачайте Tesseract 5.5.0 и скопируйте tesseract.exe + DLL в
+#    resources/tesseract/
+# 2. Скачайте rus.traineddata и eng.traineddata в resources/tessdata/
+# 3. (опционально) сгенерируйте resources/icons/app.ico из app.svg
+
+python build.py               # PyInstaller onedir → dist/OCRStudio/
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\setup.iss
 ```
 
-Затем компилируйте `installer/setup.iss` через Inno Setup 6 → получите `installer/Output/OCRStudio-Setup-<ver>.exe` (~200–300 МБ).
+Результат: `installer/Output/OCRStudio-Setup-<ver>.exe` (~200–300 МБ).
 
 ## Тесты
 

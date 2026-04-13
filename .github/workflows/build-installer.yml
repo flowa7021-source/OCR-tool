@@ -1,0 +1,272 @@
+name: Build Windows Installer
+
+# Produces a fully self-contained Windows installer (.exe) by:
+#   1. downloading and extracting Tesseract 5.5.0 from UB Mannheim;
+#   2. downloading rus + eng tessdata_best language models;
+#   3. running PyInstaller --onedir to freeze the Python application;
+#   4. compiling installer/setup.iss with Inno Setup 6;
+#   5. uploading the resulting .exe (+ SHA-256) as a workflow artifact;
+#   6. attaching it to a GitHub Release when the workflow was triggered by
+#      pushing a v*-tag.
+#
+# Trigger manually from the Actions tab ("Run workflow") or push a version
+# tag such as `v1.0.0`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tesseract_version:
+        description: "UB Mannheim Tesseract release tag (e.g. v5.5.0.20241111)"
+        required: false
+        default: "v5.5.0.20241111"
+      installer_version:
+        description: "Installer version override (falls back to tag / pyproject)"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: build-installer-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build installer (Windows x64)
+    runs-on: windows-latest
+    permissions:
+      contents: write  # needed when we attach the installer to a Release
+
+    env:
+      # Default values — overridable via workflow_dispatch inputs or tag name.
+      TESSERACT_TAG: ${{ github.event.inputs.tesseract_version || 'v5.5.0.20241111' }}
+      PYTHON_VERSION: "3.11"
+
+    steps:
+      # ------------------------------------------------------------------
+      # Source + Python toolchain
+      # ------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so version derivation from tags works
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip wheel
+          pip install -r requirements.txt
+          pip install pyinstaller==6.11.1
+
+      - name: Resolve installer version
+        id: ver
+        shell: pwsh
+        run: |
+          $override = "${{ github.event.inputs.installer_version }}"
+          if ($override -and $override.Trim().Length -gt 0) {
+            $v = $override.Trim().TrimStart('v')
+          } elseif ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}".StartsWith("v")) {
+            $v = "${{ github.ref_name }}".Substring(1)
+          } else {
+            $v = (python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])").Trim()
+          }
+          Write-Host "Installer version: $v"
+          "version=$v" | Out-File -FilePath $Env:GITHUB_OUTPUT -Append
+
+      # ------------------------------------------------------------------
+      # Tesseract 5.5.0 + tessdata_best
+      # ------------------------------------------------------------------
+      - name: Download Tesseract (UB Mannheim)
+        shell: pwsh
+        run: |
+          $tag = "${{ env.TESSERACT_TAG }}"
+          # Strip leading "v" for the binary filename, which UB Mannheim ships
+          # like tesseract-ocr-w64-setup-5.5.0.20241111.exe
+          $noV = $tag.TrimStart('v')
+          $url = "https://github.com/UB-Mannheim/tesseract/releases/download/$tag/tesseract-ocr-w64-setup-$noV.exe"
+          Write-Host "Downloading $url"
+          New-Item -ItemType Directory -Force -Path tesseract_dl | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile tesseract_dl\tesseract-setup.exe -UseBasicParsing -MaximumRetryCount 3
+
+      - name: Install Tesseract silently into build tree
+        shell: pwsh
+        run: |
+          $dest = "${{ github.workspace }}\tesseract_install"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          # UB Mannheim uses Inno Setup for their installer; /SILENT /DIR is accepted.
+          Start-Process -FilePath "tesseract_dl\tesseract-setup.exe" `
+            -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", `
+                          "/DIR=$dest", "/COMPONENTS=main" `
+            -Wait -PassThru | Out-Null
+
+          if (-not (Test-Path "$dest\tesseract.exe")) {
+            throw "Tesseract install failed: $dest\tesseract.exe not found"
+          }
+          & "$dest\tesseract.exe" --version
+
+      - name: Copy Tesseract runtime into resources/tesseract
+        shell: pwsh
+        run: |
+          $src = "${{ github.workspace }}\tesseract_install"
+          $dst = "${{ github.workspace }}\resources\tesseract"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          # Copy exe + every DLL + any tesseract-specific asset. Skip the
+          # installer's own uninstaller and docs to keep the bundle small.
+          Get-ChildItem -Path $src -File -Recurse |
+            Where-Object {
+              $_.Extension -in @('.exe', '.dll') -and
+              $_.Name -notlike 'unins*'
+            } |
+            ForEach-Object {
+              $rel = $_.FullName.Substring($src.Length).TrimStart('\')
+              $target = Join-Path $dst $rel
+              New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
+              Copy-Item $_.FullName -Destination $target -Force
+            }
+          Get-ChildItem $dst -Recurse | Select-Object FullName, Length
+
+      - name: Download tessdata_best (rus, eng)
+        shell: pwsh
+        run: |
+          $dst = "${{ github.workspace }}\resources\tessdata"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          $base = "https://github.com/tesseract-ocr/tessdata_best/raw/main"
+          foreach ($lang in @("rus", "eng", "osd")) {
+            $url = "$base/$lang.traineddata"
+            $out = Join-Path $dst "$lang.traineddata"
+            Write-Host "Downloading $url"
+            Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -MaximumRetryCount 3
+            if ((Get-Item $out).Length -lt 1000000) {
+              throw "$lang.traineddata download is suspiciously small; aborting."
+            }
+          }
+          Get-ChildItem $dst | Select-Object Name, Length
+
+      # ------------------------------------------------------------------
+      # Optional: generate a Windows .ico from the bundled SVG
+      # ------------------------------------------------------------------
+      - name: Generate app.ico from app.svg
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          pip install --quiet Pillow cairosvg
+          python -c @'
+          from pathlib import Path
+          try:
+              import cairosvg
+              from PIL import Image
+              from io import BytesIO
+              svg = Path("resources/icons/app.svg").read_bytes()
+              images = []
+              for sz in (16, 24, 32, 48, 64, 128, 256):
+                  png = cairosvg.svg2png(bytestring=svg, output_width=sz, output_height=sz)
+                  images.append(Image.open(BytesIO(png)).convert("RGBA"))
+              out = Path("resources/icons/app.ico")
+              images[0].save(out, format="ICO", sizes=[(s, s) for s in (16, 24, 32, 48, 64, 128, 256)], append_images=images[1:])
+              print(f"Wrote {out} ({out.stat().st_size} bytes)")
+          except Exception as exc:
+              print(f"ICO generation skipped: {exc}")
+          '@
+
+      # ------------------------------------------------------------------
+      # Freeze with PyInstaller
+      # ------------------------------------------------------------------
+      - name: Verify compileall + quick tests
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m compileall -q src tests build.py dev_run.py
+          pip install pytest pytest-mock
+          pytest tests/unit -q --tb=line
+
+      - name: Run PyInstaller (build.py)
+        shell: pwsh
+        run: |
+          python build.py
+
+      - name: Verify frozen EXE launches
+        shell: pwsh
+        run: |
+          $exe = "dist\OCRStudio\OCRStudio.exe"
+          if (-not (Test-Path $exe)) {
+            throw "Expected frozen binary not found: $exe"
+          }
+          # The bundled Tesseract must be present alongside the app.
+          if (-not (Test-Path "dist\OCRStudio\_internal\resources\tesseract\tesseract.exe")) {
+            throw "Bundled Tesseract missing from PyInstaller output"
+          }
+          if (-not (Test-Path "dist\OCRStudio\_internal\resources\tessdata\rus.traineddata")) {
+            throw "Bundled tessdata (rus) missing from PyInstaller output"
+          }
+          Write-Host "Frozen bundle size (top level):"
+          Get-ChildItem dist\OCRStudio | Format-Table Name, Length -AutoSize
+
+      # ------------------------------------------------------------------
+      # Inno Setup
+      # ------------------------------------------------------------------
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          choco install -y --no-progress innosetup
+          # Verify the compiler is on PATH (Chocolatey adds it automatically)
+          $iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          if (-not (Test-Path $iscc)) {
+            throw "ISCC.exe not found"
+          }
+          Write-Host "ISCC at: $iscc"
+          "ISCC=$iscc" | Out-File -FilePath $Env:GITHUB_ENV -Append
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path installer\Output | Out-Null
+          & "$Env:ISCC" `
+              "/DMyAppVersion=$ver" `
+              "installer\setup.iss"
+          Get-ChildItem installer\Output | Format-Table Name, Length -AutoSize
+
+      - name: Generate SHA-256 checksum
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem installer\Output\*.exe | Select-Object -First 1
+          if (-not $installer) { throw "No installer produced" }
+          $hash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash
+          "$hash  $($installer.Name)" | Out-File -Encoding ascii "installer\Output\$($installer.BaseName).sha256"
+          Write-Host "SHA-256: $hash"
+
+      # ------------------------------------------------------------------
+      # Artifacts + optional release
+      # ------------------------------------------------------------------
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OCRStudio-Installer-${{ steps.ver.outputs.version }}
+          path: |
+            installer/Output/*.exe
+            installer/Output/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to GitHub Release (tags only)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installer/Output/*.exe
+            installer/Output/*.sha256
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}

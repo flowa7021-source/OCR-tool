@@ -6,6 +6,15 @@
 ## [Unreleased]
 
 ### Added
+- **GitHub Actions workflow** `build-installer.yml` — собирает полный
+  Windows-инсталлятор автоматически. Скачивает Tesseract 5.5.0 (UB
+  Mannheim), tessdata_best (rus + eng + osd), генерирует `app.ico` из
+  SVG, запускает `pytest` + `compileall`, `PyInstaller --onedir`, затем
+  Inno Setup 6. Триггеры: ручной запуск или `git push --tags v*`.
+  Артефакт: `OCRStudio-Setup-<version>.exe` + `.sha256`.
+  При push тега автоматически прикрепляется к GitHub Release.
+- `build.py` теперь подхватывает `resources/icons/app.ico`, если файл
+  присутствует (иначе бинарник собирается без Windows-иконки).
 - **CLI-режим** (`src/cli.py`): `python -m src.cli file.pdf`
   или `ocr-cli` после установки. Поддерживает:
   - одиночный файл с `-o`;

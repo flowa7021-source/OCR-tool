@@ -38,6 +38,7 @@ class ExportManager:
         job_result: JobResult,
         output_path: Path,
         format: ExportFormat,
+        encoding: str = "utf-8",
     ) -> Path:
         """Dispatch to the correct exporter based on ``format``.
 
@@ -45,6 +46,9 @@ class ExportManager:
             job_result: Finished job.
             output_path: Destination path (ignored for ``CLIPBOARD``).
             format: Target export format.
+            encoding: TXT encoding (ignored for other formats). Accepts any
+                Python codec name; common choices are ``"utf-8"``,
+                ``"utf-8-sig"`` (BOM) and ``"cp1251"``.
 
         Returns:
             Path to the written file (or the input ``output_path`` for
@@ -54,7 +58,7 @@ class ExportManager:
             ExportError: If the requested format is unsupported.
         """
         if format == ExportFormat.TXT:
-            return self.export_txt(job_result, output_path)
+            return self.export_txt(job_result, output_path, encoding=encoding)
         if format == ExportFormat.DOCX:
             return self.export_docx(job_result, output_path)
         if format == ExportFormat.CLIPBOARD:

@@ -1,0 +1,2 @@
+Stylesheet assets. The active QSS is inlined in src/ui/theme.py so no
+files are required here; the directory is kept for forward-compatibility.

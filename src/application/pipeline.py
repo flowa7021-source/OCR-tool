@@ -80,6 +80,8 @@ class OCRPipeline:
         tesseract: TesseractWrapper,
         progress_callback: ProgressCallback | None = None,
         compute_confidence: bool = True,
+        autosave_interval_pages: int = 0,
+        autosave_path: Path | None = None,
     ) -> None:
         """Initialize the pipeline.
 
@@ -89,12 +91,20 @@ class OCRPipeline:
             tesseract: :class:`TesseractWrapper` (already or lazily configured).
             progress_callback: Optional progress reporter.
             compute_confidence: Whether to compute per-page confidence.
+            autosave_interval_pages: Dump the partial TXT every N OCR'd
+                pages. ``0`` disables partial autosave. Useful for very long
+                jobs: if the process crashes between autosaves the previous
+                dump is still on disk.
+            autosave_path: Destination for partial TXT dumps. Defaults to the
+                job output path with the ``.partial.txt`` suffix.
         """
         self.preprocessor = preprocessor
         self.postprocessor = postprocessor
         self.tesseract = tesseract
         self.progress_callback = progress_callback
         self.compute_confidence = compute_confidence
+        self.autosave_interval_pages = max(0, int(autosave_interval_pages))
+        self.autosave_path = autosave_path
 
     # ------------------------------------------------------------------
     # Public API
@@ -428,11 +438,54 @@ class OCRPipeline:
                         exc,
                     )
                     pr.error = (pr.error or "") + f"; extract: {exc}"
+
+                # Periodic partial-result autosave.
+                if (
+                    self.autosave_interval_pages > 0
+                    and (idx + 1) % self.autosave_interval_pages == 0
+                ):
+                    self._autosave_partial_txt(page_results[: idx + 1], job)
         finally:
             doc.close()
 
         if self.compute_confidence:
             self._compute_confidences(page_results, job, png_paths)
+
+    def _autosave_partial_txt(
+        self, partial_pages: list[PageResult], job: OCRJobConfig
+    ) -> None:
+        """Dump a running TXT of what has been OCR'd so far.
+
+        Best-effort: any I/O error is logged and swallowed so autosave never
+        aborts a running job.
+        """
+        try:
+            from src.shared.constants import UI_PAGE_NUM_FORMAT
+
+            target = self.autosave_path or Path(
+                str(job.output_path) + ".partial.txt"
+            )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            parts: list[str] = []
+            for pr in partial_pages:
+                parts.append(UI_PAGE_NUM_FORMAT.format(num=pr.page_number))
+                parts.append("")
+                if pr.error:
+                    parts.append(f"[ERROR: {pr.error}]")
+                else:
+                    parts.append(pr.text or "")
+                parts.append("")
+            # Atomic write
+            tmp = target.with_suffix(target.suffix + ".tmp")
+            tmp.write_text("\n".join(parts).rstrip() + "\n", encoding="utf-8")
+            tmp.replace(target)
+            logger.info(
+                "Autosave: wrote %d partial pages to %s",
+                len(partial_pages),
+                target,
+            )
+        except OSError as exc:
+            logger.warning("Partial autosave failed: %s", exc)
 
     def _postprocess_text(self, text: str, cfg) -> str:
         """Run :class:`TextPostprocessor` if available."""

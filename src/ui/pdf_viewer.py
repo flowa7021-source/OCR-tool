@@ -10,8 +10,18 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, Signal
-from PySide6.QtGui import QIcon, QImage, QKeyEvent, QPixmap, QWheelEvent
+from PySide6.QtCore import QObject, QRectF, QRunnable, QSize, Qt, QThreadPool, Signal
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QIcon,
+    QImage,
+    QKeyEvent,
+    QPainter,
+    QPen,
+    QPixmap,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -146,6 +156,11 @@ class PDFViewer(QWidget):
         self._compare_splitter: QSplitter | None = None
         self._compare_before: PDFViewer | None = None
         self._compare_after: PDFViewer | None = None
+        # OCR word boxes for overlay: {page_number (1-based): [(x, y, w, h, conf), ...]}
+        # Coordinates are in PDF user-space points (72 dpi).
+        self._word_boxes: dict[int, list[tuple[float, float, float, float, float]]] = {}
+        self._overlay_visible: bool = False
+        self._overlay_threshold: float = 0.0  # show all words by default
 
         self._root_layout = QHBoxLayout(self)
         self._root_layout.setContentsMargins(0, 0, 0, 0)
@@ -382,7 +397,7 @@ class PDFViewer(QWidget):
     # Internals
     # ------------------------------------------------------------------
     def _render_current(self) -> None:
-        """Render the current page into the main label."""
+        """Render the current page into the main label, with optional overlay."""
         if self._doc is None or self._current_page < 1:
             self._page_label.clear()
             return
@@ -390,10 +405,96 @@ class PDFViewer(QWidget):
             pix = _render_page_pixmap(
                 self._doc, self._current_page - 1, self._zoom
             )
+            if self._overlay_visible:
+                pix = self._paint_overlay(pix, self._current_page)
             self._page_label.setPixmap(pix)
             self._page_label.resize(pix.size())
         except Exception:
             logger.exception("Failed to render page %d", self._current_page)
+
+    def _paint_overlay(self, pix: QPixmap, page_number: int) -> QPixmap:
+        """Draw bounding boxes over a page pixmap based on stored OCR words.
+
+        Box color is a green-to-red gradient driven by confidence: high
+        confidence → green, low confidence → red. Uses a translucent fill so
+        the underlying scan remains readable.
+
+        Args:
+            pix: Page pixmap freshly rendered at ``self._zoom``.
+            page_number: 1-based page number.
+
+        Returns:
+            A new QPixmap with the overlay painted on top.
+        """
+        boxes = self._word_boxes.get(page_number)
+        if not boxes:
+            return pix
+        # Our rasterizer renders at 2x of self._zoom (see _render_page_pixmap).
+        # Word box coords are 1x at 72 DPI; convert to pixmap-pixel scale.
+        scale = self._zoom * 2.0
+        canvas = QPixmap(pix)
+        painter = QPainter(canvas)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            for x, y, w, h, conf in boxes:
+                if conf < self._overlay_threshold:
+                    continue
+                # Gradient: 0% confidence → red (239,68,68),
+                # 100% → green (34,197,94). Linear interpolation.
+                f = max(0.0, min(1.0, conf / 100.0))
+                r = int(239 * (1 - f) + 34 * f)
+                g = int(68 * (1 - f) + 197 * f)
+                b = int(68 * (1 - f) + 94 * f)
+                color = QColor(r, g, b)
+                stroke = QColor(r, g, b, 220)
+                fill = QColor(r, g, b, 40)
+                painter.setPen(QPen(stroke, 1.2))
+                painter.setBrush(QBrush(fill))
+                rect = QRectF(x * scale, y * scale, w * scale, h * scale)
+                painter.drawRect(rect)
+        finally:
+            painter.end()
+        return canvas
+
+    # ------------------------------------------------------------------
+    # Overlay API
+    # ------------------------------------------------------------------
+    def set_word_boxes(
+        self,
+        page_number: int,
+        boxes: list[tuple[float, float, float, float, float]],
+    ) -> None:
+        """Store per-page word boxes ``(x, y, w, h, confidence)``.
+
+        Coordinates are in PDF user-space points (72 DPI). Confidence is in
+        [0, 100]. Replaces any previously-stored boxes for that page.
+        """
+        self._word_boxes[page_number] = list(boxes)
+        if self._overlay_visible and page_number == self._current_page:
+            self._render_current()
+
+    def clear_word_boxes(self) -> None:
+        """Remove all stored word boxes."""
+        self._word_boxes.clear()
+        if self._overlay_visible:
+            self._render_current()
+
+    def set_overlay_visible(self, visible: bool) -> None:
+        """Toggle the bounding-box overlay."""
+        if self._overlay_visible == bool(visible):
+            return
+        self._overlay_visible = bool(visible)
+        self._render_current()
+
+    def is_overlay_visible(self) -> bool:
+        """Return whether the overlay is currently drawn."""
+        return self._overlay_visible
+
+    def set_overlay_threshold(self, threshold: float) -> None:
+        """Hide boxes with confidence below ``threshold`` (0–100)."""
+        self._overlay_threshold = max(0.0, min(100.0, float(threshold)))
+        if self._overlay_visible:
+            self._render_current()
 
     def _start_thumbnail_worker(self) -> None:
         """Launch the background thumbnail rendering worker."""

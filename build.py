@@ -90,8 +90,6 @@ def build_pyinstaller(onefile: bool = False) -> int:
         f"--add-data=resources/icons{sep}resources/icons",
         f"--add-data=resources/styles{sep}resources/styles",
         f"--add-data=profiles{sep}profiles",
-        # Icon (optional)
-        # f"--icon=resources/icons/app.ico",
         # Hidden imports that PyInstaller sometimes misses
         "--collect-submodules=ocrmypdf",
         "--collect-submodules=pikepdf",
@@ -99,8 +97,14 @@ def build_pyinstaller(onefile: bool = False) -> int:
         "--collect-data=pikepdf",
         "--hidden-import=PIL._tkinter_finder",
         "--hidden-import=skimage.filters",
-        str(entry),
     ]
+
+    # Attach Windows .ico if it was generated/placed before the build.
+    ico = PROJECT_ROOT / "resources" / "icons" / "app.ico"
+    if ico.exists():
+        args.append(f"--icon={ico}")
+
+    args.append(str(entry))
     print("[build] running:", " ".join(args))
     return subprocess.call(args, cwd=str(PROJECT_ROOT))
 

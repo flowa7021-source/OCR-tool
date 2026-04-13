@@ -233,6 +233,16 @@ class MainWindow(QMainWindow):
         view_menu = menubar.addMenu("&Вид")
         view_menu.addAction(self.queue_dock.toggleViewAction())
         view_menu.addAction(self.results_dock.toggleViewAction())
+        view_menu.addSeparator()
+        self.action_overlay = QAction("Подсветить распознанный текст", self)
+        self.action_overlay.setCheckable(True)
+        self.action_overlay.setShortcut(QKeySequence("Ctrl+H"))
+        self.action_overlay.setToolTip(
+            "Показать/скрыть bounding box распознанных слов поверх скана "
+            "(цвет по уровню confidence)"
+        )
+        self.action_overlay.toggled.connect(self._on_toggle_overlay)
+        view_menu.addAction(self.action_overlay)
 
         help_menu = menubar.addMenu("&Справка")
         about_act = QAction("О программе", self)
@@ -487,6 +497,11 @@ class MainWindow(QMainWindow):
     def _apply_job_result(self, job_id: str, result: object) -> None:
         self._last_result = result
         self.results_panel.set_result(result)  # type: ignore[arg-type]
+        # Feed word boxes to the viewer so the overlay works on the result PDF.
+        try:
+            self._populate_overlay_from_result(result)
+        except Exception:  # noqa: BLE001
+            logger.debug("Overlay population failed", exc_info=True)
         # Propagate status into the queue
         try:
             from src.core.models import JobResult as _JR
@@ -527,13 +542,35 @@ class MainWindow(QMainWindow):
         if self._last_result is None:
             QMessageBox.information(self, APP_NAME, "Нет готовых результатов.")
             return
-        if path is None:
-            target, _ = QFileDialog.getSaveFileName(self, "Сохранить", "", "Все файлы (*.*)")
+        if path is None and fmt is not ExportFormat.CLIPBOARD:
+            default_ext = {
+                ExportFormat.TXT: "txt",
+                ExportFormat.DOCX: "docx",
+                ExportFormat.PDF: "pdf",
+            }.get(fmt, "")
+            filter_map = {
+                ExportFormat.TXT: "Text (*.txt)",
+                ExportFormat.DOCX: "Word (*.docx)",
+                ExportFormat.PDF: "PDF (*.pdf)",
+            }
+            default_name = (
+                Path(self._last_result.input_path).with_suffix(f".{default_ext}").name
+                if default_ext else ""
+            )
+            target, _ = QFileDialog.getSaveFileName(
+                self, "Сохранить", default_name, filter_map.get(fmt, "Все файлы (*.*)")
+            )
             if not target:
                 return
             path = Path(target)
+        encoding = self.results_panel.txt_encoding()
         try:
-            self._export_manager.export(self._last_result, path, fmt)
+            self._export_manager.export(
+                self._last_result,
+                path if path is not None else Path(""),
+                fmt,
+                encoding=encoding,
+            )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, APP_NAME, f"Ошибка экспорта: {exc}")
 
@@ -616,6 +653,55 @@ class MainWindow(QMainWindow):
             self._profile_manager.export_profile(self._current_profile.name, Path(path))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, APP_NAME, f"Ошибка экспорта: {exc}")
+
+    # ------------------------------------------------------------ overlay
+    def _on_toggle_overlay(self, checked: bool) -> None:
+        """Menu callback: switch OCR overlay on the PDF viewer."""
+        self.pdf_viewer.set_overlay_visible(bool(checked))
+
+    def _populate_overlay_from_result(self, result: object) -> None:
+        """Extract word boxes from the produced searchable PDF and feed the viewer.
+
+        The OCRmyPDF output already contains an invisible text layer with the
+        word positions; PyMuPDF ``page.get_text("words")`` gives us
+        ``(x0, y0, x1, y1, text, ...)`` tuples in PDF user-space points.
+        We have no direct confidence from that layer, so we fall back to the
+        per-page mean confidence stored on the JobResult.
+        """
+        from src.core.models import JobResult
+
+        if not isinstance(result, JobResult):
+            return
+        pdf_path = Path(result.output_path)
+        if not pdf_path.exists():
+            return
+        try:
+            import fitz
+        except ImportError:
+            return
+        try:
+            doc = fitz.open(str(pdf_path))
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            self.pdf_viewer.clear_word_boxes()
+            for page_index in range(doc.page_count):
+                pg = result.pages[page_index] if page_index < len(result.pages) else None
+                default_conf = pg.mean_confidence if pg is not None else 80.0
+                boxes: list[tuple[float, float, float, float, float]] = []
+                try:
+                    words = doc[page_index].get_text("words")
+                except Exception:  # noqa: BLE001
+                    words = []
+                for word in words:
+                    try:
+                        x0, y0, x1, y1 = float(word[0]), float(word[1]), float(word[2]), float(word[3])
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                    boxes.append((x0, y0, x1 - x0, y1 - y0, default_conf))
+                self.pdf_viewer.set_word_boxes(page_index + 1, boxes)
+        finally:
+            doc.close()
 
     # ------------------------------------------------------------ recovery
     def prompt_recovery(self) -> None:

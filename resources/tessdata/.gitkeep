@@ -1,0 +1,6 @@
+Place rus.traineddata and eng.traineddata (tessdata_best) here before
+running build.py. They are NOT committed to git because of their size.
+The CI workflow downloads them automatically during the installer build.
+
+Download manually from:
+  https://github.com/tesseract-ocr/tessdata_best

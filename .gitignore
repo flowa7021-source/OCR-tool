@@ -53,7 +53,11 @@ resources/tessdata/*.traineddata
 resources/tessdata/*.bin
 
 # Tesseract binary (bundled at build time)
-resources/tesseract/
+resources/tesseract/*
+!resources/tesseract/.gitkeep
+
+# Generated Windows icon
+resources/icons/app.ico
 
 # Test outputs
 tests/test_data/*_ocr.pdf

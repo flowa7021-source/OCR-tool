@@ -181,11 +181,20 @@ def process_single(
             pct = int(100 * current / total)
             logger.info("  [%3d%%] %s %d/%d", pct, stage, current, total)
 
+    autosave_interval = 0
+    try:
+        from src.infrastructure.config_storage import SettingsStorage
+
+        autosave_interval = int(SettingsStorage().load().autosave_interval_pages)
+    except Exception:  # noqa: BLE001
+        autosave_interval = 0
+
     pipeline = OCRPipeline(
         preprocessor=ImagePreprocessor(),
         postprocessor=TextPostprocessor(),
         tesseract=tesseract,
         progress_callback=_progress,
+        autosave_interval_pages=autosave_interval,
     )
 
     t0 = time.time()

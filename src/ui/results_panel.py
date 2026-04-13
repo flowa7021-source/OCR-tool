@@ -83,10 +83,19 @@ class ResultsPanel(QWidget):
         # Export buttons.
         btn_row = QHBoxLayout()
         self._btn_txt = QPushButton("Сохранить TXT", self)
+        self._cmb_txt_encoding = QComboBox(self)
+        self._cmb_txt_encoding.addItem("UTF-8", userData="utf-8")
+        self._cmb_txt_encoding.addItem("UTF-8 с BOM", userData="utf-8-sig")
+        self._cmb_txt_encoding.addItem("Windows-1251", userData="cp1251")
+        self._cmb_txt_encoding.setToolTip(
+            "Кодировка TXT-файла. Windows-1251 нужна для совместимости со "
+            "старыми редакторами на Windows."
+        )
         self._btn_docx = QPushButton("Сохранить DOCX", self)
         self._btn_copy = QPushButton("Копировать", self)
         self._btn_open_pdf = QPushButton("Открыть PDF", self)
         btn_row.addWidget(self._btn_txt)
+        btn_row.addWidget(self._cmb_txt_encoding)
         btn_row.addWidget(self._btn_docx)
         btn_row.addWidget(self._btn_copy)
         btn_row.addWidget(self._btn_open_pdf)
@@ -134,6 +143,11 @@ class ResultsPanel(QWidget):
         else:
             self._text_edit.clear()
             self._list_lowconf.clear()
+
+    def txt_encoding(self) -> str:
+        """Return the TXT-export encoding currently selected by the user."""
+        data = self._cmb_txt_encoding.currentData()
+        return str(data) if data else "utf-8"
 
     def clear(self) -> None:
         """Reset the panel to an empty state."""

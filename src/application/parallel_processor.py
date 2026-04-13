@@ -172,11 +172,21 @@ def _worker_run_job(
                 # Queue full or closed — don't let progress reporting crash the job
                 pass
 
+        # Read autosave setting (best-effort; defaults to 0 if unavailable).
+        autosave_interval = 0
+        try:
+            from src.infrastructure.config_storage import SettingsStorage
+
+            autosave_interval = int(SettingsStorage().load().autosave_interval_pages)
+        except Exception:  # noqa: BLE001
+            autosave_interval = 0
+
         pipeline = OCRPipeline(
             preprocessor=preprocessor,
             postprocessor=postprocessor,
             tesseract=tess,
             progress_callback=_progress if progress_queue is not None else None,
+            autosave_interval_pages=autosave_interval,
         )
 
         result = pipeline.run(job)
