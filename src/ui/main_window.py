@@ -34,6 +34,7 @@ from src.shared.constants import (
     LOG_FILE_NAME,
 )
 from src.shared.types import ExportFormat
+from src.application.recovery_manager import RecoveryManager
 from src.infrastructure.file_utils import safe_unique_path, suggest_output_path
 from src.ui.pdf_viewer import PDFViewer
 from src.ui.postprocess_panel import PostprocessPanel
@@ -74,6 +75,7 @@ class MainWindow(QMainWindow):
         self._settings_storage = settings_storage
         self._last_result = None
         self._current_profile: ProfileData | None = None
+        self._recovery = RecoveryManager()
 
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
         self.setAcceptDrops(True)
@@ -352,6 +354,10 @@ class MainWindow(QMainWindow):
                 )
                 item = QueueItem(config=job_cfg, progress_total=0)
                 self._queue_manager.add(item)
+                try:
+                    self._recovery.snapshot(item)
+                except Exception:  # noqa: BLE001
+                    logger.debug("recovery snapshot failed", exc_info=True)
                 self._submit_job(item)
                 self._add_to_recent(input_path)
             except Exception as exc:  # noqa: BLE001
@@ -364,14 +370,40 @@ class MainWindow(QMainWindow):
         try:
             future = self._parallel_processor.submit(
                 item.config,
-                on_progress=None,
+                on_progress=lambda jid, cur, tot, stage: self._on_job_progress(jid, cur, tot, stage),
                 on_complete=lambda result, jid=item.job_id: self._on_job_complete(jid, result),
                 on_error=lambda exc, jid=item.job_id: self._on_job_failed(jid, exc),
+                job_id=item.job_id,
             )
+            from src.shared.types import JobStatus as _JS
+
+            self._queue_manager.update_status(item.job_id, _JS.RUNNING)
             logger.info("Submitted job %s: %s", item.job_id, future)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Submission failed: %s", exc)
             QMessageBox.critical(self, APP_NAME, f"Ошибка запуска обработки:\n{exc}")
+
+    def _on_job_progress(self, job_id: str, current: int, total: int, stage: str) -> None:
+        """Progress callback — runs on a non-UI thread. Marshal into GUI thread."""
+        QTimer.singleShot(
+            0, lambda: self._apply_job_progress(job_id, current, total, stage)
+        )
+
+    def _apply_job_progress(self, job_id: str, current: int, total: int, stage: str) -> None:
+        try:
+            self._queue_manager.update_progress(job_id, current, total)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("update_progress raised: %s", exc)
+        # Update the ProgressWidget too
+        item = self._queue_manager.get(job_id) if hasattr(self._queue_manager, "get") else None
+        name = item.file_name if item is not None else ""
+        self.progress_widget.set_current_file(f"{name} — {stage}", current, total)
+        # Periodically refresh the recovery snapshot so a crash resumes from ~ here
+        if item is not None and current % 5 == 0:
+            try:
+                self._recovery.snapshot(item)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _on_job_complete(self, job_id: str, result: object) -> None:
         # Called from worker thread — marshal into GUI thread
@@ -385,6 +417,21 @@ class MainWindow(QMainWindow):
     def _apply_job_result(self, job_id: str, result: object) -> None:
         self._last_result = result
         self.results_panel.set_result(result)  # type: ignore[arg-type]
+        # Propagate status into the queue
+        try:
+            from src.core.models import JobResult as _JR
+
+            if isinstance(result, _JR):
+                self._queue_manager.update_status(
+                    job_id, result.status, result.error or ""
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not update queue status", exc_info=True)
+        # Remove from recovery snapshot
+        try:
+            self._recovery.remove(job_id)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _on_save(self) -> None:
         if self._last_result is None:
@@ -500,6 +547,39 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, APP_NAME, f"Ошибка экспорта: {exc}")
 
+    # ------------------------------------------------------------ recovery
+    def prompt_recovery(self) -> None:
+        """Check for leftover recovery snapshots and offer to resume them."""
+        try:
+            pending = self._recovery.list_pending()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not inspect recovery: %s", exc)
+            return
+        if not pending:
+            return
+        names = "\n".join(f" • {Path(p.config.input_path).name}" for p in pending if p.config)
+        resp = QMessageBox.question(
+            self,
+            APP_NAME,
+            (
+                f"Обнаружены незавершённые задания ({len(pending)}):\n\n{names}\n\n"
+                "Возобновить их обработку сейчас?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            try:
+                self._recovery.clear_all()
+            except Exception:  # noqa: BLE001
+                logger.debug("clear_all recovery failed", exc_info=True)
+            return
+        for item in pending:
+            try:
+                self._queue_manager.add(item)
+                self._submit_job(item)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Could not resume job %s: %s", item.job_id, exc)
+
     # ------------------------------------------------------------ recent
     def _add_to_recent(self, path: Path) -> None:
         try:
@@ -569,11 +649,19 @@ class MainWindow(QMainWindow):
         )
 
     def _on_open_log(self) -> None:
-        from PySide6.QtGui import QDesktopServices
-        from PySide6.QtCore import QUrl
+        from src.ui.log_viewer import LogViewer
 
         log_path = LOGS_DIR / LOG_FILE_NAME
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_path)))
+        try:
+            dlg = LogViewer(log_path, self)
+            dlg.exec()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Log viewer failed: %s", exc)
+            # Fall back to system default
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_path)))
 
     # ------------------------------------------------------------ misc
     def _update_resource_usage(self) -> None:

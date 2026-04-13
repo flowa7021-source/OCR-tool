@@ -6,14 +6,19 @@ process-local caches). We therefore serialize just the
 :class:`~src.core.models.OCRJobConfig` to a ``dict`` and let each worker
 process rebuild its own pipeline.
 
-Progress is reported at job granularity only when running through a process
-pool; per-page progress is not bridged back to the main process to keep the
-worker simple and robust.
+Per-page progress is bridged back to the main process through a shared
+:class:`multiprocessing.Queue`. Workers emit tagged progress events; a
+:class:`ProgressBridge` running in a background thread on the main side
+drains them and fans out to per-job callbacks.
 """
 
 from __future__ import annotations
 
 import logging
+import multiprocessing
+import queue as queue_mod
+import threading
+import uuid
 from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
@@ -26,9 +31,15 @@ from src.shared.types import JobStatus
 logger = logging.getLogger(__name__)
 
 
-OnProgress = Callable[[str, int, int], None]
+# Callback signatures
+# on_progress(job_id, current, total, stage)
+OnProgress = Callable[[str, int, int, str], None]
 OnComplete = Callable[[JobResult], None]
 OnError = Callable[[BaseException], None]
+
+
+# Sentinel marking the end of progress events for a job
+_PROGRESS_DONE = "__done__"
 
 
 # ---------------------------------------------------------------------------
@@ -100,11 +111,22 @@ def job_result_from_dict(data: dict[str, Any]) -> JobResult:
 # ---------------------------------------------------------------------------
 
 
-def _worker_run_job(job_dict: dict[str, Any]) -> dict[str, Any]:
+def _worker_run_job(
+    job_dict: dict[str, Any],
+    progress_queue: "multiprocessing.Queue | None" = None,
+    tracking_id: str = "",
+) -> dict[str, Any]:
     """Process-pool worker. Runs one pipeline start-to-finish.
 
     Args:
         job_dict: Dict produced by :func:`job_to_dict`.
+        progress_queue: Optional cross-process queue for progress events.
+            Each event is a tuple ``(tracking_id, current, total, stage)``.
+            A final ``(tracking_id, _PROGRESS_DONE, 0, 0, "")``-shaped message
+            is NOT emitted by this worker — the bridge infers completion from
+            the future's done callback.
+        tracking_id: Opaque identifier echoed back in every progress event so
+            the bridge can route updates to the correct listener.
 
     Returns:
         Dict produced by :func:`job_result_to_dict`.
@@ -140,10 +162,21 @@ def _worker_run_job(job_dict: dict[str, Any]) -> dict[str, Any]:
 
         preprocessor = ImagePreprocessor()
         postprocessor = TextPostprocessor()
+
+        def _progress(current: int, total: int, stage: str) -> None:
+            if progress_queue is None:
+                return
+            try:
+                progress_queue.put_nowait((tracking_id, int(current), int(total), str(stage)))
+            except Exception:  # noqa: BLE001
+                # Queue full or closed — don't let progress reporting crash the job
+                pass
+
         pipeline = OCRPipeline(
             preprocessor=preprocessor,
             postprocessor=postprocessor,
             tesseract=tess,
+            progress_callback=_progress if progress_queue is not None else None,
         )
 
         result = pipeline.run(job)
@@ -169,6 +202,10 @@ def _worker_run_job(job_dict: dict[str, Any]) -> dict[str, Any]:
 class ParallelProcessor:
     """Submit OCR jobs to a :class:`ProcessPoolExecutor`.
 
+    Progress events emitted by worker processes are drained by a background
+    thread (``_progress_thread``) and dispatched to per-job callbacks registered
+    at submission time.
+
     Attributes:
         max_workers: Maximum concurrent worker processes.
     """
@@ -182,19 +219,78 @@ class ParallelProcessor:
         self.max_workers = max(1, int(max_workers))
         self._executor: ProcessPoolExecutor | None = None
 
+        # Cross-process progress plumbing. A Manager gives us a proxy Queue
+        # that survives across pool workers created on Windows (spawn).
+        self._manager: multiprocessing.managers.SyncManager | None = None
+        self._progress_queue: multiprocessing.Queue | None = None
+        self._progress_thread: threading.Thread | None = None
+        self._progress_stop = threading.Event()
+        self._progress_lock = threading.Lock()
+        # tracking_id -> (on_progress, job_id_for_callback)
+        self._progress_listeners: dict[str, tuple[OnProgress | None, str]] = {}
+
     # -- lifecycle ---------------------------------------------------------
 
     def _ensure_executor(self) -> ProcessPoolExecutor:
-        """Lazily instantiate the process pool."""
+        """Lazily instantiate the process pool and start the progress bridge."""
         if self._executor is None:
             logger.info(
                 "Starting ProcessPoolExecutor with %d workers", self.max_workers
             )
             self._executor = ProcessPoolExecutor(max_workers=self.max_workers)
+            self._start_progress_bridge()
         return self._executor
 
+    def _start_progress_bridge(self) -> None:
+        """Start the manager, queue, and drain thread if not already running."""
+        if self._progress_thread is not None and self._progress_thread.is_alive():
+            return
+        try:
+            self._manager = multiprocessing.Manager()
+            self._progress_queue = self._manager.Queue()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not start progress bridge: %s", exc)
+            self._progress_queue = None
+            return
+        self._progress_stop.clear()
+        self._progress_thread = threading.Thread(
+            target=self._drain_progress, name="ocr-progress-drain", daemon=True
+        )
+        self._progress_thread.start()
+
+    def _drain_progress(self) -> None:
+        """Background thread: dequeue progress events and dispatch to listeners."""
+        q = self._progress_queue
+        if q is None:
+            return
+        while not self._progress_stop.is_set():
+            try:
+                event = q.get(timeout=0.25)
+            except queue_mod.Empty:
+                continue
+            except (EOFError, OSError):
+                break
+            if not event:
+                continue
+            try:
+                tracking_id, current, total, stage = event
+            except Exception:  # noqa: BLE001
+                logger.debug("Malformed progress event: %r", event)
+                continue
+            with self._progress_lock:
+                listener = self._progress_listeners.get(tracking_id)
+            if listener is None:
+                continue
+            on_progress, job_id = listener
+            if on_progress is None:
+                continue
+            try:
+                on_progress(job_id, int(current), int(total), str(stage))
+            except Exception:  # noqa: BLE001
+                logger.debug("on_progress dispatch raised", exc_info=True)
+
     def shutdown(self, wait: bool = True) -> None:
-        """Shut down the worker pool.
+        """Shut down the worker pool and progress bridge.
 
         Args:
             wait: Whether to block until running jobs finish.
@@ -203,6 +299,20 @@ class ParallelProcessor:
             logger.info("Shutting down ParallelProcessor (wait=%s)", wait)
             self._executor.shutdown(wait=wait)
             self._executor = None
+        # Stop drain thread
+        self._progress_stop.set()
+        if self._progress_thread is not None:
+            self._progress_thread.join(timeout=2.0)
+            self._progress_thread = None
+        if self._manager is not None:
+            try:
+                self._manager.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
+            self._manager = None
+        self._progress_queue = None
+        with self._progress_lock:
+            self._progress_listeners.clear()
 
     # -- submission --------------------------------------------------------
 
@@ -212,31 +322,42 @@ class ParallelProcessor:
         on_progress: OnProgress | None = None,
         on_complete: OnComplete | None = None,
         on_error: OnError | None = None,
+        job_id: str | None = None,
     ) -> Future:
         """Submit one job to the pool.
 
         Args:
             job: Fully populated job config.
-            on_progress: Optional ``(input_path, current, total)`` callback.
-                Fires once at submission (0/1) and once on completion (1/1).
-                Per-page progress is NOT bridged across processes.
-            on_complete: Callback receiving the :class:`JobResult`.
+            on_progress: Optional ``(job_id, current, total, stage)`` callback.
+                Fires for every per-page progress event emitted by the pipeline
+                inside the worker, marshaled through a manager Queue and a
+                background drain thread. Callers MUST assume it executes on a
+                non-main, non-UI thread.
+            on_complete: Callback receiving the final :class:`JobResult`.
             on_error: Callback receiving any exception raised by the worker.
+            job_id: Opaque identifier passed through to ``on_progress``.
+                Defaults to a random UUID if not provided.
 
         Returns:
             The underlying :class:`concurrent.futures.Future`.
         """
         executor = self._ensure_executor()
 
-        if on_progress is not None:
-            try:
-                on_progress(job.input_path, 0, 1)
-            except Exception:  # noqa: BLE001
-                logger.debug("on_progress(start) raised", exc_info=True)
+        tracking_id = uuid.uuid4().hex
+        exposed_id = job_id or tracking_id
 
-        future = executor.submit(_worker_run_job, job_to_dict(job))
+        with self._progress_lock:
+            self._progress_listeners[tracking_id] = (on_progress, exposed_id)
+
+        future = executor.submit(
+            _worker_run_job, job_to_dict(job), self._progress_queue, tracking_id
+        )
 
         def _done(fut: Future) -> None:
+            # Drop listener so the drain thread doesn't accumulate stale refs
+            with self._progress_lock:
+                self._progress_listeners.pop(tracking_id, None)
+
             try:
                 result_dict = fut.result()
             except BaseException as exc:  # noqa: BLE001
@@ -258,11 +379,6 @@ class ParallelProcessor:
                         logger.debug("on_error raised", exc_info=True)
                 return
 
-            if on_progress is not None:
-                try:
-                    on_progress(job.input_path, 1, 1)
-                except Exception:  # noqa: BLE001
-                    logger.debug("on_progress(end) raised", exc_info=True)
             if on_complete is not None:
                 try:
                     on_complete(result)

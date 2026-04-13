@@ -11,6 +11,11 @@ def main() -> int:
 
     app, window = create_application(sys.argv)
     window.show()
+    # Offer to resume any jobs abandoned by a previous crash / hard shutdown.
+    # Defer so the main window is visible first.
+    from PySide6.QtCore import QTimer
+
+    QTimer.singleShot(50, window.prompt_recovery)
     return app.exec()
 
 
