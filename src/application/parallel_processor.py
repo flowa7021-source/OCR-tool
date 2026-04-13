@@ -228,6 +228,8 @@ class ParallelProcessor:
         self._progress_lock = threading.Lock()
         # tracking_id -> (on_progress, job_id_for_callback)
         self._progress_listeners: dict[str, tuple[OnProgress | None, str]] = {}
+        # job_id -> Future (for cancellation)
+        self._futures: dict[str, Future] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -352,11 +354,14 @@ class ParallelProcessor:
         future = executor.submit(
             _worker_run_job, job_to_dict(job), self._progress_queue, tracking_id
         )
+        with self._progress_lock:
+            self._futures[exposed_id] = future
 
         def _done(fut: Future) -> None:
             # Drop listener so the drain thread doesn't accumulate stale refs
             with self._progress_lock:
                 self._progress_listeners.pop(tracking_id, None)
+                self._futures.pop(exposed_id, None)
 
             try:
                 result_dict = fut.result()
@@ -391,6 +396,50 @@ class ParallelProcessor:
     def submit_all(self, jobs: list[OCRJobConfig]) -> list[Future]:
         """Submit a list of jobs. Returns a list of futures in the same order."""
         return [self.submit(job) for job in jobs]
+
+    # -- cancellation ------------------------------------------------------
+
+    def cancel_job(self, job_id: str) -> bool:
+        """Attempt to cancel a job by ``job_id``.
+
+        This only works for futures that have not yet started executing
+        (Python's ProcessPoolExecutor does not support killing running tasks
+        through Future.cancel). Callers should treat this as best-effort.
+
+        Returns:
+            ``True`` if the future transitioned to cancelled, ``False`` if it
+            was already running/finished or not found.
+        """
+        with self._progress_lock:
+            future = self._futures.get(job_id)
+        if future is None:
+            return False
+        cancelled = future.cancel()
+        if cancelled:
+            logger.info("Cancelled pending job %s", job_id)
+            with self._progress_lock:
+                self._futures.pop(job_id, None)
+        else:
+            logger.info("Could not cancel job %s (already running)", job_id)
+        return cancelled
+
+    def cancel_all(self) -> int:
+        """Attempt to cancel every pending job. Returns count actually cancelled."""
+        with self._progress_lock:
+            futures = list(self._futures.items())
+        n = 0
+        for job_id, fut in futures:
+            if fut.cancel():
+                n += 1
+                with self._progress_lock:
+                    self._futures.pop(job_id, None)
+        logger.info("Cancel-all removed %d pending job(s)", n)
+        return n
+
+    def active_job_count(self) -> int:
+        """Number of submitted jobs that are not yet resolved."""
+        with self._progress_lock:
+            return len(self._futures)
 
     # -- context manager ---------------------------------------------------
 

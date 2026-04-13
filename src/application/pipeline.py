@@ -41,6 +41,22 @@ from src.shared.types import JobStatus
 logger = logging.getLogger(__name__)
 
 
+class PipelineError(RuntimeError):
+    """Base class for pipeline-level failures surfaced to the UI."""
+
+
+class CorruptPdfError(PipelineError):
+    """Raised when PyMuPDF cannot parse the input PDF."""
+
+
+class EncryptedPdfError(PipelineError):
+    """Raised when the input PDF requires a password we do not have."""
+
+
+class EmptyPdfError(PipelineError):
+    """Raised when the input PDF reports zero pages."""
+
+
 ProgressCallback = Callable[[int, int, str], None]
 
 
@@ -203,6 +219,12 @@ class OCRPipeline:
             )
             return result
 
+        except (CorruptPdfError, EncryptedPdfError, EmptyPdfError) as exc:
+            logger.warning("Job %s aborted: %s", job_id, exc)
+            result.status = JobStatus.FAILED
+            result.error = str(exc)
+            result.total_time_sec = time.time() - started
+            return result
         except Exception as exc:  # noqa: BLE001 - top-level failure
             logger.exception("Job %s failed", job_id)
             result.status = JobStatus.FAILED
@@ -242,12 +264,41 @@ class OCRPipeline:
 
         Returns:
             List of per-page dicts ``{"page_number", "has_text"}``.
+
+        Raises:
+            EmptyPdfError: If the document reports zero pages.
+            EncryptedPdfError: If the document is password-protected and we
+                cannot authenticate with an empty password.
+            CorruptPdfError: If PyMuPDF fails to parse the file at all.
         """
         import fitz  # PyMuPDF
 
-        infos: list[dict] = []
-        doc = fitz.open(str(pdf_path))
         try:
+            doc = fitz.open(str(pdf_path))
+        except Exception as exc:  # noqa: BLE001 — PyMuPDF raises a variety
+            raise CorruptPdfError(
+                f"Не удалось открыть PDF (повреждён или неверный формат): {pdf_path}"
+            ) from exc
+
+        try:
+            # Encrypted PDFs: try empty password, otherwise bail out with a
+            # typed error. OCRmyPDF can also decrypt but would fail silently
+            # for a missing password.
+            if getattr(doc, "needs_pass", False):
+                ok = False
+                try:
+                    ok = bool(doc.authenticate(""))
+                except Exception:  # noqa: BLE001
+                    ok = False
+                if not ok:
+                    raise EncryptedPdfError(
+                        f"PDF защищён паролем и не может быть распознан без него: {pdf_path.name}"
+                    )
+
+            if doc.page_count == 0:
+                raise EmptyPdfError(f"PDF не содержит страниц: {pdf_path.name}")
+
+            infos: list[dict] = []
             for i in range(doc.page_count):
                 page = doc.load_page(i)
                 text = page.get_text("text") or ""
@@ -257,9 +308,9 @@ class OCRPipeline:
                         "has_text": bool(text.strip()),
                     }
                 )
+            return infos
         finally:
             doc.close()
-        return infos
 
     def _rasterize_page(
         self, pdf_path: Path, page_index: int, dpi: int

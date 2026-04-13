@@ -171,6 +171,20 @@ class MainWindow(QMainWindow):
         self.action_start.triggered.connect(self._on_start)
         tb.addAction(self.action_start)
 
+        self.action_pause = QAction(load_icon("pause"), "Пауза / Возобновить", self)
+        self.action_pause.setToolTip(
+            "Поставить на паузу следующие задания в очереди (запущенные дойдут до конца)"
+        )
+        self.action_pause.setShortcut(QKeySequence("Ctrl+P"))
+        self.action_pause.triggered.connect(self._on_toggle_pause)
+        tb.addAction(self.action_pause)
+
+        self.action_stop = QAction(load_icon("stop"), "Стоп", self)
+        self.action_stop.setToolTip("Отменить все ожидающие задания очереди")
+        self.action_stop.setShortcut(QKeySequence("Ctrl+."))
+        self.action_stop.triggered.connect(self._on_stop)
+        tb.addAction(self.action_stop)
+
         self.action_save = QAction(load_icon("save"), "Сохранить результат", self)
         self.action_save.setShortcut(QKeySequence.StandardKey.Save)
         self.action_save.triggered.connect(self._on_save)
@@ -237,15 +251,19 @@ class MainWindow(QMainWindow):
 
     def _build_statusbar(self) -> None:
         sb = self.statusBar()
+        self.status_queue_label = QLabel("Очередь: 0")
         self.status_profile_label = QLabel("Профиль: —")
         self.status_resource_label = QLabel("")
+        sb.addPermanentWidget(self.status_queue_label)
         sb.addPermanentWidget(self.status_profile_label)
         sb.addPermanentWidget(self.status_resource_label)
         self._resource_timer = QTimer(self)
         self._resource_timer.setInterval(2000)
         self._resource_timer.timeout.connect(self._update_resource_usage)
+        self._resource_timer.timeout.connect(self._update_queue_stats)
         self._resource_timer.start()
         self._update_resource_usage()
+        self._update_queue_stats()
 
     def _wire_signals(self) -> None:
         self.pdf_viewer.document_opened.connect(self._on_document_opened)
@@ -345,6 +363,54 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_NAME, "Сначала откройте PDF.")
             return
         self._enqueue_files([self.pdf_viewer.document_path])
+
+    def _on_toggle_pause(self) -> None:
+        """Toggle paused state for all PENDING jobs in the queue.
+
+        Already-running jobs are not affected — the process pool cannot
+        interrupt a worker mid-page safely. New submissions won't happen
+        while paused because QueueManager returns nothing from next_pending().
+        """
+        from src.shared.types import JobStatus
+
+        items = self._queue_manager.list_items()
+        pending = [i for i in items if i.status is JobStatus.PENDING]
+        paused = [i for i in items if i.status is JobStatus.PAUSED]
+        if pending:
+            for item in pending:
+                self._queue_manager.pause(item.job_id)
+            logger.info("Paused %d queued job(s)", len(pending))
+        elif paused:
+            for item in paused:
+                self._queue_manager.resume(item.job_id)
+                self._submit_job(item)
+            logger.info("Resumed %d paused job(s)", len(paused))
+
+    def _on_stop(self) -> None:
+        """Cancel every pending/running job we can reach."""
+        resp = QMessageBox.question(
+            self,
+            APP_NAME,
+            "Отменить все ожидающие задания очереди? "
+            "Уже запущенные дойдут до конца текущей страницы.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+
+        cancelled = 0
+        try:
+            cancelled = self._parallel_processor.cancel_all()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("cancel_all failed: %s", exc)
+
+        from src.shared.types import JobStatus
+
+        for item in self._queue_manager.list_items():
+            if item.status in (JobStatus.PENDING, JobStatus.PAUSED):
+                self._queue_manager.cancel(item.job_id)
+
+        self.statusBar().showMessage(f"Отменено заданий: {cancelled}", 3000)
 
     def _enqueue_files(self, paths: list[Path]) -> None:
         profile = self._current_profile_with_overrides()
@@ -668,6 +734,31 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_path)))
 
     # ------------------------------------------------------------ misc
+    def _update_queue_stats(self) -> None:
+        """Refresh the queue-summary label in the status bar."""
+        try:
+            from collections import Counter
+            from src.shared.types import JobStatus
+
+            counts = Counter(i.status for i in self._queue_manager.list_items())
+            total = sum(counts.values())
+            done = counts.get(JobStatus.COMPLETED, 0)
+            running = counts.get(JobStatus.RUNNING, 0)
+            pending = counts.get(JobStatus.PENDING, 0)
+            failed = counts.get(JobStatus.FAILED, 0)
+            parts = [f"Очередь: {done}/{total}"]
+            if running:
+                parts.append(f"▶ {running}")
+            if pending:
+                parts.append(f"⏳ {pending}")
+            if failed:
+                parts.append(f"❌ {failed}")
+            self.status_queue_label.setText(" | ".join(parts))
+            # Also refresh ProgressWidget's overall bar
+            self.progress_widget.set_overall(done, total)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("queue stats update failed: %s", exc)
+
     def _update_resource_usage(self) -> None:
         try:
             import psutil  # lazy
