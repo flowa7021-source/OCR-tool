@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -173,16 +172,38 @@ def import_config(
             try:
                 raw = zf.read(_SETTINGS_NAME).decode("utf-8")
                 data = json.loads(raw)
-                # Round-trip through AppSettings to run schema migrations.
-                from src.infrastructure.config_storage import AppSettings
-
-                settings = AppSettings.from_dict(data)
-                settings_storage.save(settings)
-                settings_restored = True
-            except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 raise BackupFormatError(
                     f"Повреждённый settings.json в архиве: {exc}"
                 ) from exc
+            if not isinstance(data, dict):
+                raise BackupFormatError(
+                    "settings.json в архиве должен быть JSON-объектом."
+                )
+            # AppSettings.from_dict is intentionally forgiving (falls back
+            # to defaults for missing keys) which is great for forward
+            # compat but terrible as a schema check — a ZIP with
+            # `{"hello": "world"}` would quietly wipe the user's real
+            # settings with a default-valued AppSettings. Require at
+            # least one recognised AppSettings field before we trust the
+            # payload enough to overwrite the on-disk file.
+            from src.infrastructure.config_storage import AppSettings
+
+            known_fields = set(AppSettings().to_dict().keys())
+            if not known_fields.intersection(data.keys()):
+                raise BackupFormatError(
+                    "settings.json в архиве не содержит ни одного "
+                    "распознаваемого поля AppSettings — похоже, это не "
+                    "наш бэкап."
+                )
+            try:
+                settings = AppSettings.from_dict(data)
+            except (TypeError, ValueError) as exc:
+                raise BackupFormatError(
+                    f"Не удалось распарсить settings.json: {exc}"
+                ) from exc
+            settings_storage.save(settings)
+            settings_restored = True
 
         added: list[str] = []
         overwritten: list[str] = []
@@ -223,11 +244,3 @@ def import_config(
         profiles_overwritten=overwritten,
         schema_version=schema,
     )
-
-
-def _rm_tree_best_effort(path: Path) -> None:
-    """Utility used in rollback paths. Swallows errors."""
-    import contextlib
-
-    with contextlib.suppress(Exception):
-        shutil.rmtree(path, ignore_errors=True)

@@ -30,6 +30,7 @@ from src.core.models import (
     OCRJobConfig,
     PageResult,
 )
+from src.core.text_postprocessor import TextPostprocessor
 from src.infrastructure.file_utils import create_temp_workdir
 from src.infrastructure.tesseract_wrapper import TesseractWrapper
 from src.shared.types import JobStatus
@@ -72,7 +73,7 @@ class OCRPipeline:
     def __init__(
         self,
         preprocessor: ImagePreprocessor,
-        postprocessor: object,
+        postprocessor: TextPostprocessor | None,
         tesseract: TesseractWrapper,
         progress_callback: ProgressCallback | None = None,
         compute_confidence: bool = True,
@@ -150,9 +151,16 @@ class OCRPipeline:
             # PDF is measured in seconds rather than hours.
             max_pages = int(getattr(job.profile.ocr, "max_pages", 0) or 0)
             if max_pages > 0 and full_page_count > max_pages:
-                logger.info(
-                    "Job %s: preview mode — processing first %d of %d pages",
-                    job_id, max_pages, full_page_count,
+                # WARNING, not INFO: this is the only signal CLI users get
+                # that a 500-page scan is being silently truncated to
+                # `max_pages`. The GUI also shows a preflight QMessageBox,
+                # but the CLI defaults to logging.WARNING and silent data
+                # loss is worse than a little extra noise.
+                logger.warning(
+                    "Job %s: preview mode — processing first %d of %d pages "
+                    "(profile has max_pages=%d). Set max_pages=0 in the "
+                    "profile to disable the limit.",
+                    job_id, max_pages, full_page_count, max_pages,
                 )
                 page_infos = page_infos[:max_pages]
             total_pages = len(page_infos)
@@ -536,7 +544,7 @@ class OCRPipeline:
         if self.postprocessor is None or not text:
             return text
         try:
-            return self.postprocessor.process(text, cfg)  # type: ignore[attr-defined]
+            return self.postprocessor.process(text, cfg)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Postprocess failed: %s", exc)
             return text

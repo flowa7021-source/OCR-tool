@@ -1203,11 +1203,23 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Refresh the profile combo with restored entries.
+        # Refresh the profile combo with restored entries. This is the
+        # user-visible confirmation that the new profiles actually show
+        # up in the dropdown, so a failure here is worth surfacing rather
+        # than hiding in the debug log.
         try:
             self._load_profiles_to_combobox()
-        except Exception:  # noqa: BLE001
-            logger.debug("profile combo reload after import failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Profile combo reload after import failed: %s", exc)
+            QMessageBox.warning(
+                self,
+                APP_NAME,
+                (
+                    "Импорт прошёл, но обновить список профилей не удалось. "
+                    "Перезапустите приложение, чтобы увидеть новые профили.\n\n"
+                    f"{exc}"
+                ),
+            )
 
         # Re-apply the (possibly new) theme immediately.
         if result.settings_restored:

@@ -54,6 +54,27 @@ on:
         options:
           - "true"
           - "false"
+  # Allow release.yml (and potentially other orchestrators) to reuse this
+  # pipeline without duplicating 400 lines of build steps. Outputs the name
+  # of the artifact so callers can download it directly.
+  workflow_call:
+    inputs:
+      tesseract_version:
+        required: false
+        type: string
+        default: "v5.5.0.20241111"
+      installer_version:
+        required: false
+        type: string
+        default: ""
+      with_htr:
+        required: false
+        type: string
+        default: "true"
+    outputs:
+      installer_artifact:
+        description: "Name of the uploaded installer artifact"
+        value: ${{ jobs.build.outputs.installer_artifact }}
 
 concurrency:
   group: build-installer-${{ github.ref }}
@@ -68,9 +89,11 @@ jobs:
   build:
     name: Build installer (Windows x64)
     runs-on: windows-latest
+    outputs:
+      installer_artifact: OCRStudio-Installer-${{ steps.meta.outputs.version }}
 
     env:
-      TESSERACT_TAG: ${{ github.event.inputs.tesseract_version || 'v5.5.0.20241111' }}
+      TESSERACT_TAG: ${{ inputs.tesseract_version || github.event.inputs.tesseract_version || 'v5.5.0.20241111' }}
       PYTHON_VERSION: "3.11"
 
     steps:

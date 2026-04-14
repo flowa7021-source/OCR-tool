@@ -2,25 +2,24 @@ name: Release
 
 # Tag-gated release orchestration.
 #
-# When a tag matching `v*` is pushed (e.g. `v1.2.0`):
+# When a tag matching `v*` is pushed:
 #
-#   1. We re-run the full test suite one more time as a final gate.
-#   2. We call the existing Build Windows Installer workflow, so tag
-#      releases get exactly the same artefacts as CI main-line builds —
-#      no hand-assembled "release-only" pipeline that can drift.
-#   3. If a signing certificate is configured via the
-#      `SIGNING_CERTIFICATE_PFX_BASE64` + `SIGNING_CERTIFICATE_PASSWORD`
-#      secrets, we sign the installer with signtool; otherwise we log a
-#      warning and publish unsigned (SmartScreen will show
-#      "unknown publisher" — acceptable for internal / beta releases).
-#   4. A GitHub Release is created with:
-#        - the installer (+ .sha256),
-#        - auto-generated release notes from commit messages,
-#        - a link to the signed checksum file when signing happened.
+#   1. `gate-tests`: re-run the full unit + integration test suite on
+#      the tagged commit (belt and braces — CI on the same ref likely
+#      already passed but we don't want to gamble).
+#   2. `build`: invoke `.github/workflows/build-installer.yml` as a
+#      reusable workflow (`workflow_call`), so release artefacts are
+#      produced by the same pipeline as normal CI builds.
+#   3. `sign`: if `SIGNING_CERTIFICATE_PFX_BASE64` +
+#      `SIGNING_CERTIFICATE_PASSWORD` secrets are configured, signtool
+#      signs the installer with a SHA256 timestamp. Without the
+#      secrets we publish unsigned with a clear warning in the log.
+#   4. `publish`: create a GitHub Release with auto-generated notes,
+#      attach the installer and the (possibly regenerated) .sha256.
 #
-# Manual runs via workflow_dispatch allow dry-run publishing without
-# pushing a tag — useful to validate the signing flow before cutting
-# a real release.
+# Manual `workflow_dispatch` with `dry_run=true` builds + signs but
+# stops short of publishing — lets us validate the signing pipeline
+# without cutting a real release.
 
 on:
   push:
@@ -38,11 +37,11 @@ on:
           - "true"
 
 permissions:
-  contents: write  # create releases
+  contents: write
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false  # never interrupt a signed build mid-way
+  cancel-in-progress: false
 
 jobs:
   gate-tests:
@@ -73,76 +72,44 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: pytest tests/ --tb=short -q
 
+  # Reuse the canonical build workflow — no duplicated PyInstaller logic.
   build:
-    name: Build installer on Windows
+    name: Build installer via reusable workflow
     needs: gate-tests
-    runs-on: windows-latest
-    outputs:
-      installer-path: ${{ steps.locate.outputs.installer_path }}
-      installer-name: ${{ steps.locate.outputs.installer_name }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # release notes need the commit range
-
-      # Re-use the logic from build-installer.yml by calling its script
-      # entry points rather than duplicating 200+ lines. This keeps the
-      # release pipeline in lockstep with the main-line CI build.
-      - name: Delegate to build-installer workflow steps
-        shell: pwsh
-        run: |
-          Write-Host "The release pipeline re-runs the same steps as"
-          Write-Host ".github/workflows/build-installer.yml — please use"
-          Write-Host "'Run workflow' on that file when manually rebuilding."
-          Write-Host "For tag pushes, GitHub automatically triggers both"
-          Write-Host "this release workflow AND the build-installer workflow."
-          Write-Host "This job currently exists as a placeholder so the"
-          Write-Host "gate-tests -> sign -> publish chain stays wired."
-
-      - name: Locate produced installer
-        id: locate
-        shell: pwsh
-        run: |
-          # build-installer.yml drops artefacts under dist/; in the release
-          # orchestration flow we wait for a uploaded artefact from that
-          # parallel run. For the inline script we synthesise a placeholder
-          # to keep downstream steps declarative.
-          $path = "dist/OCR-Studio-Setup-${{ github.ref_name }}.exe"
-          "installer_path=$path"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "installer_name=$(Split-Path -Leaf $path)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+    uses: ./.github/workflows/build-installer.yml
+    with:
+      with_htr: "true"
+    secrets: inherit
 
   sign:
     name: Sign installer (optional)
     needs: build
     runs-on: windows-latest
+    outputs:
+      signed: ${{ steps.sign.outputs.signed }}
     env:
       PFX_B64: ${{ secrets.SIGNING_CERTIFICATE_PFX_BASE64 }}
       PFX_PASSWORD: ${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}
-    outputs:
-      signed: ${{ steps.sign.outputs.signed }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Download installer artefact
-        # Fed by build-installer.yml in the normal tag-push flow.
+      - name: Download installer artefact from build job
         uses: actions/download-artifact@v4
         with:
-          name: installer
+          name: ${{ needs.build.outputs.installer_artifact }}
           path: dist/
-        continue-on-error: true
 
-      - name: Decide whether signing secrets are present
+      - name: Detect signing secrets
         id: secrets
         shell: pwsh
         run: |
           if ([string]::IsNullOrEmpty($env:PFX_B64) -or [string]::IsNullOrEmpty($env:PFX_PASSWORD)) {
-            Write-Warning "SIGNING_CERTIFICATE_PFX_BASE64 / *_PASSWORD not set."
-            Write-Warning "Installer will be published unsigned (SmartScreen warning applies)."
+            Write-Warning "Signing secrets not configured; installer will be published UNSIGNED."
+            Write-Warning "Set SIGNING_CERTIFICATE_PFX_BASE64 + SIGNING_CERTIFICATE_PASSWORD to sign."
             "have_cert=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           } else {
             "have_cert=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }
 
-      - name: Decode and install signing certificate
+      - name: Decode signing certificate
         if: steps.secrets.outputs.have_cert == 'true'
         shell: pwsh
         run: |
@@ -151,19 +118,16 @@ jobs:
           [IO.File]::WriteAllBytes($pfx, $bytes)
           "PFX_PATH=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Sign installer with signtool
+      - name: Sign installer
         id: sign
         if: steps.secrets.outputs.have_cert == 'true'
         shell: pwsh
         run: |
-          $installer = Get-ChildItem -Path dist/*.exe | Select-Object -First 1
+          $installer = Get-ChildItem -Path dist/*.exe -Recurse | Select-Object -First 1
           if (-not $installer) {
-            Write-Error "No installer found under dist/"
+            Write-Error "No installer .exe found under dist/"
             exit 1
           }
-          # Dual-sign (SHA1 for Win7 legacy, SHA256 for current) against a
-          # public timestamp authority so signatures keep verifying after
-          # the certificate expires.
           & signtool.exe sign `
             /fd SHA256 `
             /tr http://timestamp.digicert.com `
@@ -172,29 +136,24 @@ jobs:
             /p $env:PFX_PASSWORD `
             $installer.FullName
           & signtool.exe verify /pa /v $installer.FullName
+          # Regenerate checksum — signing mutates the file bytes.
+          $hash = (Get-FileHash -Algorithm SHA256 $installer.FullName).Hash.ToLower()
+          "$hash  $($installer.Name)" | Out-File -Encoding ascii "$($installer.FullName).sha256"
           "signed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Report signing status
+      - name: Mark as unsigned
         if: steps.secrets.outputs.have_cert != 'true'
         shell: pwsh
         run: |
-          Write-Host "::warning::Installer published UNSIGNED (no signing secrets)."
+          Write-Host "::warning::Installer published UNSIGNED."
           "signed=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Regenerate SHA-256 (in case signing changed the file)
-        if: steps.secrets.outputs.have_cert == 'true'
-        shell: pwsh
-        run: |
-          Get-ChildItem -Path dist/*.exe | ForEach-Object {
-            $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()
-            "$hash  $($_.Name)" | Out-File -Encoding ascii "$($_.FullName).sha256"
-          }
-
-      - name: Upload signed artefact
+      - name: Upload final release artefact
         uses: actions/upload-artifact@v4
         with:
-          name: installer-signed
-          path: dist/*
+          name: installer-final
+          path: dist/**/*
+          if-no-files-found: error
 
   publish:
     name: Publish GitHub Release
@@ -212,25 +171,30 @@ jobs:
       - name: Download final installer
         uses: actions/download-artifact@v4
         with:
-          name: installer-signed
+          name: installer-final
           path: dist/
 
-      - name: Create GitHub Release with auto-generated notes
+      - name: Flatten dist directory for release attachments
+        run: |
+          mkdir -p flat
+          find dist -type f \( -name "*.exe" -o -name "*.sha256" \) -exec cp {} flat/ \;
+          ls -la flat/
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.exe
-            dist/*.sha256
+            flat/*.exe
+            flat/*.sha256
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true
           body: |
             Installer built from tag `${{ github.ref_name }}`.
 
-            Signing status: see workflow log (signed if
-            `SIGNING_CERTIFICATE_PFX_BASE64` was configured).
+            Signing status: **${{ needs.sign.outputs.signed == 'true' && 'signed (SHA256)' || 'unsigned — SmartScreen warning applies' }}**.
 
-            Verify the download with the accompanying `.sha256` file:
+            Verify the download:
 
             ```powershell
             Get-FileHash OCR-Studio-Setup-*.exe -Algorithm SHA256
