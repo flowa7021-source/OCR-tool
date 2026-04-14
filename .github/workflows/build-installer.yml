@@ -123,20 +123,86 @@ jobs:
       # ------------------------------------------------------------------
       # Tesseract 5.5.0 + tessdata_best
       # ------------------------------------------------------------------
+      - name: Resolve Tesseract download URL via GitHub API
+        id: tess-url
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # UB Mannheim tags their releases inconsistently (some with `v`
+          # prefix, some without). Using the GitHub API saves us from guessing
+          # the URL and gracefully falls back to the latest release if the
+          # requested tag doesn't exist.
+          $wanted = "${{ env.TESSERACT_TAG }}"
+          $headers = @{ "User-Agent" = "ocr-studio-ci" }
+          if ($env:GH_TOKEN) { $headers["Authorization"] = "Bearer $env:GH_TOKEN" }
+
+          function Invoke-GhApi($uri) {
+            $tries = 0
+            while ($true) {
+              try {
+                return Invoke-RestMethod -Uri $uri -Headers $headers -UseBasicParsing
+              } catch {
+                $tries++
+                if ($tries -ge 4) { throw }
+                Write-Warning "API call failed (attempt $tries): $($_.Exception.Message)"
+                Start-Sleep -Seconds (2 * $tries)
+              }
+            }
+          }
+
+          $release = $null
+          if ($wanted) {
+            $candidates = @($wanted, $wanted.TrimStart('v'), "v$($wanted.TrimStart('v'))") | Select-Object -Unique
+            foreach ($tag in $candidates) {
+              try {
+                $release = Invoke-GhApi "https://api.github.com/repos/UB-Mannheim/tesseract/releases/tags/$tag"
+                Write-Host "Matched release by tag: $($release.tag_name)"
+                break
+              } catch {
+                Write-Host "Tag '$tag' not found, trying next candidate..."
+              }
+            }
+          }
+
+          if (-not $release) {
+            Write-Host "Falling back to the latest UB Mannheim release"
+            # /releases/latest skips prereleases; /releases returns all in order.
+            try {
+              $release = Invoke-GhApi "https://api.github.com/repos/UB-Mannheim/tesseract/releases/latest"
+            } catch {
+              $list = Invoke-GhApi "https://api.github.com/repos/UB-Mannheim/tesseract/releases?per_page=10"
+              $release = $list | Select-Object -First 1
+            }
+          }
+
+          $asset = $release.assets | Where-Object {
+            $_.name -like "tesseract-ocr-w64-setup-*.exe"
+          } | Select-Object -First 1
+          if (-not $asset) {
+            throw "No Windows installer asset found in release '$($release.tag_name)'"
+          }
+
+          Write-Host "Release: $($release.tag_name)"
+          Write-Host "Asset:   $($asset.name)  ($([math]::Round($asset.size / 1MB, 1)) MB)"
+          Write-Host "URL:     $($asset.browser_download_url)"
+
+          "tag=$($release.tag_name)"        | Out-File -FilePath $Env:GITHUB_OUTPUT -Append -Encoding utf8
+          "asset_name=$($asset.name)"       | Out-File -FilePath $Env:GITHUB_OUTPUT -Append -Encoding utf8
+          "download_url=$($asset.browser_download_url)" | Out-File -FilePath $Env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Cache Tesseract installer
         id: cache-tess
         uses: actions/cache@v4
         with:
           path: tesseract_dl\tesseract-setup.exe
-          key: tesseract-installer-${{ env.TESSERACT_TAG }}
+          key: tesseract-installer-${{ steps.tess-url.outputs.asset_name }}
 
       - name: Download Tesseract (UB Mannheim)
         if: steps.cache-tess.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          $tag = "${{ env.TESSERACT_TAG }}"
-          $noV = $tag.TrimStart('v')
-          $url = "https://github.com/UB-Mannheim/tesseract/releases/download/$tag/tesseract-ocr-w64-setup-$noV.exe"
+          $url = "${{ steps.tess-url.outputs.download_url }}"
           Write-Host "Downloading $url"
           New-Item -ItemType Directory -Force -Path tesseract_dl | Out-Null
           $tries = 0
@@ -147,12 +213,16 @@ jobs:
             } catch {
               $tries++
               if ($tries -ge 4) { throw }
+              Write-Warning "Download attempt $tries failed: $($_.Exception.Message)"
               Start-Sleep -Seconds (2 * $tries)
             }
           }
-          if (-not (Test-Path "tesseract_dl\tesseract-setup.exe")) {
-            throw "Failed to download Tesseract installer"
+          $file = Get-Item tesseract_dl\tesseract-setup.exe
+          if ($file.Length -lt 10MB) {
+            Remove-Item $file.FullName -Force
+            throw "Downloaded file is suspiciously small ($($file.Length) bytes) — probably a GitHub 404 page"
           }
+          Write-Host "Downloaded $([math]::Round($file.Length / 1MB, 1)) MB"
 
       - name: Install Tesseract silently
         shell: pwsh
@@ -200,24 +270,43 @@ jobs:
         run: |
           $dst = "${{ github.workspace }}\resources\tessdata"
           New-Item -ItemType Directory -Force -Path $dst | Out-Null
-          $base = "https://github.com/tesseract-ocr/tessdata_best/raw/main"
+
+          # Try the raw GitHub URL first; if that somehow 404s, fall back to
+          # the `media` endpoint on the API which is stable across repo moves.
+          $mirrors = @(
+            "https://github.com/tesseract-ocr/tessdata_best/raw/main",
+            "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main"
+          )
+
           foreach ($lang in @("rus", "eng", "osd")) {
-            $url = "$base/$lang.traineddata"
             $out = Join-Path $dst "$lang.traineddata"
-            Write-Host "Downloading $url"
-            $tries = 0
-            while ($tries -lt 4) {
-              try {
-                Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
-                break
-              } catch {
-                $tries++
-                if ($tries -ge 4) { throw }
-                Start-Sleep -Seconds (2 * $tries)
+            $success = $false
+            foreach ($base in $mirrors) {
+              $url = "$base/$lang.traineddata"
+              Write-Host "Downloading $url"
+              $tries = 0
+              while ($tries -lt 3) {
+                try {
+                  Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+                  $size = (Get-Item $out).Length
+                  if ($size -lt 1000000) {
+                    Write-Warning "Downloaded $lang.traineddata is too small ($size bytes); trying next mirror"
+                    Remove-Item $out -Force -ErrorAction SilentlyContinue
+                    break
+                  }
+                  $success = $true
+                  break
+                } catch {
+                  $tries++
+                  Write-Warning "Attempt $tries for $lang from $base failed: $($_.Exception.Message)"
+                  if ($tries -ge 3) { break }
+                  Start-Sleep -Seconds (2 * $tries)
+                }
               }
+              if ($success) { break }
             }
-            if ((Get-Item $out).Length -lt 1000000) {
-              throw "$lang.traineddata download is suspiciously small; aborting."
+            if (-not $success) {
+              throw "Failed to download $lang.traineddata from any mirror"
             }
           }
           Get-ChildItem $dst | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,2)}}
