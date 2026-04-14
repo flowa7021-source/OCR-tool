@@ -476,6 +476,34 @@ jobs:
         run: python .github/scripts/generate_ico.py
 
       # ------------------------------------------------------------------
+      # Pre-download GOT-OCR 2.0 weights for bundling
+      # ------------------------------------------------------------------
+      # When HTR is enabled we ship the ~580 MB weights inside the
+      # installer so end-users don't need a second network trip after
+      # install. The download script reuses the same manifest as the
+      # runtime downloader (src/infrastructure/model_manager.py) so
+      # neither can drift.
+      - name: Pre-download GOT-OCR 2.0 weights (bundled install)
+        if: steps.htr_flag.outputs.with_htr == 'true'
+        shell: pwsh
+        timeout-minutes: 15
+        run: python .github/scripts/download_got_ocr2.py
+
+      - name: Verify bundled GOT-OCR 2.0 payload
+        if: steps.htr_flag.outputs.with_htr == 'true'
+        shell: pwsh
+        run: |
+          $dir = "resources/models/got_ocr2"
+          if (-not (Test-Path $dir)) {
+            throw "Expected $dir after download step"
+          }
+          $safetensors = Get-ChildItem "$dir/model.safetensors" -ErrorAction SilentlyContinue
+          if (-not $safetensors) {
+            throw "model.safetensors missing — bundled HTR install would be broken"
+          }
+          Write-Host ("GOT-OCR 2.0 bundled: model.safetensors = {0:N1} MB" -f ($safetensors.Length / 1MB))
+
+      # ------------------------------------------------------------------
       # Freeze with PyInstaller
       # ------------------------------------------------------------------
       - name: Run PyInstaller (build.py)
@@ -500,19 +528,21 @@ jobs:
           }
           # PyInstaller 6.x --onedir bundles data under _internal\; fallback to top-level on older versions.
           $searchRoots = @("dist\OCRStudio\_internal", "dist\OCRStudio")
-          $tessOk = $false; $dataOk = $false; $torchOk = $false; $transformersOk = $false
+          $tessOk = $false; $dataOk = $false; $torchOk = $false; $transformersOk = $false; $weightsOk = $false
           foreach ($root in $searchRoots) {
             if (Test-Path "$root\resources\tesseract\tesseract.exe") { $tessOk = $true }
             if (Test-Path "$root\resources\tessdata\rus.traineddata") { $dataOk = $true }
             if (Test-Path "$root\torch") { $torchOk = $true }
             if (Test-Path "$root\transformers") { $transformersOk = $true }
+            if (Test-Path "$root\resources\models\got_ocr2\model.safetensors") { $weightsOk = $true }
           }
           if (-not $tessOk) { throw "Bundled Tesseract missing from PyInstaller output" }
           if (-not $dataOk) { throw "Bundled tessdata (rus) missing from PyInstaller output" }
           if ("${{ steps.htr_flag.outputs.with_htr }}" -eq "true") {
             if (-not $torchOk) { throw "Bundled torch missing from PyInstaller output (--with-htr was set)" }
             if (-not $transformersOk) { throw "Bundled transformers missing from PyInstaller output (--with-htr was set)" }
-            Write-Host "HTR bundle: torch + transformers present"
+            if (-not $weightsOk) { throw "Bundled GOT-OCR 2.0 weights missing from PyInstaller output — run /.github/scripts/download_got_ocr2.py before PyInstaller" }
+            Write-Host "HTR bundle: torch + transformers + GOT-OCR 2.0 weights present"
           }
           $size = (Get-ChildItem dist\OCRStudio -Recurse | Measure-Object -Property Length -Sum).Sum
           Write-Host ("Frozen bundle size: {0:N0} bytes ({1:N1} MB)" -f $size, ($size/1MB))
@@ -580,13 +610,15 @@ jobs:
           # 1. Size sanity. Lower bounds after Inno Setup's lzma2/ultra64
           #    compression:
           #      - no-HTR bundle (Tesseract + tessdata + Python + Qt) ≈ 80 MB
-          #      - full HTR bundle (+ torch + transformers) ≈ 300-450 MB
-          #        (uncompressed ~2.5 GB; binary .so/.dll compress modestly).
-          #    Thresholds are conservative — a silent HTR drop would shrink
-          #    the installer back to ~80 MB, still well below 250 MB.
-          #    HTR content presence is also verified pre-compression at the
+          #      - HTR bundle WITH pre-downloaded GOT-OCR 2.0 weights
+          #        (~580 MB of safetensors) plus torch + transformers
+          #        ≈ 700-900 MB compressed. Weights are already
+          #        encrypted/compressed so lzma2 gains are modest.
+          #    Thresholds are conservative — a silent content drop
+          #    shrinks the installer well below these floors.
+          #    The individual presence check ran earlier in the
           #    "Verify HTR bundle" step, so this is a secondary net.
-          $minMB = if ("${{ steps.htr_flag.outputs.with_htr }}" -eq "true") { 250 } else { 80 }
+          $minMB = if ("${{ steps.htr_flag.outputs.with_htr }}" -eq "true") { 600 } else { 80 }
           if ($installer.Length -lt ($minMB * 1MB)) {
             throw "Installer is suspiciously small ($sizeMB MB, expected >= $minMB MB) — bundled assets likely missing"
           }

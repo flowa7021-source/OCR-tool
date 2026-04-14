@@ -30,8 +30,11 @@ class TestInstallerSizeFloor:
     # point is to NOT be a false-positive gate.
     _NO_HTR_OBSERVED_MIN_MB = 80      # no-HTR build floor
     _NO_HTR_OBSERVED_MAX_MB = 120     # no-HTR build ceiling
-    _HTR_OBSERVED_MIN_MB = 300        # HTR build floor (observed 357.7 MB)
-    _HTR_OBSERVED_MAX_MB = 500        # HTR build ceiling
+    # HTR build now bundles ~580 MB of GOT-OCR 2.0 safetensors +
+    # torch + transformers. Safetensors don't compress much, so the
+    # compressed installer lands at ~700-900 MB.
+    _HTR_OBSERVED_MIN_MB = 700        # HTR build floor
+    _HTR_OBSERVED_MAX_MB = 1000       # HTR build ceiling
 
     def test_minmb_ternary_exists(self) -> None:
         """The size check must keep distinct floors for HTR vs no-HTR."""

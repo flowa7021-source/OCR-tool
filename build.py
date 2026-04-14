@@ -140,6 +140,20 @@ def build_pyinstaller(onefile: bool = False, with_htr: bool = False) -> int:
             ]
         )
 
+        # Bundle pre-downloaded GOT-OCR 2.0 weights if the CI step
+        # (".github/scripts/download_got_ocr2.py") has populated the
+        # tree. Users get handwriting OCR out-of-the-box instead of
+        # having to fetch ~580 MB from HuggingFace after install.
+        # Absent in typical source checkouts → skipped silently.
+        bundled_models = PROJECT_ROOT / "resources" / "models"
+        if (bundled_models / "got_ocr2").is_dir():
+            args.append(
+                f"--add-data=resources/models{sep}resources/models"
+            )
+            print(
+                f"[build] bundling GOT-OCR 2.0 weights from {bundled_models}"
+            )
+
     # Attach Windows .ico if it was generated/placed before the build.
     ico = PROJECT_ROOT / "resources" / "icons" / "app.ico"
     if ico.exists():

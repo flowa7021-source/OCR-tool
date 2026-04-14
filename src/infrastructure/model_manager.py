@@ -119,9 +119,22 @@ class ModelManager:
     #: don't hammer the disk.
     AVAILABILITY_TTL_SEC: float = 5.0
 
-    def __init__(self, models_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        models_dir: Path | None = None,
+        bundled_dir: Path | None = None,
+    ) -> None:
         self.models_dir = Path(models_dir or MODELS_DIR)
         self.models_dir.mkdir(parents=True, exist_ok=True)
+        # Read-only fallback populated by the installer. See
+        # BUNDLED_MODELS_DIR in src/shared/constants.py — it's under the
+        # app's resources/ tree when running from a PyInstaller build,
+        # and usually empty in source checkouts.
+        if bundled_dir is None:
+            from src.shared.constants import BUNDLED_MODELS_DIR
+
+            bundled_dir = BUNDLED_MODELS_DIR
+        self.bundled_dir = Path(bundled_dir)
         # Per-model availability cache: model_id -> (monotonic_time, result)
         self._availability_cache: dict[str, tuple[float, bool]] = {}
 
@@ -134,8 +147,31 @@ class ModelManager:
             raise KeyError(f"Unknown model id: {model_id}") from exc
 
     def model_dir(self, model_id: str) -> Path:
-        """Return the directory where ``model_id``'s files live."""
-        return self.models_dir / model_id
+        """Return the directory where ``model_id``'s files live.
+
+        Prefers the user-writable copy at :attr:`models_dir` if every
+        file from the manifest is present, otherwise falls back to the
+        read-only bundled copy at :attr:`bundled_dir`. This lets the
+        installer ship weights under ``resources/models/<id>/`` while
+        still allowing users to re-download or override them later.
+        """
+        user_copy = self.models_dir / model_id
+        bundled_copy = self.bundled_dir / model_id
+        try:
+            spec = self.spec_for(model_id)
+        except KeyError:
+            return user_copy
+        if user_copy.is_dir() and all(
+            (user_copy / f.name).is_file() for f in spec.files
+        ):
+            return user_copy
+        if bundled_copy.is_dir() and all(
+            (bundled_copy / f.name).is_file() for f in spec.files
+        ):
+            return bundled_copy
+        # Neither copy is complete — default to the user dir so a
+        # subsequent download lands there.
+        return user_copy
 
     # ----------------------------------------------------------- presence
     def is_available(self, model_id: str) -> bool:
@@ -157,6 +193,10 @@ class ModelManager:
         except KeyError:
             self._availability_cache[model_id] = (now, False)
             return False
+        # A model is "available" if EITHER the user-writable location
+        # has all files (fresh download) OR the bundled location does
+        # (shipped with the installer). model_dir() returns whichever
+        # is complete, so we just ask there.
         target = self.model_dir(model_id)
         if not target.is_dir():
             result = False
