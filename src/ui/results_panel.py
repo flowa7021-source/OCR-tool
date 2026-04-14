@@ -7,7 +7,6 @@ navigate pages, inspect low-confidence words and request exports.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -205,12 +204,3 @@ class ResultsPanel(QWidget):
             Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow
         )
 
-    # Typing helpers (unused but documented for API consumers).
-    def _emit_export(self, fmt: ExportFormat, path: Path | None) -> None:
-        """Manually trigger an export request.
-
-        Args:
-            fmt: Target export format.
-            path: Optional target path; ``None`` prompts the user.
-        """
-        self.export_requested.emit(fmt, path)

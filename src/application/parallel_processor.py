@@ -23,7 +23,6 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import asdict
-from pathlib import Path
 from typing import Any
 
 from src.core.models import JobResult, OCRJobConfig, PageResult, ProfileData
@@ -459,11 +458,3 @@ class ParallelProcessor:
         self.shutdown(wait=True)
 
 
-# ---------------------------------------------------------------------------
-# Convenience
-# ---------------------------------------------------------------------------
-
-
-def is_pdf_path(path: Path) -> bool:
-    """Return True if ``path`` has a ``.pdf`` suffix (case-insensitive)."""
-    return path.suffix.lower() == ".pdf"

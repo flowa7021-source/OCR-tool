@@ -147,13 +147,17 @@ class QueuePanel(QWidget):
             event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        from src.infrastructure.file_utils import is_valid_pdf
+
         paths: list[Path] = []
         for url in event.mimeData().urls():
             local = Path(url.toLocalFile())
             if local.is_dir():
-                paths.extend(sorted(local.rglob("*.pdf")))
-            elif local.suffix.lower() == ".pdf":
+                paths.extend(p for p in sorted(local.rglob("*.pdf")) if is_valid_pdf(p))
+            elif local.suffix.lower() == ".pdf" and is_valid_pdf(local):
                 paths.append(local)
+            else:
+                logger.info("Игнорируем drag-drop: %s — не валидный PDF", local)
         if paths:
             self.files_dropped.emit(paths)
             event.acceptProposedAction()

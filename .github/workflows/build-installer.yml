@@ -46,6 +46,14 @@ on:
         description: "Publish a GitHub Release (true/false). Ignored on tags."
         required: false
         default: "true"
+      with_htr:
+        description: "Bundle GOT-OCR 2.0 stack (torch + transformers, +~2 GB)."
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
 
 concurrency:
   group: build-installer-${{ github.ref }}
@@ -81,12 +89,37 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
+      - name: Resolve HTR bundling switch
+        id: htr_flag
+        shell: pwsh
+        run: |
+          # On non-manual triggers (push / PR / tag) HTR is bundled by
+          # default — the whole point of the integration is "works after
+          # install". Manual runs respect the workflow_dispatch input.
+          $manual = "${{ github.event.inputs.with_htr }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and $manual) {
+            $bundle = $manual
+          } else {
+            $bundle = "true"
+          }
+          Write-Host "Bundle HTR: $bundle"
+          "with_htr=$bundle" | Out-File -FilePath $Env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Install Python dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip wheel
           pip install -r requirements.txt
           pip install "pyinstaller>=6.6,<7" pytest pytest-mock pytest-qt Pillow cairosvg
+          if ("${{ steps.htr_flag.outputs.with_htr }}" -eq "true") {
+            Write-Host "Installing [htr] extras (torch, transformers, tiktoken)…"
+            # CPU-only torch wheel keeps the bundle ~1 GB smaller than the
+            # CUDA build. Users who want GPU acceleration can replace torch
+            # in the deployed env, but the CPU build runs everywhere.
+            pip install --extra-index-url https://download.pytorch.org/whl/cpu `
+                "torch>=2.1,<3" "transformers>=4.40" "tiktoken>=0.5"
+            python -c "import torch, transformers; print('torch', torch.__version__, '/ transformers', transformers.__version__)"
+          }
 
       - name: Resolve installer version + release metadata
         id: meta
@@ -442,8 +475,16 @@ jobs:
       # ------------------------------------------------------------------
       - name: Run PyInstaller (build.py)
         shell: pwsh
+        # PyInstaller with torch/transformers can take 10-20 min as it
+        # walks every package's __all__ for hidden imports.
+        timeout-minutes: 40
         run: |
-          python build.py
+          $args = @()
+          if ("${{ steps.htr_flag.outputs.with_htr }}" -eq "true") {
+            $args += "--with-htr"
+          }
+          Write-Host "build.py args: $args"
+          python build.py @args
 
       - name: Verify frozen bundle
         shell: pwsh
@@ -454,13 +495,20 @@ jobs:
           }
           # PyInstaller 6.x --onedir bundles data under _internal\; fallback to top-level on older versions.
           $searchRoots = @("dist\OCRStudio\_internal", "dist\OCRStudio")
-          $tessOk = $false; $dataOk = $false
+          $tessOk = $false; $dataOk = $false; $torchOk = $false; $transformersOk = $false
           foreach ($root in $searchRoots) {
             if (Test-Path "$root\resources\tesseract\tesseract.exe") { $tessOk = $true }
             if (Test-Path "$root\resources\tessdata\rus.traineddata") { $dataOk = $true }
+            if (Test-Path "$root\torch") { $torchOk = $true }
+            if (Test-Path "$root\transformers") { $transformersOk = $true }
           }
           if (-not $tessOk) { throw "Bundled Tesseract missing from PyInstaller output" }
           if (-not $dataOk) { throw "Bundled tessdata (rus) missing from PyInstaller output" }
+          if ("${{ steps.htr_flag.outputs.with_htr }}" -eq "true") {
+            if (-not $torchOk) { throw "Bundled torch missing from PyInstaller output (--with-htr was set)" }
+            if (-not $transformersOk) { throw "Bundled transformers missing from PyInstaller output (--with-htr was set)" }
+            Write-Host "HTR bundle: torch + transformers present"
+          }
           $size = (Get-ChildItem dist\OCRStudio -Recurse | Measure-Object -Property Length -Sum).Sum
           Write-Host ("Frozen bundle size: {0:N0} bytes ({1:N1} MB)" -f $size, ($size/1MB))
 
@@ -483,6 +531,8 @@ jobs:
 
       - name: Compile installer
         shell: pwsh
+        # LZMA2 ultra-compression on a 2.5 GB tree can take 10-20 min.
+        timeout-minutes: 30
         run: |
           $ver = "${{ steps.meta.outputs.version }}"
           New-Item -ItemType Directory -Force -Path installer\Output | Out-Null
@@ -522,10 +572,12 @@ jobs:
           $sizeMB = [math]::Round($installer.Length / 1MB, 1)
           Write-Host ("Installer: {0} ({1} MB)" -f $installer.Name, $sizeMB)
 
-          # 1. Size sanity. A real Windows OCR bundle with bundled Tesseract
-          #    and language data can't reasonably be under ~80 MB.
-          if ($installer.Length -lt 80MB) {
-            throw "Installer is suspiciously small ($sizeMB MB) — bundled assets likely missing"
+          # 1. Size sanity. Without HTR a Windows OCR bundle with Tesseract
+          #    + tessdata can't reasonably be under ~80 MB. With HTR (torch
+          #    + transformers) the floor moves to ~600 MB.
+          $minMB = if ("${{ steps.htr_flag.outputs.with_htr }}" -eq "true") { 600 } else { 80 }
+          if ($installer.Length -lt ($minMB * 1MB)) {
+            throw "Installer is suspiciously small ($sizeMB MB, expected >= $minMB MB) — bundled assets likely missing"
           }
 
           # 2. PE header. Every valid Windows executable starts with "MZ"
@@ -665,6 +717,7 @@ jobs:
           $summary += "|---|---|"
           $summary += "| Version | ``${{ steps.meta.outputs.version }}`` |"
           $summary += "| Kind | ``${{ steps.meta.outputs.kind }}`` |"
+          $summary += "| HTR engine bundled | ``${{ steps.htr_flag.outputs.with_htr }}`` |"
           $summary += "| Ref | ``${{ github.ref }}`` |"
           $summary += "| Commit | ``${{ github.sha }}`` |"
           if ($installer) {

@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
-import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -135,29 +133,6 @@ def create_temp_workdir(prefix: str = "ocr_") -> Path:
     path = Path(tempfile.mkdtemp(prefix=prefix, dir=str(TEMP_DIR)))
     logger.debug("Created temporary workdir: %s", path)
     return path
-
-
-def safe_copy(src: Path, dst: Path) -> Path:
-    """Copy ``src`` to ``dst`` using :func:`shutil.copy2`, then ``fsync``.
-
-    Args:
-        src: Source file.
-        dst: Destination file. Parent directories are created if missing.
-
-    Returns:
-        The destination path.
-    """
-    ensure_dir(dst.parent)
-    shutil.copy2(str(src), str(dst))
-
-    # fsync the written file to ensure durability on crash.
-    try:
-        with open(dst, "rb") as fh:
-            os.fsync(fh.fileno())
-    except OSError as exc:  # pragma: no cover - filesystem dependent
-        logger.warning("fsync failed for %s: %s", dst, exc)
-
-    return dst
 
 
 def bytes_human(size: int) -> str:

@@ -109,7 +109,16 @@ class PreferencesDialog(QDialog):
 
     # --------------------------------------------------------------- save
     def _on_accept(self) -> None:
-        self._settings.parallel_workers = self.workers.value()
+        from src.shared.validators import ValidationError, validate_workers
+
+        try:
+            workers = validate_workers(self.workers.value())
+        except ValidationError as exc:
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.warning(self, "Настройки", str(exc))
+            return
+        self._settings.parallel_workers = workers
         self._settings.autosave_interval_pages = self.autosave.value()
         self._settings.theme = "dark" if self.dark_theme.isChecked() else "light"
         try:

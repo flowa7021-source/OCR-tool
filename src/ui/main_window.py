@@ -383,6 +383,13 @@ class MainWindow(QMainWindow):
 
     def _open_pdf(self, path: Path) -> None:
         """Open a PDF file in the viewer and push it onto the recent list."""
+        from src.shared.validators import ValidationError, validate_pdf_path
+
+        try:
+            path = validate_pdf_path(path)
+        except ValidationError as exc:
+            QMessageBox.warning(self, APP_NAME, str(exc))
+            return
         self.pdf_viewer.open(path)
         self._add_to_recent(path)
 
@@ -955,13 +962,24 @@ class MainWindow(QMainWindow):
             logger.debug("queue stats update failed: %s", exc)
 
     def _update_resource_usage(self) -> None:
+        from src.infrastructure.file_utils import bytes_human
+
+        suffix = ""
+        try:
+            doc_path = self.pdf_viewer.document_path
+            if doc_path is not None and doc_path.exists():
+                suffix = f" | PDF: {bytes_human(doc_path.stat().st_size)}"
+        except Exception:  # noqa: BLE001
+            suffix = ""
         try:
             import psutil  # lazy
             mem_mb = psutil.Process().memory_info().rss / (1024 * 1024)
             cpu = psutil.cpu_percent(interval=None)
-            self.status_resource_label.setText(f"RAM: {mem_mb:.0f} МБ | CPU: {cpu:.0f}%")
-        except Exception:
-            self.status_resource_label.setText("Ready")
+            self.status_resource_label.setText(
+                f"RAM: {mem_mb:.0f} МБ | CPU: {cpu:.0f}%{suffix}"
+            )
+        except Exception:  # noqa: BLE001
+            self.status_resource_label.setText(f"Ready{suffix}")
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
         if event.mimeData().hasUrls():
@@ -1002,4 +1020,13 @@ class MainWindow(QMainWindow):
             logger.warning("Could not save window state: %s", exc)
         with contextlib.suppress(Exception):
             self._parallel_processor.shutdown(wait=False)
+        # Garbage-collect old temporary working directories from previous
+        # runs (anything older than 24 h). Best-effort, never blocks shutdown.
+        with contextlib.suppress(Exception):
+            from src.infrastructure.file_utils import cleanup_temp_dir
+            from src.shared.constants import TEMP_DIR
+
+            removed = cleanup_temp_dir(TEMP_DIR, older_than_hours=24)
+            if removed:
+                logger.info("Cleaned %d stale temp file(s) from %s", removed, TEMP_DIR)
         super().closeEvent(event)

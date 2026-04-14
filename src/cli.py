@@ -109,16 +109,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def discover_inputs(inputs: Iterable[Path]) -> list[Path]:
-    """Expand a mix of files and directories to a sorted list of *.pdf paths."""
+    """Expand a mix of files and directories to a sorted list of *.pdf paths.
+
+    Each candidate file goes through :func:`validate_pdf_path` so we
+    skip empty or non-PDF entries with a warning instead of crashing
+    deep in the pipeline.
+    """
+    from src.shared.validators import ValidationError, validate_pdf_path
+
     found: list[Path] = []
     for entry in inputs:
         entry = entry.expanduser()
         if entry.is_dir():
-            found.extend(sorted(entry.rglob("*.pdf")))
-        elif entry.suffix.lower() == ".pdf" and entry.exists():
-            found.append(entry.resolve())
+            for candidate in sorted(entry.rglob("*.pdf")):
+                try:
+                    found.append(validate_pdf_path(candidate))
+                except ValidationError as exc:
+                    logger.warning("Пропускаю %s: %s", candidate, exc)
         else:
-            logger.warning("Пропускаю: %s (не PDF и не директория)", entry)
+            try:
+                found.append(validate_pdf_path(entry))
+            except ValidationError as exc:
+                logger.warning("Пропускаю %s: %s", entry, exc)
     # Deduplicate while preserving order
     seen: set[Path] = set()
     unique: list[Path] = []
