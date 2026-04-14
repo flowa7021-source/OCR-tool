@@ -27,8 +27,8 @@ from PySide6.QtWidgets import (
 )
 
 from src.core.models import OCRConfig
-from src.shared.constants import DPI_CHOICES
-from src.shared.types import OEM, PSM, Language, OptimizeLevel
+from src.shared.constants import COLOR_TEXT_SECONDARY, DPI_CHOICES
+from src.shared.types import OEM, PSM, Language, OCREngineKind, OptimizeLevel
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,30 @@ class SettingsPanel(QWidget):
         root = QVBoxLayout(inner)
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(8)
+
+        # --- Engine group --------------------------------------------
+        self._group_engine = QGroupBox("OCR-движок", self)
+        engine_layout = QVBoxLayout(self._group_engine)
+        self._cmb_engine = QComboBox(self._group_engine)
+        from src.application.engines.registry import list_engines
+
+        for kind, label, available, msg in list_engines():
+            display = label if available else f"{label} (недоступен)"
+            self._cmb_engine.addItem(display, kind)
+            idx = self._cmb_engine.count() - 1
+            tooltip = kind.description if available else f"{kind.description}\n\n{msg}"
+            self._cmb_engine.setItemData(idx, tooltip, Qt.ItemDataRole.ToolTipRole)
+            if not available:
+                # Keep the item visible (the user might want to download it)
+                # but show it greyed out by removing the enabled flag.
+
+                self._cmb_engine.model().item(idx).setEnabled(False)
+        engine_layout.addWidget(self._cmb_engine)
+        self._lbl_engine_hint = QLabel(self._group_engine)
+        self._lbl_engine_hint.setWordWrap(True)
+        self._lbl_engine_hint.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY};")
+        engine_layout.addWidget(self._lbl_engine_hint)
+        root.addWidget(self._group_engine)
 
         # --- Languages group -----------------------------------------
         self._group_langs = QGroupBox("Языки", self)
@@ -153,6 +177,7 @@ class SettingsPanel(QWidget):
         # Wiring.
         self._chk_rus.toggled.connect(self._on_language_toggled)
         self._chk_eng.toggled.connect(self._on_language_toggled)
+        self._cmb_engine.currentIndexChanged.connect(self._on_engine_changed)
         self._cmb_primary.currentIndexChanged.connect(self._schedule_emit)
         self._cmb_psm.currentIndexChanged.connect(self._schedule_emit)
         self._cmb_oem.currentIndexChanged.connect(self._schedule_emit)
@@ -183,6 +208,8 @@ class SettingsPanel(QWidget):
             self._chk_eng.blockSignals(False)
             self._rebuild_primary_combo(preferred=cfg.primary_language)
 
+            self._set_combo_data(self._cmb_engine, cfg.engine)
+            self._update_engine_hint()
             self._set_combo_data(self._cmb_psm, cfg.psm)
             self._set_combo_data(self._cmb_oem, cfg.oem)
             self._set_combo_data(self._cmb_dpi, int(cfg.dpi))
@@ -233,8 +260,10 @@ class SettingsPanel(QWidget):
         oem = self._cmb_oem.currentData() or OEM.LSTM_ONLY
         dpi = self._cmb_dpi.currentData() or 300
         optimize = self._cmb_optimize.currentData() or OptimizeLevel.LOSSLESS
+        engine = self._cmb_engine.currentData() or OCREngineKind.TESSERACT
 
         return OCRConfig(
+            engine=OCREngineKind(engine) if not isinstance(engine, OCREngineKind) else engine,
             languages=languages,
             primary_language=primary,
             psm=PSM(psm),
@@ -247,6 +276,29 @@ class SettingsPanel(QWidget):
             optimize_level=OptimizeLevel(int(optimize)),
             skip_text=self._chk_skip_text.isChecked(),
         )
+
+    def _on_engine_changed(self, _idx: int) -> None:
+        """Refresh the engine availability hint and re-emit config."""
+        self._update_engine_hint()
+        self._schedule_emit()
+
+    def _update_engine_hint(self) -> None:
+        """Show availability message under the engine dropdown."""
+        kind = self._cmb_engine.currentData()
+        if not isinstance(kind, OCREngineKind):
+            self._lbl_engine_hint.clear()
+            return
+        try:
+            from src.application.engines.registry import get_engine
+
+            engine = get_engine(kind)
+            ok, msg = engine.is_available()
+        except KeyError as exc:
+            ok, msg = False, str(exc)
+        if ok:
+            self._lbl_engine_hint.setText("Готов к использованию.")
+        else:
+            self._lbl_engine_hint.setText(msg)
 
     # ------------------------------------------------------------------
     # Internals

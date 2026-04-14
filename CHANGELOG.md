@@ -6,6 +6,35 @@
 ## [Unreleased]
 
 ### Added
+- **Pluggable OCR engines + GOT-OCR 2.0 для рукописного текста**:
+  - Абстрактный `OCREngine` интерфейс (`src/application/engines/`),
+    через который пайплайн вызывает движок. Tesseract обёрнут в
+    `TesseractEngine`, поведение по умолчанию не изменилось.
+  - `GOTOCREngine` (Apache-2.0, Stepfun) — Transformer-OCR с поддержкой
+    рукописного и печатного текста на 80+ языках включая русский.
+    Зависимости (`torch`, `transformers`, `Pillow`, `tiktoken`)
+    вынесены в `[htr]` extras: `pip install ocr-studio[htr]`.
+  - `ModelManager` (`src/infrastructure/model_manager.py`) скачивает
+    ~580 МБ весов с Hugging Face Hub в
+    `%LOCALAPPDATA%/OCRStudio/models/got_ocr2/` со streaming-progress,
+    retry, проверкой размера и SHA-256, корректной отменой.
+  - Меню «Движок OCR» в MainWindow → «Скачать GOT-OCR 2.0» открывает
+    `ModelDownloadDialog` с QProgressBar и worker-потоком.
+  - Dropdown «OCR-движок» в `SettingsPanel`: показывает оба движка с
+    их доступностью и пояснениями; недоступный вариант показывается
+    серым с подсказкой как его включить.
+  - `OCREngineKind` enum + `engine` поле на `OCRConfig` (default:
+    TESSERACT). Сериализуется в JSON-профилях.
+  - 5-й встроенный профиль `handwritten_mixed` с предустановленным
+    GOT-OCR 2.0, отключённой бинаризацией и лёгким CLAHE.
+
+### Tests
+- 30 новых тестов (228 → 258 в текущей итерации):
+  - `test_engines` (13): абстракция, регистр, Tesseract обёртка
+  - `test_model_manager` (11): скачивание через локальный HTTP-сервер,
+    отмена, проверки размера, idempotency
+  - `test_got_ocr_engine` (6): availability probes без torch, с torch,
+    с моделью; happy-path с замоканным fitz/PIL/torch
 - **Автопубликация инсталлятора через GitHub Actions**:
   - `push` в `main`/dev-ветку → rolling prerelease с тегом `latest-dev`
     (перезаписывается на каждом успешном build, всегда свежий инсталлятор

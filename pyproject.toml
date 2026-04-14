@@ -35,6 +35,16 @@ dev = [
     "mypy>=1.10",
     "pyinstaller>=6.6",
 ]
+# Optional handwriting / transformer-OCR back-ends. Adds GOT-OCR 2.0
+# support (Apache-2.0). The model weights themselves (~580 MB) are
+# downloaded at runtime via the in-app "Download GOT-OCR 2.0" action.
+htr = [
+    "torch>=2.1",
+    "transformers>=4.40",
+    "Pillow>=10.0",
+    "tiktoken>=0.5",
+    "verovio>=4.0; sys_platform == 'win32'",
+]
 
 [project.scripts]
 ocr-studio = "src.main:main"

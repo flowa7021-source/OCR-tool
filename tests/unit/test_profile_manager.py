@@ -15,12 +15,12 @@ def manager(tmp_profiles_dir: Path) -> ProfileManager:
     return ProfileManager(ProfileStorage(profiles_dir=tmp_profiles_dir))
 
 
-def test_initialize_builtins_creates_four(manager: ProfileManager) -> None:
+def test_initialize_builtins_creates_all(manager: ProfileManager) -> None:
     manager.initialize_builtins()
     names = {p.name for p in manager.list_profiles()}
     for expected in BUILTIN_NAMES:
         assert expected in names
-    assert len(BUILTIN_NAMES) == 4
+    assert len(BUILTIN_NAMES) == 5
 
 
 def test_builtins_marked_builtin(manager: ProfileManager) -> None:

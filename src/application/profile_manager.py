@@ -24,7 +24,14 @@ from src.core.models import (
     ProfileData,
 )
 from src.infrastructure.config_storage import ProfileStorage
-from src.shared.types import OEM, PSM, BinarizationMethod, DenoiseMethod, OptimizeLevel
+from src.shared.types import (
+    OEM,
+    PSM,
+    BinarizationMethod,
+    DenoiseMethod,
+    OCREngineKind,
+    OptimizeLevel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +41,7 @@ BUILTIN_NAMES: tuple[str, ...] = (
     "low_quality_scan",
     "contracts_ru",
     "english_text",
+    "handwritten_mixed",
 )
 
 
@@ -140,6 +148,7 @@ class ProfileManager:
             "low_quality_scan": self._build_low_quality,
             "contracts_ru": self._build_contracts_ru,
             "english_text": self._build_english_text,
+            "handwritten_mixed": self._build_handwritten_mixed,
         }
         for name, builder in builders.items():
             try:
@@ -265,6 +274,40 @@ class ProfileManager:
         return ProfileData(
             name="english_text",
             description="English documents with clean layout (eng, OTSU, light CLAHE)",
+            preprocess=preprocess,
+            ocr=ocr,
+            postprocess=PostprocessConfig(),
+        )
+
+    def _build_handwritten_mixed(self) -> ProfileData:
+        """GOT-OCR 2.0 для рукописного и печатного текста.
+
+        Требует отдельного скачивания модели через меню «Движок OCR».
+        Бинаризация отключена — modern transformer-OCR работает лучше
+        на серых полутонах. Лёгкий CLAHE сохраняем для контраста.
+        """
+        preprocess = PreprocessConfig(
+            deskew=DeskewConfig(enabled=True, auto_detect=True),
+            dewarp=DewarpConfig(enabled=False),
+            binarization=BinarizationConfig(method=BinarizationMethod.NONE),
+            denoise=DenoiseConfig(enabled=False),
+            contrast=ContrastConfig(clahe_enabled=True, clahe_clip=2.5),
+            background=BackgroundConfig(enabled=False),
+        )
+        ocr = OCRConfig(
+            engine=OCREngineKind.GOT_OCR2,
+            languages=["rus", "eng"],
+            primary_language="rus",
+            dpi=300,
+            confidence_threshold=50.0,
+            optimize_level=OptimizeLevel.LOSSLESS,
+        )
+        return ProfileData(
+            name="handwritten_mixed",
+            description=(
+                "GOT-OCR 2.0 для рукописного и печатного текста "
+                "(требует отдельной модели)"
+            ),
             preprocess=preprocess,
             ocr=ocr,
             postprocess=PostprocessConfig(),

@@ -49,6 +49,7 @@
     }
   },
   "ocr": {
+    "engine": "tesseract",
     "languages": [
       "rus",
       "eng"
@@ -74,5 +75,5 @@
     "custom_rules": []
   },
   "builtin": true,
-  "created_at": "2026-04-13T19:58:44.669941"
+  "created_at": "2026-04-14T10:41:18.999432"
 }

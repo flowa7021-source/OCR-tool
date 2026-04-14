@@ -70,12 +70,15 @@ class TestRegistry:
         b = get_engine(OCREngineKind.TESSERACT)
         assert a is b
 
-    def test_got_ocr_missing_raises_keyerror(self) -> None:
-        # GOT-OCR engine module doesn't exist yet; registry should
-        # surface the failure as a KeyError with an actionable message.
-        with pytest.raises(KeyError) as exc_info:
-            get_engine(OCREngineKind.GOT_OCR2)
-        assert "ocr-studio[htr]" in str(exc_info.value) or "htr" in str(exc_info.value)
+    def test_got_ocr_resolves_but_reports_unavailable(self) -> None:
+        # Module is registered but torch/transformers + weights are not
+        # installed by default, so the engine must self-report as
+        # unavailable with an actionable hint.
+        engine = get_engine(OCREngineKind.GOT_OCR2)
+        assert engine.kind is OCREngineKind.GOT_OCR2
+        ok, msg = engine.is_available()
+        assert ok is False
+        assert msg  # non-empty Russian hint
 
     def test_list_engines_includes_all_kinds(self) -> None:
         listing = list_engines()
