@@ -1,0 +1,175 @@
+name: Build Transport Parser Installer
+
+# Builds a standalone Windows installer for transport_parser.py:
+#   1. Sets up Python 3.11 with pip cache.
+#   2. Installs runtime deps (pymupdf, openpyxl) + PyInstaller.
+#   3. Freezes the app with PyInstaller (--onedir) via build_parser.py.
+#   4. Installs Inno Setup 6 and compiles installer/transport_parser.iss.
+#   5. Computes SHA-256 and uploads the installer as a workflow artifact.
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/app-installer-workflow-**"
+    tags:
+      - "parser-v*"
+    paths:
+      - "transport_parser.py"
+      - "build_parser.py"
+      - "requirements-parser.txt"
+      - "installer/transport_parser.iss"
+      - ".github/workflows/build-transport-parser.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "transport_parser.py"
+      - "build_parser.py"
+      - "requirements-parser.txt"
+      - "installer/transport_parser.iss"
+      - ".github/workflows/build-transport-parser.yml"
+  workflow_dispatch:
+    inputs:
+      installer_version:
+        description: "Installer version (x.y.z). Defaults to 1.0.0."
+        required: false
+        default: "1.0.0"
+
+concurrency:
+  group: build-transport-parser-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build installer (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve installer version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "${{ github.event.inputs.installer_version }}"
+          if (-not $v) { $v = "1.0.0" }
+          if ("${{ github.ref }}" -like "refs/tags/parser-v*") {
+            $v = "${{ github.ref_name }}" -replace '^parser-v', ''
+          }
+          Write-Host "Using version: $v"
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements-parser.txt
+
+      - name: Cache PyInstaller working directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            build
+            ~\AppData\Local\pyinstaller
+          key: pyinstaller-${{ runner.os }}-py311-${{ hashFiles('requirements-parser.txt', 'transport_parser.py', 'build_parser.py') }}
+          restore-keys: |
+            pyinstaller-${{ runner.os }}-py311-
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip wheel
+          python -m pip install -r requirements-parser.txt
+          python -m pip install "pyinstaller>=6.6"
+
+      - name: Smoke-test import (catch syntax / import errors early)
+        shell: pwsh
+        run: |
+          python -c "import transport_parser; print('module ok:', transport_parser.APP_TITLE)"
+
+      - name: Freeze application with PyInstaller
+        shell: pwsh
+        run: |
+          python build_parser.py
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $exe = "dist\TransportParser\TransportParser.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "Build failed: $exe not found"
+            exit 1
+          }
+          Get-ChildItem dist\TransportParser | Select-Object -First 10
+          Write-Host "Exe size: $((Get-Item $exe).Length) bytes"
+
+      - name: Cache Inno Setup installer
+        id: cache-iscc
+        uses: actions/cache@v4
+        with:
+          path: C:\ProgramData\chocolatey\lib\innosetup
+          key: innosetup-6-${{ runner.os }}
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          choco install innosetup --version=6.2.2 -y --no-progress
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe"
+          }
+          if (-not (Test-Path $iscc)) {
+            Write-Error "ISCC.exe not found"
+            exit 1
+          }
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" installer\transport_parser.iss
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Inno Setup compilation failed"
+            exit $LASTEXITCODE
+          }
+          Get-ChildItem dist\installer
+
+      - name: Compute SHA-256
+        id: sha
+        shell: pwsh
+        run: |
+          $file = Get-ChildItem dist\installer\TransportParser-Setup-*.exe | Select-Object -First 1
+          if (-not $file) { Write-Error "Installer not found"; exit 1 }
+          $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash
+          "$hash  $($file.Name)" | Out-File -FilePath "$($file.FullName).sha256" -Encoding ascii
+          Write-Host "SHA256: $hash"
+          "installer_path=$($file.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "installer_name=$($file.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TransportParser-Installer-${{ steps.ver.outputs.version }}
+          path: |
+            dist/installer/TransportParser-Setup-*.exe
+            dist/installer/TransportParser-Setup-*.exe.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish GitHub Release on tag
+        if: startsWith(github.ref, 'refs/tags/parser-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Transport Parser ${{ steps.ver.outputs.version }}
+          files: |
+            dist/installer/TransportParser-Setup-*.exe
+            dist/installer/TransportParser-Setup-*.exe.sha256
+          generate_release_notes: true
