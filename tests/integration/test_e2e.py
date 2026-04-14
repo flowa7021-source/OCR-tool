@@ -452,11 +452,19 @@ class TestE2ECLI:
         import subprocess
         import sys
 
+        # encoding="utf-8" is mandatory on Windows: the child now emits
+        # UTF-8 bytes (src/cli.py:_force_utf8_stdio), but subprocess.run
+        # with bare ``text=True`` falls back to locale.getpreferredencoding
+        # which is cp1252 on US-English Windows runners. The reader thread
+        # then crashes on Cyrillic bytes with UnicodeDecodeError and leaves
+        # result.stdout == None, triggering a misleading TypeError.
         result = subprocess.run(
             [sys.executable, "-m", "src.cli", "--list-profiles"],
             cwd=Path(__file__).resolve().parent.parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
         assert result.returncode == 0, result.stderr
@@ -502,6 +510,8 @@ class TestE2ECLI:
             cwd=Path(__file__).resolve().parent.parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
         assert result.returncode == 0
@@ -516,6 +526,8 @@ class TestE2ECLI:
             cwd=Path(__file__).resolve().parent.parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
         assert result.returncode == 2
@@ -531,11 +543,53 @@ class TestE2ECLI:
             cwd=Path(__file__).resolve().parent.parent.parent,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
         # discover_inputs filters it out via validate_pdf_path; exit 2
         # since we end up with zero inputs.
         assert result.returncode == 2
+
+    def test_all_subprocess_run_calls_pin_utf8_encoding(self) -> None:
+        """Regression guard for the Windows cp1252 reader-thread crash.
+
+        When the CLI emits Russian text and we call ``subprocess.run``
+        with ``text=True`` but no explicit ``encoding=``, Python decodes
+        stdout via ``locale.getpreferredencoding()`` — which is cp1252
+        on US-English Windows runners and promptly raises
+        ``UnicodeDecodeError`` in the reader thread, leaving
+        ``result.stdout == None``. Every subprocess.run in this file
+        that passes ``text=True`` must also pin ``encoding="utf-8"``.
+        """
+        import ast
+
+        source_path = Path(__file__).resolve()
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        violations: list[int] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            # Match both `subprocess.run(...)` and `run(...)` if ever imported.
+            is_run = (
+                isinstance(func, ast.Attribute) and func.attr == "run"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "subprocess"
+            )
+            if not is_run:
+                continue
+            kwargs = {kw.arg: kw for kw in node.keywords if kw.arg}
+            if "text" not in kwargs:
+                continue  # bytes mode — decoding is caller's responsibility
+            if "encoding" not in kwargs:
+                violations.append(node.lineno)
+        assert not violations, (
+            f"subprocess.run(text=True) without encoding= at lines "
+            f"{violations} — add encoding='utf-8', errors='replace' "
+            f"to prevent Windows cp1252 UnicodeDecodeError in the "
+            f"reader thread."
+        )
 
 
 # ---------------------------------------------------------------------------
