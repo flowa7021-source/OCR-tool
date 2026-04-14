@@ -284,11 +284,27 @@ class MainWindow(QMainWindow):
 
         help_menu = menubar.addMenu("&Справка")
         about_act = QAction("О программе", self)
+        about_act.setShortcut(QKeySequence(Qt.Key.Key_F1))
         about_act.triggered.connect(self._on_about)
         help_menu.addAction(about_act)
         log_act = QAction("Открыть лог-файл", self)
         log_act.triggered.connect(self._on_open_log)
         help_menu.addAction(log_act)
+        diag_act = QAction("Экспорт диагностики…", self)
+        diag_act.triggered.connect(self._on_export_diagnostics)
+        help_menu.addAction(diag_act)
+        update_act = QAction("Проверить обновления", self)
+        update_act.triggered.connect(self._on_check_updates)
+        help_menu.addAction(update_act)
+
+        # Common keyboard shortcuts: Ctrl+Q quits, F1 opens About,
+        # Escape closes any modeless dialog that we spawn. Escape in
+        # modal QDialogs is handled by Qt's default reject()-to-Esc
+        # wiring already.
+        quit_act = QAction("Выход", self)
+        quit_act.setShortcut(QKeySequence("Ctrl+Q"))
+        quit_act.triggered.connect(self.close)
+        self.addAction(quit_act)
 
         # Profile quick-switch shortcuts
         for i in range(4):
@@ -324,6 +340,8 @@ class MainWindow(QMainWindow):
         self.queue_panel.pause_requested.connect(self._queue_manager.pause)
         self.queue_panel.resume_requested.connect(self._queue_manager.resume)
         self.queue_panel.cancel_requested.connect(self._queue_manager.cancel)
+        self.queue_panel.retry_requested.connect(self._on_retry_job)
+        self.queue_panel.open_output_requested.connect(self._on_open_job_output)
         self.results_panel.export_requested.connect(self._on_export_requested)
         self.results_panel.open_pdf_requested.connect(self._on_open_pdf_result)
 
@@ -533,6 +551,45 @@ class MainWindow(QMainWindow):
             ),
         )
 
+    # ---- Queue-panel context-menu actions -----------------------------
+
+    def _on_retry_job(self, job_id: str) -> None:
+        """Re-submit a previously-failed / cancelled job to the pool.
+
+        Resets its progress and status to PENDING, then submits anew.
+        For successfully-completed jobs this still works and produces
+        a fresh OCR pass (useful if the profile changed in between).
+        """
+        item = self._queue_manager.get(job_id)
+        if item is None or item.config is None:
+            logger.warning("Retry requested for unknown job %s", job_id)
+            return
+        self._queue_manager.update_progress(job_id, 0, item.progress_total or 0)
+        self._queue_manager.update_status(job_id, JobStatus.PENDING, "")
+        logger.info("Retrying job %s", job_id)
+        self._submit_job(item)
+
+    def _on_open_job_output(self, job_id: str) -> None:
+        """Open the searchable PDF for ``job_id`` with the system handler."""
+        item = self._queue_manager.get(job_id)
+        if item is None or item.config is None:
+            return
+        path = Path(item.config.output_path)
+        if not path.exists():
+            QMessageBox.information(
+                self, APP_NAME,
+                f"Результирующий файл ещё не готов:\n{path}",
+            )
+            return
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to open job output: %s", exc)
+            QMessageBox.critical(self, APP_NAME, f"Не удалось открыть файл: {exc}")
+
     def _apply_job_result(self, job_id: str, result: object) -> None:
         self._last_result = result
         self.results_panel.set_result(result)  # type: ignore[arg-type]
@@ -669,6 +726,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_NAME, "Модель удалена.")
         except OSError as exc:
             QMessageBox.critical(self, APP_NAME, f"Не удалось удалить: {exc}")
+
+    def _open_paths_from_secondary(self, paths: list[Path]) -> None:
+        """Called by SingleInstanceGuard when a second instance forwards argv.
+
+        Raises the existing window to the front and opens each PDF.
+        """
+        self.raise_()
+        self.activateWindow()
+        for p in paths:
+            if p.suffix.lower() == ".pdf" and p.exists():
+                self._open_pdf(p)
 
     def _on_open_pdf_result(self) -> None:
         """Open the produced searchable PDF with the system default handler."""
@@ -933,6 +1001,79 @@ class MainWindow(QMainWindow):
 
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_path)))
 
+    def _on_export_diagnostics(self) -> None:
+        """Build a privacy-safe diagnostics zip for bug reports."""
+        from datetime import datetime
+
+        default_name = (
+            f"ocr-studio-diagnostics-{datetime.now():%Y%m%d-%H%M%S}.zip"
+        )
+        target, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт диагностики", default_name, "Zip (*.zip)"
+        )
+        if not target:
+            return
+        try:
+            from src.application.diagnostics import build_diagnostics_zip
+
+            path = build_diagnostics_zip(Path(target))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Diagnostics export failed: %s", exc)
+            QMessageBox.critical(
+                self, APP_NAME, f"Не удалось собрать диагностику: {exc}"
+            )
+            return
+        QMessageBox.information(
+            self, APP_NAME,
+            f"Диагностика сохранена:\n{path}\n\n"
+            "Файл можно приложить к issue на GitHub.",
+        )
+
+    def _on_check_updates(self, *, quiet: bool = False) -> None:
+        """Manual update check. ``quiet=True`` suppresses the
+        'you are up-to-date' dialog (used for the automatic startup
+        check, where we only want to bug the user about real upgrades).
+        """
+        from src.application.update_checker import check_async
+
+        def _report(info) -> None:  # noqa: ANN001
+            QTimer.singleShot(0, lambda: self._show_update_info(info, quiet=quiet))
+
+        check_async(_report)
+
+    def _show_update_info(self, info, *, quiet: bool) -> None:  # noqa: ANN001
+        if info is None:
+            if not quiet:
+                QMessageBox.information(
+                    self, APP_NAME, "Не удалось проверить обновления."
+                )
+            return
+        if info.is_newer:
+            # Persistent status-bar hint + offer to open the release page.
+            self.statusBar().showMessage(
+                f"Доступна новая версия: {info.latest_version}", 10_000
+            )
+            resp = QMessageBox.information(
+                self, APP_NAME,
+                (
+                    f"Доступна новая версия {info.latest_version} "
+                    f"(текущая: {info.current_version}).\n\n"
+                    f"{(info.body or '').strip()[:500]}\n\n"
+                    "Открыть страницу релиза?"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if resp == QMessageBox.StandardButton.Yes:
+                from PySide6.QtCore import QUrl
+                from PySide6.QtGui import QDesktopServices
+
+                QDesktopServices.openUrl(QUrl(info.release_url))
+        elif not quiet:
+            QMessageBox.information(
+                self, APP_NAME,
+                f"У вас актуальная версия ({info.current_version}).",
+            )
+
     # ------------------------------------------------------------ misc
     def _update_queue_stats(self) -> None:
         """Refresh the queue-summary label in the status bar."""
@@ -978,13 +1119,39 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             self.status_resource_label.setText(f"Ready{suffix}")
 
+    # Drag-and-drop visual feedback: while a PDF is dragged over the
+    # window, wrap the central splitter in a dashed accent-coloured
+    # border so the user sees a clear drop target.
+    _DROP_STYLE = (
+        "QMainWindow::separator { }"
+        " QSplitter#dropHint { border: 3px dashed palette(highlight); }"
+    )
+
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasUrls() and any(
+            Path(u.toLocalFile()).suffix.lower() == ".pdf"
+            or Path(u.toLocalFile()).is_dir()
+            for u in event.mimeData().urls()
+        ):
             event.acceptProposedAction()
+            cw = self.centralWidget()
+            if cw is not None:
+                cw.setObjectName("dropHint")
+                cw.setStyleSheet(self._DROP_STYLE)
         else:
             event.ignore()
 
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802, ANN001
+        """Clear the drop-target highlight when the drag exits."""
+        cw = self.centralWidget()
+        if cw is not None:
+            cw.setStyleSheet("")
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        cw = self.centralWidget()
+        if cw is not None:
+            cw.setStyleSheet("")
         paths: list[Path] = []
         for url in event.mimeData().urls():
             local = Path(url.toLocalFile())

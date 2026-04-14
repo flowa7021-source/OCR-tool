@@ -24,6 +24,66 @@ from src.shared.validators import ValidationError
 logger = logging.getLogger(__name__)
 
 
+# Per-rule watchdog for catastrophic-backtracking protection. A typical
+# well-formed regex against a page of text completes in microseconds;
+# anything over one second is almost certainly a ReDoS attempt.
+REGEX_TIMEOUT_SEC: float = 1.0
+
+
+class RegexTimeoutError(RuntimeError):
+    """Raised when a pattern's substitution exceeds :data:`REGEX_TIMEOUT_SEC`."""
+
+
+def _substitute_with_timeout(
+    pattern: re.Pattern[str],
+    replacement: str,
+    text: str,
+    timeout: float = REGEX_TIMEOUT_SEC,
+) -> str:
+    """Run ``pattern.sub`` with a wall-clock watchdog.
+
+    The work is offloaded to a short-lived thread so the main pipeline
+    thread can abandon a runaway regex rather than hanging forever.
+    This is not a perfect ReDoS defence — the regex engine itself
+    still runs to completion somewhere — but the daemon thread dies
+    with the process and the caller regains control in bounded time.
+
+    Args:
+        pattern: Pre-compiled regex.
+        replacement: Substitution string (supports backrefs).
+        text: Input text.
+        timeout: Seconds to wait before giving up.
+
+    Returns:
+        The substituted text.
+
+    Raises:
+        RegexTimeoutError: If the substitution did not finish in time.
+    """
+    import threading
+
+    result: list[str] = [text]
+    captured_exc: list[BaseException | None] = [None]
+
+    def _worker() -> None:
+        try:
+            result[0] = pattern.sub(replacement, text)
+        except BaseException as exc:  # noqa: BLE001 — bubble up to caller
+            captured_exc[0] = exc
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise RegexTimeoutError(
+            f"Регулярное выражение {pattern.pattern!r} выполняется дольше "
+            f"{timeout}s — похоже на ReDoS, правило пропущено."
+        )
+    if captured_exc[0] is not None:
+        raise captured_exc[0]
+    return result[0]
+
+
 # ---------------------------------------------------------------------------
 # Default rule sets
 # ---------------------------------------------------------------------------
@@ -275,9 +335,14 @@ class TextPostprocessor:
     def _apply_custom_rules(text: str, rules: list[RegexRule]) -> str:
         """Apply user-defined rules one by one, in order.
 
-        Each rule is enabled/disabled independently. Invalid regex patterns
-        are logged and skipped so a single bad rule cannot break the
-        pipeline.
+        Each rule is enabled/disabled independently. Invalid regex
+        patterns are logged and skipped so a single bad rule cannot
+        break the pipeline.
+
+        Every rule runs under a :data:`REGEX_TIMEOUT_SEC` watchdog —
+        catastrophic-backtracking patterns (imported from a malicious
+        profile, e.g. ``(a+)+b`` applied to ``"a" * 50``) are aborted
+        instead of hanging the worker.
         """
         current = text
         for idx, rule in enumerate(rules):
@@ -288,7 +353,9 @@ class TextPostprocessor:
                     flags = 0 if rule.case_sensitive else re.IGNORECASE
                     flags |= re.UNICODE
                     pattern = re.compile(rule.pattern, flags)
-                    current = pattern.sub(rule.replacement, current)
+                    current = _substitute_with_timeout(
+                        pattern, rule.replacement, current
+                    )
                 else:
                     if rule.case_sensitive:
                         current = current.replace(rule.pattern, rule.replacement)
@@ -298,7 +365,17 @@ class TextPostprocessor:
                         pattern = re.compile(
                             re.escape(rule.pattern), re.IGNORECASE | re.UNICODE
                         )
-                        current = pattern.sub(rule.replacement, current)
+                        current = _substitute_with_timeout(
+                            pattern, rule.replacement, current
+                        )
+            except RegexTimeoutError as exc:
+                logger.warning(
+                    "Правило #%d (%r): %s",
+                    idx,
+                    rule.pattern,
+                    exc,
+                )
+                continue
             except re.error as exc:
                 logger.warning(
                     "Пользовательское правило #%d (%r) некорректно: %s — пропускаем",

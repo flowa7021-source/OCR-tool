@@ -255,10 +255,16 @@ class ProfileStorage:
 # ---------------------------------------------------------------------------
 
 
+#: Bumped whenever a breaking change to :class:`AppSettings` requires
+#: a migration step in :meth:`AppSettings.from_dict`.
+SETTINGS_SCHEMA_VERSION: int = 1
+
+
 @dataclass
 class AppSettings:
     """Per-user application settings (non-profile state)."""
 
+    schema_version: int = SETTINGS_SCHEMA_VERSION
     last_profile: str = "default"
     last_input_dir: str = ""
     last_output_dir: str = ""
@@ -272,6 +278,7 @@ class AppSettings:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dictionary."""
         return {
+            "schema_version": self.schema_version,
             "last_profile": self.last_profile,
             "last_input_dir": self.last_input_dir,
             "last_output_dir": self.last_output_dir,
@@ -286,13 +293,29 @@ class AppSettings:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AppSettings:
-        """Build an instance from a dictionary, tolerating missing keys."""
+        """Build an instance from a dictionary, tolerating missing keys.
+
+        A `schema_version` field — absent or older than
+        :data:`SETTINGS_SCHEMA_VERSION` — is tolerated: missing fields
+        fall back to defaults, older versions are upgraded on write.
+        Future-version settings (produced by a newer binary) are
+        loaded best-effort with a warning.
+        """
         defaults = cls()
+        data_version = int(data.get("schema_version", 0))
+        if data_version > SETTINGS_SCHEMA_VERSION:
+            logger.warning(
+                "settings.json schema_version=%d > current %d; "
+                "loading best-effort, unknown fields ignored",
+                data_version,
+                SETTINGS_SCHEMA_VERSION,
+            )
         recent = data.get("recent_files", defaults.recent_files)
         if not isinstance(recent, list):
             recent = []
         recent = [str(item) for item in recent][:10]
         return cls(
+            schema_version=SETTINGS_SCHEMA_VERSION,
             last_profile=str(data.get("last_profile", defaults.last_profile)),
             last_input_dir=str(data.get("last_input_dir", defaults.last_input_dir)),
             last_output_dir=str(data.get("last_output_dir", defaults.last_output_dir)),

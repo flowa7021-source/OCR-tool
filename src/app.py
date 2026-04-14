@@ -61,6 +61,12 @@ def create_application(argv: list[str]) -> tuple[QApplication, MainWindow]:
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName(APP_ORGANIZATION)
 
+    # Catch-all for unhandled exceptions in the main (UI) thread.
+    # Without this hook a stray exception in a slot kills the event
+    # loop silently: `--windowed` PyInstaller builds have no stderr,
+    # so the user would just see the window disappear.
+    _install_excepthook()
+
     # Apply theme
     try:
         from src.ui.theme import apply_theme
@@ -131,3 +137,55 @@ def create_application(argv: list[str]) -> tuple[QApplication, MainWindow]:
         settings_storage=settings_storage,
     )
     return app, window
+
+
+def _install_excepthook() -> None:
+    """Route unhandled exceptions to the log file + a UI error dialog.
+
+    Qt swallows exceptions raised inside slot callbacks and only prints
+    them to stderr — which doesn't exist in a ``--windowed`` PyInstaller
+    build. Without this hook the user sees their click apparently do
+    nothing, or the window vanishes on a more serious bug. With it:
+
+      1. ``logger.critical`` writes the full traceback to the rotating
+         log file, so we always have a record even when the user can't
+         copy the message.
+      2. A :class:`QMessageBox.critical` dialog tells the user what
+         went wrong and where to find the log.
+
+    KeyboardInterrupt passes through so Ctrl-C in a dev run still
+    terminates the process cleanly.
+    """
+    import sys
+    import traceback
+
+    original_hook = sys.excepthook
+
+    def _handler(exc_type, exc_value, exc_tb) -> None:  # noqa: ANN001
+        if issubclass(exc_type, KeyboardInterrupt):
+            original_hook(exc_type, exc_value, exc_tb)
+            return
+        logger.critical(
+            "Unhandled exception in main thread",
+            exc_info=(exc_type, exc_value, exc_tb),
+        )
+        # Build a short tail of the traceback for the UI.
+        tb_lines = traceback.format_exception(exc_type, exc_value, exc_tb)
+        tail = "".join(tb_lines[-3:])
+        try:
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.critical(
+                None,
+                APP_NAME,
+                (
+                    "Произошла непредвиденная ошибка:\n\n"
+                    f"{exc_type.__name__}: {exc_value}\n\n"
+                    f"{tail}\n"
+                    "Полный стек — в лог-файле (Помощь → Открыть лог)."
+                ),
+            )
+        except Exception:  # noqa: BLE001 — dialog may fail during teardown
+            original_hook(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _handler

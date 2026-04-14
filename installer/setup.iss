@@ -40,6 +40,37 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "associatepdf"; Description: "Ассоциировать файлы .pdf с {#MyAppName}"; GroupDescription: "Ассоциация файлов:"; Flags: unchecked
 
+; Opt-in wipe of user data on uninstall. Off by default so a normal
+; uninstall preserves settings + downloaded GOT-OCR 2.0 weights (up to
+; ~580 MB), letting the user reinstall without re-downloading.
+[Code]
+var
+  CleanUserDataCheckbox: TNewCheckBox;
+
+procedure InitializeUninstallProgressForm();
+begin
+  CleanUserDataCheckbox := TNewCheckBox.Create(UninstallProgressForm);
+  CleanUserDataCheckbox.Parent := UninstallProgressForm.InnerPage;
+  CleanUserDataCheckbox.Top := UninstallProgressForm.InfoAfterLabel.Top + UninstallProgressForm.InfoAfterLabel.Height + 16;
+  CleanUserDataCheckbox.Left := UninstallProgressForm.InfoAfterLabel.Left;
+  CleanUserDataCheckbox.Width := UninstallProgressForm.InnerPage.Width - 32;
+  CleanUserDataCheckbox.Caption := 'Удалить все пользовательские данные (профили, логи, модели ~580 МБ)';
+  CleanUserDataCheckbox.Checked := False;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  UserDataDir: String;
+begin
+  if (CurUninstallStep = usPostUninstall) and
+     Assigned(CleanUserDataCheckbox) and CleanUserDataCheckbox.Checked then
+  begin
+    UserDataDir := ExpandConstant('{localappdata}\OCRStudio');
+    if DirExists(UserDataDir) then
+      DelTree(UserDataDir, True, True, True);
+  end;
+end;
+
 [Files]
 ; Copy everything from PyInstaller output
 Source: "..\dist\OCRStudio\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

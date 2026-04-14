@@ -200,12 +200,20 @@ class PostprocessConfig:
 # ---------------------------------------------------------------------------
 
 
+# Bump whenever OCRConfig / PreprocessConfig / PostprocessConfig grow a
+# field that would make a newer JSON unreadable by an older binary —
+# the reader uses ``_migrate_profile_dict`` to apply compatibility
+# shims for every version below the current one.
+PROFILE_SCHEMA_VERSION: int = 1
+
+
 @dataclass
 class ProfileData:
     """Complete settings profile: preprocessing + OCR + postprocessing."""
 
     name: str
     description: str = ""
+    schema_version: int = PROFILE_SCHEMA_VERSION
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     ocr: OCRConfig = field(default_factory=OCRConfig)
     postprocess: PostprocessConfig = field(default_factory=PostprocessConfig)
@@ -218,8 +226,46 @@ class ProfileData:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ProfileData:
-        """Deserialize from a JSON-loaded dict."""
+        """Deserialize from a JSON-loaded dict, applying schema migrations."""
+        data = _migrate_profile_dict(dict(data))  # shallow copy, migrations mutate
         return _dict_to_dataclass(cls, data)
+
+
+def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
+    """Apply in-place upgrades for older profile schemas.
+
+    Invariant: for every input ``data`` with ``schema_version ≤
+    PROFILE_SCHEMA_VERSION``, the returned dict is loadable by the
+    current :class:`ProfileData`. Unknown future schemas (version
+    greater than current) are returned unchanged with a warning logged
+    so the app can still load them best-effort.
+    """
+    import logging as _logging
+
+    log = _logging.getLogger(__name__)
+    version = int(data.get("schema_version", 0))
+
+    if version > PROFILE_SCHEMA_VERSION:
+        log.warning(
+            "Profile '%s' has schema_version=%d > current %d; loading best-effort",
+            data.get("name", "?"),
+            version,
+            PROFILE_SCHEMA_VERSION,
+        )
+        data["schema_version"] = PROFILE_SCHEMA_VERSION
+        return data
+
+    # v0 → v1: pre-versioning profiles had no `engine` field on OCR.
+    if version < 1:
+        ocr = data.setdefault("ocr", {})
+        ocr.setdefault("engine", "tesseract")
+        data["schema_version"] = 1
+        version = 1
+        log.info("Migrated profile '%s' to schema v1", data.get("name", "?"))
+
+    # Future migrations go here: `if version < 2: ...`
+
+    return data
 
 
 # ---------------------------------------------------------------------------
