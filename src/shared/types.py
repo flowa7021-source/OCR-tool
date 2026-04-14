@@ -190,6 +190,50 @@ class ExportFormat(StrEnum):
     CLIPBOARD = "clipboard"
 
 
+class OCREngineKind(StrEnum):
+    """Selectable OCR back-end engines.
+
+    * ``TESSERACT`` — the default LSTM-based engine from Tesseract 5.x,
+      great at printed text in Russian and English, poor at handwriting.
+    * ``GOT_OCR2`` — Stepfun GOT-OCR2.0 (2024): Apache-2.0 transformer
+      model that handles printed and handwritten text in 80+ languages
+      including Russian. Requires downloading a ~580 MB model weight
+      before first use.
+
+    The application ships with Tesseract bundled and advertises GOT-OCR2
+    only when the optional ``htr`` extras + model weights are installed.
+    """
+
+    TESSERACT = "tesseract"
+    GOT_OCR2 = "got_ocr2"
+
+    @property
+    def label(self) -> str:
+        return _OCR_ENGINE_LABELS[self]
+
+    @property
+    def description(self) -> str:
+        return _OCR_ENGINE_DESCRIPTIONS[self]
+
+
+_OCR_ENGINE_LABELS: dict[OCREngineKind, str] = {
+    OCREngineKind.TESSERACT: "Tesseract 5 (LSTM, печатный текст)",
+    OCREngineKind.GOT_OCR2: "GOT-OCR 2.0 (рукописный + печатный)",
+}
+
+_OCR_ENGINE_DESCRIPTIONS: dict[OCREngineKind, str] = {
+    OCREngineKind.TESSERACT: (
+        "Встроенный Tesseract 5 с LSTM-моделями rus + eng. Быстрый и "
+        "точный на печатном тексте, но не справляется с рукописью."
+    ),
+    OCREngineKind.GOT_OCR2: (
+        "Transformer-модель GOT-OCR 2.0 (Stepfun, 2024). Распознаёт "
+        "рукописный и печатный текст на 80+ языках, включая русский. "
+        "Требует скачивания ~580 МБ модели и расширения htr."
+    ),
+}
+
+
 class OptimizeLevel(IntEnum):
     """OCRmyPDF optimize parameter (0 = no optimization, 3 = maximum)."""
 

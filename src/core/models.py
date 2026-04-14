@@ -33,6 +33,7 @@ from src.shared.types import (
     BinarizationMethod,
     DenoiseMethod,
     JobStatus,
+    OCREngineKind,
     OptimizeLevel,
 )
 
@@ -134,8 +135,15 @@ class PreprocessConfig:
 
 @dataclass
 class OCRConfig:
-    """Tesseract / OCRmyPDF configuration."""
+    """OCR engine configuration.
 
+    The ``engine`` field selects the backend; remaining fields are
+    primarily interpreted by Tesseract/OCRmyPDF but alternative engines
+    reuse the language list, DPI, and confidence threshold where they
+    make sense.
+    """
+
+    engine: OCREngineKind = OCREngineKind.TESSERACT
     languages: list[str] = field(default_factory=lambda: ["rus", "eng"])
     primary_language: str = "rus"  # determines priority order in OCR string
     psm: PSM = PSM.AUTO

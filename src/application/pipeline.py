@@ -23,11 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
-from src.application.ocrmypdf_integration import (
-    OCRmyPDFError,
-    map_ocr_config,
-    run_ocrmypdf,
-)
+from src.application.ocrmypdf_integration import OCRmyPDFError
 from src.core.image_preprocessor import ImagePreprocessor
 from src.core.models import (
     JobResult,
@@ -196,20 +192,41 @@ class OCRPipeline:
             self._assemble_pdf(png_paths, preprocessed_pdf)
             self._report(total_pages, total_pages, "assemble")
 
-            # 4. OCR via OCRmyPDF
+            # 4. OCR — dispatch to the engine selected by profile.ocr.engine.
+            from src.application.engines import get_engine
+            from src.application.engines.base import EngineNotAvailableError
+
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            options = map_ocr_config(
-                job.profile.ocr, preprocessed_pdf, output_path
-            )
             try:
-                run_ocrmypdf(options)
-            except OCRmyPDFError as exc:
+                engine = get_engine(job.profile.ocr.engine)
+                engine_results = engine.run(
+                    preprocessed_pdf=preprocessed_pdf,
+                    output_pdf=output_path,
+                    config=job.profile.ocr,
+                    progress_callback=lambda c, t, s: self._report(
+                        # Keep page-level progress monotonic across stages.
+                        total_pages * c // max(1, t), total_pages, s
+                    ),
+                )
+            except (OCRmyPDFError, EngineNotAvailableError, KeyError) as exc:
                 result.status = JobStatus.FAILED
                 result.error = str(exc)
                 result.pages = page_results
                 result.total_time_sec = time.time() - started
-                logger.error("Job %s failed during OCRmyPDF: %s", job_id, exc)
+                logger.error("Job %s failed during OCR engine: %s", job_id, exc)
                 return result
+
+            # Engines may pre-populate text/word_boxes (e.g. GOT-OCR2);
+            # for Tesseract these stubs stay empty and step 5 fills them
+            # by reading the produced searchable PDF.
+            if engine_results:
+                for stub, page_result in zip(
+                    engine_results, page_results, strict=False
+                ):
+                    if stub.text and not page_result.text:
+                        page_result.text = stub.text
+                    if stub.mean_confidence and not page_result.mean_confidence:
+                        page_result.mean_confidence = stub.mean_confidence
             self._report(total_pages, total_pages, "ocr")
 
             # 5. Extract per-page text, postprocess
