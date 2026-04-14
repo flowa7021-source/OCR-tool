@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication
 
 from src.shared.constants import APP_NAME, APP_ORGANIZATION, APP_VERSION, ensure_user_dirs
 
@@ -103,29 +103,12 @@ def create_application(argv: list[str]) -> tuple[QApplication, MainWindow]:
     except Exception as exc:  # noqa: BLE001
         logger.debug("Could not set app icon: %s", exc)
 
-    # Soft-verify Tesseract (non-fatal)
-    try:
-        from src.infrastructure.tesseract_wrapper import TesseractWrapper
-
-        wrapper = TesseractWrapper()
-        ok, message = wrapper.verify()
-        if not ok:
-            logger.warning("Tesseract verification reported: %s", message)
-            QMessageBox.warning(
-                None,
-                APP_NAME,
-                (
-                    f"Tesseract не прошёл проверку:\n\n{message}\n\n"
-                    "Приложение запустится, но OCR будет недоступен до установки Tesseract 5.x."
-                ),
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Tesseract verification raised: %s", exc)
-        QMessageBox.warning(
-            None,
-            APP_NAME,
-            f"Ошибка инициализации Tesseract: {exc}",
-        )
+    # Tesseract verification is deferred to a background thread — see
+    # ``MainWindow._start_tesseract_verify_async`` below. Running it
+    # synchronously here (as a subprocess that reads tesseract.exe off
+    # disk) used to delay window-show by 200-800 ms on cold boot and
+    # froze the UI entirely when Tesseract was missing, waiting for the
+    # user to dismiss a modal dialog before the window could paint.
 
     # Services
     from src.application.export_manager import ExportManager

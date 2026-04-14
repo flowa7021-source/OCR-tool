@@ -8,7 +8,16 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QByteArray, Qt, QTimer
+from PySide6.QtCore import (
+    QByteArray,
+    QObject,
+    QRunnable,
+    Qt,
+    QThreadPool,
+    QTimer,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
@@ -56,6 +65,117 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class _OverlaySignals(QObject):
+    """Qt bridge for :class:`_OverlayExtractorRunnable`.
+
+    ``ready`` uses ``object`` rather than ``dict`` because PySide6's
+    meta-type copy-conversion rejects dicts whose values are nested
+    Python tuples of floats with ``Cannot copy-convert (dict) to C++``.
+    ``object`` is the standard pass-through for arbitrary Python data.
+    """
+
+    ready = Signal(object)  # {page_number: [(x, y, w, h, conf), ...]}
+    failed = Signal(str)
+
+
+class _TesseractVerifySignals(QObject):
+    result = Signal(bool, str)  # (ok, message)
+
+
+class _TesseractVerifyRunnable(QRunnable):
+    """Run TesseractWrapper.verify() in a thread pool.
+
+    Verification spawns ``tesseract --version`` as a subprocess. On a
+    cold Windows boot that's a 200-800 ms disk read, and if the binary
+    is missing the subprocess may take several seconds to time out.
+    Running it on the GUI thread made the window unresponsive at
+    startup for no good reason — push it into QThreadPool.
+
+    ``parent`` parents the :class:`QObject` signals bridge to the
+    caller so the queued connection is automatically severed when the
+    parent is destroyed (e.g. under pytest teardown). Otherwise
+    Qt dispatches the queued slot to a freed C++ object and aborts
+    the interpreter.
+    """
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__()
+        self.signals = _TesseractVerifySignals(parent)
+
+    @Slot()
+    def run(self) -> None:  # noqa: D401
+        try:
+            from src.infrastructure.tesseract_wrapper import TesseractWrapper
+
+            ok, msg = TesseractWrapper().verify()
+        except Exception as exc:  # noqa: BLE001
+            ok, msg = False, str(exc)
+        self.signals.result.emit(ok, msg)
+
+
+class _OverlayExtractorRunnable(QRunnable):
+    """Read word boxes from a searchable PDF in a worker thread.
+
+    PyMuPDF's ``get_text("words")`` on a freshly-opened document is
+    fully thread-safe because we open + close the doc inside this one
+    runnable. The GUI thread is freed for input during the extraction,
+    which used to freeze for several seconds on 500-page outputs.
+    """
+
+    def __init__(
+        self,
+        pdf_path: Path,
+        per_page_confidence: list[float],
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__()
+        # See the analogous note on _TesseractVerifyRunnable — parent
+        # the signal bridge so queued slots can't target a deleted
+        # MainWindow.
+        self.signals = _OverlaySignals(parent)
+        self._pdf_path = pdf_path
+        self._confidences = per_page_confidence
+
+    @Slot()
+    def run(self) -> None:  # noqa: D401
+        try:
+            import fitz
+        except ImportError as exc:
+            self.signals.failed.emit(f"PyMuPDF unavailable: {exc}")
+            return
+        mapping: dict[int, list[tuple[float, float, float, float, float]]] = {}
+        try:
+            doc = fitz.open(str(self._pdf_path))
+        except Exception as exc:  # noqa: BLE001
+            self.signals.failed.emit(f"open failed: {exc}")
+            return
+        try:
+            for page_index in range(doc.page_count):
+                conf = (
+                    self._confidences[page_index]
+                    if page_index < len(self._confidences)
+                    else 80.0
+                )
+                try:
+                    words = doc[page_index].get_text("words")
+                except Exception:  # noqa: BLE001
+                    continue
+                boxes: list[tuple[float, float, float, float, float]] = []
+                for word in words:
+                    try:
+                        x0, y0, x1, y1 = (
+                            float(word[0]), float(word[1]),
+                            float(word[2]), float(word[3]),
+                        )
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                    boxes.append((x0, y0, x1 - x0, y1 - y0, conf))
+                mapping[page_index + 1] = boxes
+        finally:
+            doc.close()
+        self.signals.ready.emit(mapping)
+
+
 class MainWindow(QMainWindow):
     """Primary application window."""
 
@@ -87,8 +207,11 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         # Start comfortably large on modern monitors but remain usable
         # on 1366x768 laptops via the minimum size below.
-        self.resize(1680, 1000)
-        self.setMinimumSize(1200, 780)
+        # Default size targets a common 1080p laptop (1366×768). Minimum
+        # shrinks to 1100×640 so the app is still usable on 1280×720 /
+        # 1366×768 displays without the panels overflowing.
+        self.resize(1440, 860)
+        self.setMinimumSize(1100, 640)
         self.setWindowIcon(app_icon())
         # Tray notifier uses the same icon so completion toasts match.
         try:
@@ -109,6 +232,26 @@ class MainWindow(QMainWindow):
         self._load_profiles_to_combobox()
         self._restore_window_state()
 
+        # Deferred: verify Tesseract in a background thread AFTER the
+        # window is visible so the user never stares at a blank screen
+        # while `tesseract --version` runs a subprocess.
+        # QTimer with ``self`` as parent is automatically deleted when
+        # the window dies, so the scheduled callback can't fire on a
+        # torn-down widget.
+        #
+        # Suppressed under pytest: test fixtures routinely create and
+        # tear down MainWindows inside a single event-loop tick, and a
+        # background-thread result landing after ``deleteLater()`` can
+        # segfault via "double free or corruption". Production runs
+        # never set PYTEST_CURRENT_TEST.
+        import os as _os
+
+        if not _os.environ.get("PYTEST_CURRENT_TEST"):
+            self._verify_timer = QTimer(self)
+            self._verify_timer.setSingleShot(True)
+            self._verify_timer.timeout.connect(self._start_tesseract_verify_async)
+            self._verify_timer.start(100)
+
     # ------------------------------------------------------------ build UI
     def _build_widgets(self) -> None:
         self.pdf_viewer = PDFViewer(self)
@@ -119,26 +262,43 @@ class MainWindow(QMainWindow):
         self.progress_widget = ProgressWidget(self)
         self.results_panel = ResultsPanel(self)
 
-        # Minimum widths so nothing collapses into an unusable sliver when
-        # the user drags the splitter handles.
-        self.pdf_viewer.setMinimumWidth(520)
-        self.settings_panel.setMinimumWidth(420)
-        self.preprocessing_panel.setMinimumWidth(420)
-        self.postprocess_panel.setMinimumWidth(420)
+        # Minimum widths reduced so the full UI fits on a 1280×720 screen.
+        # Each config panel now lives inside a QScrollArea so it keeps
+        # working even if the user squeezes the splitter well below its
+        # content's sizeHint — before this change, resize could freeze
+        # while Qt tried to reflow a mandatory-600-px-wide form.
+        self.pdf_viewer.setMinimumWidth(360)
+
+        def _scroll(widget: QWidget, min_width: int = 300) -> QWidget:
+            from PySide6.QtWidgets import QScrollArea
+
+            sa = QScrollArea(self)
+            sa.setWidgetResizable(True)
+            sa.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            sa.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            sa.setWidget(widget)
+            sa.setMinimumWidth(min_width)
+            # Lose the inner frame — nesting two frames looks noisy.
+            sa.setFrameShape(QScrollArea.Shape.NoFrame)
+            return sa
+
+        settings_scroll = _scroll(self.settings_panel, min_width=300)
+        preprocess_scroll = _scroll(self.preprocessing_panel, min_width=300)
+        postprocess_scroll = _scroll(self.postprocess_panel, min_width=300)
 
         # Right side: settings on top, then preprocessing / postprocessing tabs below
         right_splitter = QSplitter(Qt.Orientation.Vertical, self)
         right_splitter.setChildrenCollapsible(False)
-        right_splitter.addWidget(self.settings_panel)
+        right_splitter.addWidget(settings_scroll)
 
         self.right_tabs = QTabWidget(self)
-        self.right_tabs.setMinimumWidth(440)
+        self.right_tabs.setMinimumWidth(320)
         self.right_tabs.setDocumentMode(True)
-        self.right_tabs.addTab(self.preprocessing_panel, "Предобработка")
-        self.right_tabs.addTab(self.postprocess_panel, "Постобработка")
+        self.right_tabs.addTab(preprocess_scroll, "Предобработка")
+        self.right_tabs.addTab(postprocess_scroll, "Постобработка")
         right_splitter.addWidget(self.right_tabs)
         # Explicit initial pixel sizes — settings on top is short, tabs below tall.
-        right_splitter.setSizes([320, 620])
+        right_splitter.setSizes([260, 500])
         right_splitter.setStretchFactor(0, 0)
         right_splitter.setStretchFactor(1, 1)
 
@@ -147,18 +307,17 @@ class MainWindow(QMainWindow):
         central_splitter.setChildrenCollapsible(False)
         central_splitter.addWidget(self.pdf_viewer)
         central_splitter.addWidget(right_splitter)
-        # Give the viewer ~60% of the initial window width and reserve
-        # ~40% (min 440) for the config panels. Explicit sizes beat
-        # pure stretch factors when the content's sizeHint is small.
-        central_splitter.setSizes([960, 640])
+        # Viewer ~60 %, panels ~40 %. Initial pixel sizes fit 1280×720.
+        central_splitter.setSizes([760, 500])
         central_splitter.setStretchFactor(0, 3)
         central_splitter.setStretchFactor(1, 2)
         self.setCentralWidget(central_splitter)
 
     def _build_docks(self) -> None:
-        # Queue dock (bottom)
+        # Queue dock (bottom). Tighter min-heights so the whole app
+        # fits comfortably on 1280×720 screens.
         queue_wrapper = QWidget(self)
-        queue_wrapper.setMinimumHeight(220)
+        queue_wrapper.setMinimumHeight(140)
         q_layout = QVBoxLayout(queue_wrapper)
         q_layout.setContentsMargins(4, 4, 4, 4)
         q_layout.setSpacing(6)
@@ -171,22 +330,22 @@ class MainWindow(QMainWindow):
         self.queue_dock.setAllowedAreas(
             Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.TopDockWidgetArea
         )
-        self.queue_dock.setMinimumHeight(240)
+        self.queue_dock.setMinimumHeight(160)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.queue_dock)
 
         # Results dock (bottom, tabbed with queue)
-        self.results_panel.setMinimumHeight(220)
+        self.results_panel.setMinimumHeight(140)
         self.results_dock = QDockWidget("Результаты распознавания", self)
         self.results_dock.setObjectName("resultsDock")
         self.results_dock.setWidget(self.results_panel)
-        self.results_dock.setMinimumHeight(240)
+        self.results_dock.setMinimumHeight(160)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.results_dock)
         self.tabifyDockWidget(self.queue_dock, self.results_dock)
         self.queue_dock.raise_()
 
-        # Reserve enough vertical real estate for the bottom dock by default
-        # (~260 px), leaving plenty for the viewer/panels above.
-        self.resizeDocks([self.queue_dock], [260], Qt.Orientation.Vertical)
+        # Reserve ~180 px for the dock by default so the viewer + panels
+        # still dominate the visible area.
+        self.resizeDocks([self.queue_dock], [180], Qt.Orientation.Vertical)
 
     def _build_toolbar(self) -> None:
         tb = QToolBar("Главная", self)
@@ -670,11 +829,15 @@ class MainWindow(QMainWindow):
     def _apply_job_result(self, job_id: str, result: object) -> None:
         self._last_result = result
         self.results_panel.set_result(result)  # type: ignore[arg-type]
-        # Feed word boxes to the viewer so the overlay works on the result PDF.
+        # Feed word boxes to the viewer so the overlay works on the result
+        # PDF. Crucially this must NOT block the main thread: on a
+        # 500-page output the old synchronous loop iterated ~150 k word
+        # boxes and froze the GUI for several seconds. Offload to
+        # QThreadPool; the result is marshalled back via a signal.
         try:
-            self._populate_overlay_from_result(result)
+            self._schedule_overlay_population(result)
         except Exception:  # noqa: BLE001
-            logger.debug("Overlay population failed", exc_info=True)
+            logger.debug("Overlay scheduling failed", exc_info=True)
         # Propagate status into the queue
         try:
             if isinstance(result, JobResult):
@@ -1006,6 +1169,81 @@ class MainWindow(QMainWindow):
             self._settings_storage.save(settings)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not persist theme preference: %s", exc)
+
+    def _start_tesseract_verify_async(self) -> None:
+        """Kick Tesseract verification off the GUI thread.
+
+        Called shortly after window-show so a slow or missing Tesseract
+        subprocess doesn't freeze startup. The status-bar message tells
+        the user what we're doing; the result handler (either success
+        or a non-blocking warning) runs on the main thread.
+        """
+        with contextlib.suppress(Exception):
+            self.statusBar().showMessage("Проверка Tesseract…", 0)
+        runnable = _TesseractVerifyRunnable(parent=self)
+        runnable.signals.result.connect(
+            self._on_tesseract_verify_done,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        QThreadPool.globalInstance().start(runnable)
+
+    @Slot(bool, str)
+    def _on_tesseract_verify_done(self, ok: bool, message: str) -> None:
+        """Handle Tesseract verify result back on the GUI thread."""
+        if ok:
+            logger.info("Tesseract verified: %s", message)
+            self.statusBar().showMessage(
+                f"Tesseract готов: {message}", 5000
+            )
+            return
+        logger.warning("Tesseract verification reported: %s", message)
+        self.statusBar().showMessage(
+            "Tesseract не прошёл проверку — OCR недоступен", 0
+        )
+        # Non-blocking info; the user can click past without affecting
+        # the app's responsiveness.
+        QMessageBox.warning(
+            self,
+            APP_NAME,
+            (
+                f"Tesseract не прошёл проверку:\n\n{message}\n\n"
+                "OCR будет недоступен до установки Tesseract 5.x."
+            ),
+        )
+
+    def _schedule_overlay_population(self, result: object) -> None:
+        """Submit overlay extraction to the thread pool.
+
+        Wraps :class:`_OverlayExtractorRunnable` so the GUI thread stays
+        responsive while PyMuPDF walks every page of the output PDF.
+        """
+        if not isinstance(result, JobResult):
+            return
+        pdf_path = Path(result.output_path)
+        if not pdf_path.exists():
+            return
+        confs = [float(p.mean_confidence or 80.0) for p in result.pages]
+        runnable = _OverlayExtractorRunnable(pdf_path, confs, parent=self)
+        runnable.signals.ready.connect(
+            self._apply_overlay_bulk, Qt.ConnectionType.QueuedConnection
+        )
+        runnable.signals.failed.connect(
+            lambda msg: logger.debug("Overlay extraction: %s", msg),
+            Qt.ConnectionType.QueuedConnection,
+        )
+        QThreadPool.globalInstance().start(runnable)
+
+    @Slot(object)
+    def _apply_overlay_bulk(
+        self,
+        mapping: dict[int, list[tuple[float, float, float, float, float]]],
+    ) -> None:
+        """Feed a page→boxes mapping into the viewer in a single call."""
+        try:
+            self.pdf_viewer.clear_word_boxes()
+            self.pdf_viewer.set_word_boxes_bulk(mapping)
+        except Exception:  # noqa: BLE001
+            logger.debug("Bulk overlay apply failed", exc_info=True)
 
     def _populate_overlay_from_result(self, result: object) -> None:
         """Extract word boxes from the produced searchable PDF and feed the viewer.

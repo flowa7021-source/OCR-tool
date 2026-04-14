@@ -174,9 +174,11 @@ class ProfileManager:
           * **deskew** — auto-detect; essential, non-destructive.
           * **CLAHE** contrast — ``clip=2.0`` for even lighting without
             over-amplifying noise.
-          * **Background removal** — flattens page tint / vignetting
-            (``blur_kernel=55`` is large enough to separate text from
-            paper on typical scans).
+          * Background removal is **off** in the universal preset:
+            at 600 DPI a ``blur_kernel=55`` pass costs 2–3 s per A4
+            page with only a marginal accuracy gain over CLAHE. Users
+            with yellowed or photographed pages can toggle it on;
+            ``low_quality_scan`` already bundles it.
           * **Denoise chain** — median ``ksize=3`` then a morphological
             close ``ksize=2`` to repair sub-pixel breaks in thin glyphs
             without swallowing dots of ``ё``, ``ь``, ``ъ``.
@@ -211,7 +213,11 @@ class ProfileManager:
             contrast=ContrastConfig(
                 clahe_enabled=True, clahe_clip=2.0, clahe_tile=8
             ),
-            background=BackgroundConfig(enabled=True, blur_kernel=55),
+            # Background removal stays OFF in the universal preset; its
+            # large-kernel blur is the single most expensive pipeline
+            # step at 600 DPI. Users with photographed pages should
+            # pick `low_quality_scan` which has it enabled.
+            background=BackgroundConfig(enabled=False),
         )
         ocr = OCRConfig(
             languages=["rus", "eng"],

@@ -495,7 +495,10 @@ def build_universal_preprocess_config() -> PreprocessConfig:
     * deskew (auto-detect, up to ±45°) — non-destructive.
     * CLAHE contrast (clip=2.0, tile=8) — even lighting without noise
       amplification.
-    * Background removal (blur_kernel=55) — flattens page tint.
+    * Background removal is **off** — at 600 DPI the large-kernel blur
+      pass costs more than all other preprocessing steps combined with
+      only a marginal accuracy gain. Pick ``low_quality_scan`` if the
+      input has heavy page tint.
     * Denoise chain: median ksize=3 → morphological close ksize=3.
       Removes salt-and-pepper artefacts and closes sub-pixel breaks
       in thin glyphs. Larger ksizes would start eating dots of
@@ -519,7 +522,7 @@ def build_universal_preprocess_config() -> PreprocessConfig:
             ],
         ),
         contrast=ContrastConfig(clahe_enabled=True, clahe_clip=2.0, clahe_tile=8),
-        background=BackgroundConfig(enabled=True, blur_kernel=55),
+        background=BackgroundConfig(enabled=False),
     )
 
 

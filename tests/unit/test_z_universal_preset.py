@@ -55,7 +55,11 @@ class TestPreprocessUniversal:
         assert cfg.deskew.enabled
         assert cfg.deskew.auto_detect
         assert cfg.contrast.clahe_enabled
-        assert cfg.background.enabled
+        # background removal is intentionally OFF in the universal
+        # preset: at 600 DPI the large-kernel blur is the single most
+        # expensive preprocessing step and gives only marginal accuracy
+        # gain. low_quality_scan is the right pick for heavy page tint.
+        assert not cfg.background.enabled
         assert cfg.denoise.enabled
         # The denoise chain must preserve thin strokes — multi-step
         # median + morph close is the design intent.
@@ -138,7 +142,8 @@ class TestUniversalAccurateProfile:
         # Key preprocessing toggles match the universal preset.
         assert profile.preprocess.deskew.enabled
         assert profile.preprocess.contrast.clahe_enabled
-        assert profile.preprocess.background.enabled
+        # Background removal is off by design (perf trade-off).
+        assert not profile.preprocess.background.enabled
         assert len(profile.preprocess.denoise.steps) >= 2
         # Every postprocess step on.
         for flag in (

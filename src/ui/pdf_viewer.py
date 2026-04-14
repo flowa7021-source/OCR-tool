@@ -476,6 +476,24 @@ class PDFViewer(QWidget):
         if self._overlay_visible and page_number == self._current_page:
             self._render_current()
 
+    def set_word_boxes_bulk(
+        self,
+        boxes_by_page: dict[int, list[tuple[float, float, float, float, float]]],
+    ) -> None:
+        """Replace every page's word boxes in a single call.
+
+        The per-page :meth:`set_word_boxes` path triggers a re-render
+        whenever the affected page is the currently-visible one, which
+        means populating overlay data for a 500-page document used to
+        block the main thread through 500 signal round-trips and up to
+        N re-renders. This bulk API does a single in-place dict update
+        and at most one ``_render_current()`` call.
+        """
+        self._word_boxes.clear()
+        self._word_boxes.update(boxes_by_page)
+        if self._overlay_visible:
+            self._render_current()
+
     def clear_word_boxes(self) -> None:
         """Remove all stored word boxes."""
         self._word_boxes.clear()
