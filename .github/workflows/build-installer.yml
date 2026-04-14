@@ -469,29 +469,11 @@ jobs:
       - name: Generate app.ico from app.svg
         shell: pwsh
         continue-on-error: true
-        run: |
-          python - <<'EOF'
-          from io import BytesIO
-          from pathlib import Path
-          try:
-              import cairosvg
-              from PIL import Image
-              svg = Path("resources/icons/app.svg").read_bytes()
-              images = []
-              for sz in (16, 24, 32, 48, 64, 128, 256):
-                  png = cairosvg.svg2png(bytestring=svg, output_width=sz, output_height=sz)
-                  images.append(Image.open(BytesIO(png)).convert("RGBA"))
-              out = Path("resources/icons/app.ico")
-              images[0].save(
-                  out,
-                  format="ICO",
-                  sizes=[(s, s) for s in (16, 24, 32, 48, 64, 128, 256)],
-                  append_images=images[1:],
-              )
-              print(f"Wrote {out} ({out.stat().st_size} bytes)")
-          except Exception as exc:
-              print(f"ICO generation skipped: {exc}")
-          EOF
+        # Must invoke the script as a file — PowerShell doesn't understand
+        # bash heredoc `python - <<'EOF'`, it treats `<<` as a broken
+        # redirection and aborts the whole step. See
+        # .github/scripts/generate_ico.py for the real logic.
+        run: python .github/scripts/generate_ico.py
 
       # ------------------------------------------------------------------
       # Freeze with PyInstaller
