@@ -185,6 +185,24 @@ class TextPostprocessor:
         self._english_rules: list[tuple[Pattern[str], str]] = _compile_rules(
             DEFAULT_ENGLISH_RULES
         )
+        # User regex rules were being re-compiled on every ``process()``
+        # call. For a 500-page job with 10 rules that's 5 000 wasted
+        # `re.compile` calls. Cache by `(pattern, flags)` so the cost
+        # is paid exactly once per unique rule per Postprocessor instance.
+        self._user_regex_cache: dict[tuple[str, int], Pattern[str]] = {}
+
+    # ------------------------------------------------------------------
+    # Internal: compiled regex cache
+    # ------------------------------------------------------------------
+
+    def _get_or_compile(self, pattern: str, flags: int) -> Pattern[str]:
+        """Return a cached compiled regex, compiling on first use."""
+        key = (pattern, flags)
+        compiled = self._user_regex_cache.get(key)
+        if compiled is None:
+            compiled = re.compile(pattern, flags)
+            self._user_regex_cache[key] = compiled
+        return compiled
 
     # ------------------------------------------------------------------
     # Public API
@@ -331,8 +349,7 @@ class TextPostprocessor:
                 logger.debug("Postprocess: отброшена артефакт-строка: %r", stripped)
         return "\n".join(kept)
 
-    @staticmethod
-    def _apply_custom_rules(text: str, rules: list[RegexRule]) -> str:
+    def _apply_custom_rules(self, text: str, rules: list[RegexRule]) -> str:
         """Apply user-defined rules one by one, in order.
 
         Each rule is enabled/disabled independently. Invalid regex
@@ -352,7 +369,7 @@ class TextPostprocessor:
                 if rule.is_regex:
                     flags = 0 if rule.case_sensitive else re.IGNORECASE
                     flags |= re.UNICODE
-                    pattern = re.compile(rule.pattern, flags)
+                    pattern = self._get_or_compile(rule.pattern, flags)
                     current = _substitute_with_timeout(
                         pattern, rule.replacement, current
                     )
@@ -362,7 +379,7 @@ class TextPostprocessor:
                     else:
                         # Case-insensitive literal replace: use a regex with
                         # re.escape for safety.
-                        pattern = re.compile(
+                        pattern = self._get_or_compile(
                             re.escape(rule.pattern), re.IGNORECASE | re.UNICODE
                         )
                         current = _substitute_with_timeout(

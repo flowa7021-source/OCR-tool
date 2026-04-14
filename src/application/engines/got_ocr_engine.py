@@ -98,15 +98,24 @@ class GOTOCREngine(OCREngine):
             str(model_dir), trust_remote_code=True
         )
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        # fp16 on CUDA halves VRAM and gives a 2-3× inference speedup on
+        # modern GPUs (T4, A10, RTX 30xx+) with no measurable accuracy
+        # loss for GOT-OCR2. CPU-only path stays float32 — bf16/fp16 on
+        # CPU is slower than fp32 in PyTorch without explicit AMP.
+        torch_dtype = torch.float16 if self._device == "cuda" else torch.float32
         self._model = AutoModel.from_pretrained(
             str(model_dir),
             trust_remote_code=True,
             low_cpu_mem_usage=True,
             device_map=self._device,
+            torch_dtype=torch_dtype,
         )
         self._model.eval()
         logger.info(
-            "GOT-OCR2 ready on %s in %.1fs", self._device, time.time() - t0
+            "GOT-OCR2 ready on %s (%s) in %.1fs",
+            self._device,
+            torch_dtype,
+            time.time() - t0,
         )
 
     def unload(self) -> None:

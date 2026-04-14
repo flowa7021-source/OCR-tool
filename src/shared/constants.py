@@ -25,6 +25,10 @@ PROFILES_DIR: Path = USER_DATA_DIR / "profiles"
 TEMP_DIR: Path = USER_DATA_DIR / "temp"
 LOGS_DIR: Path = USER_DATA_DIR / "logs"
 RECOVERY_DIR: Path = USER_DATA_DIR / "recovery"
+# Persistent OCR result cache: same input PDF + same profile skips the
+# pipeline entirely on the second run. Pruned lazily on overflow.
+OCR_CACHE_DIR: Path = USER_DATA_DIR / "ocr-cache"
+OCR_CACHE_MAX_BYTES: int = 2 * 1024 * 1024 * 1024  # 2 GB budget, LRU-evicted
 
 # --- Bundled resources (relative to app root) ---
 def get_app_root() -> Path:
@@ -140,5 +144,13 @@ EXPORT_DOCX_FILTER: str = "Word Documents (*.docx)"
 
 def ensure_user_dirs() -> None:
     """Create all user-level directories if they don't exist."""
-    for directory in (USER_DATA_DIR, CONFIG_DIR, PROFILES_DIR, TEMP_DIR, LOGS_DIR, RECOVERY_DIR):
+    for directory in (
+        USER_DATA_DIR,
+        CONFIG_DIR,
+        PROFILES_DIR,
+        TEMP_DIR,
+        LOGS_DIR,
+        RECOVERY_DIR,
+        OCR_CACHE_DIR,
+    ):
         directory.mkdir(parents=True, exist_ok=True)

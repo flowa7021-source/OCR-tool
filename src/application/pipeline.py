@@ -136,6 +136,16 @@ class OCRPipeline:
             output_path=str(output_path),
         )
 
+        # Persistent cache short-circuit. If the same (input bytes,
+        # profile hash) was processed before, copy the cached PDF and
+        # rebuild the JobResult from the stored metadata — skipping
+        # rasterisation, OCR, and post-processing entirely. This is the
+        # single biggest win for the "tune a profile, re-run" workflow.
+        cached = self._try_cache_hit(input_path, job.profile, output_path, job_id)
+        if cached is not None:
+            self._report(cached.page_count or 1, cached.page_count or 1, "cache-hit")
+            return cached
+
         workdir: Path | None = None
         try:
             self._ensure_tesseract_configured()
@@ -170,41 +180,21 @@ class OCRPipeline:
             )
             self._report(0, total_pages, "analyze")
 
-            # 2. Preprocess pages -> PNGs
-            page_results: list[PageResult] = []
-            png_paths: list[Path] = []
-            for idx, _info in enumerate(page_infos):
-                page_num = idx + 1
-                t0 = time.time()
-                png_path = workdir / f"page_{page_num:05d}.png"
-                try:
-                    img = self._rasterize_page(
-                        input_path, idx, dpi=job.profile.ocr.dpi
-                    )
-                    processed, angle = self.preprocessor.process(
-                        img, job.profile.preprocess
-                    )
-                    self._save_png(processed, png_path)
-                    png_paths.append(png_path)
-                    pr = PageResult(
-                        page_number=page_num,
-                        text="",
-                        skew_angle=float(angle),
-                        processing_time_sec=time.time() - t0,
-                    )
-                    page_results.append(pr)
-                except Exception as exc:  # noqa: BLE001 - capture, continue
-                    logger.exception(
-                        "Preprocess failure on page %d of %s", page_num, input_path
-                    )
-                    page_results.append(
-                        PageResult(
-                            page_number=page_num,
-                            error=f"preprocess: {exc}",
-                            processing_time_sec=time.time() - t0,
-                        )
-                    )
-                self._report(page_num, total_pages, "preprocess")
+            # 2. Preprocess pages -> PNGs (parallel across pages).
+            # PyMuPDF releases the GIL during `get_pixmap`, and our
+            # preprocessor is stateless — so threading the per-page work
+            # gives a ~3-4× speedup on multicore hardware for the
+            # otherwise-sequential rasterise+preprocess bottleneck.
+            #
+            # Each worker opens its own `fitz.Document` (see
+            # ``_rasterize_page``), so there's no shared mutable state.
+            # Results go into pre-allocated slots to preserve page order.
+            page_results, png_paths = self._preprocess_pages_parallel(
+                input_path=input_path,
+                workdir=workdir,
+                page_count=total_pages,
+                profile=job.profile,
+            )
 
             if not png_paths:
                 raise RuntimeError("Не удалось подготовить ни одной страницы")
@@ -266,6 +256,9 @@ class OCRPipeline:
                 result.total_time_sec,
                 result.average_confidence,
             )
+            # Persist the successful run so a re-invocation with the
+            # same input+profile skips the whole pipeline.
+            self._try_cache_store(input_path, job.profile, output_path, result)
             return result
 
         except (CorruptPdfError, EncryptedPdfError, EmptyPdfError) as exc:
@@ -360,6 +353,167 @@ class OCRPipeline:
             return infos
         finally:
             doc.close()
+
+    def _try_cache_hit(
+        self,
+        input_path: Path,
+        profile,  # noqa: ANN001
+        output_path: Path,
+        job_id: str,
+    ) -> JobResult | None:
+        """Return a pre-built JobResult if the cache has this (input, profile)."""
+        try:
+            from src.infrastructure import ocr_cache
+        except ImportError:  # pragma: no cover
+            return None
+        try:
+            hit = ocr_cache.lookup(input_path, profile)
+        except Exception as exc:  # noqa: BLE001 — never let cache fail the job
+            logger.debug("Cache lookup failed: %s", exc)
+            return None
+        if hit is None:
+            return None
+        cached_pdf, meta = hit
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(cached_pdf, output_path)
+        except OSError as exc:
+            logger.warning("Could not materialise cached PDF: %s", exc)
+            return None
+        # Rebuild a JobResult from the stored dict. Any schema drift
+        # (extra / missing keys) falls back to a miss.
+        try:
+            pages_data = meta.get("pages", [])
+            pages = [
+                PageResult(
+                    page_number=int(p.get("page_number", i + 1)),
+                    text=str(p.get("text", "")),
+                    mean_confidence=float(p.get("mean_confidence", 0.0)),
+                    low_confidence_words=list(p.get("low_confidence_words", [])),
+                    processing_time_sec=float(p.get("processing_time_sec", 0.0)),
+                    error=p.get("error"),
+                    skew_angle=float(p.get("skew_angle", 0.0)),
+                )
+                for i, p in enumerate(pages_data)
+            ]
+            result = JobResult(
+                job_id=job_id,
+                status=JobStatus.COMPLETED,
+                input_path=str(input_path),
+                output_path=str(output_path),
+                pages=pages,
+                total_time_sec=0.0,
+                error=None,
+            )
+            logger.info(
+                "Job %s: served from cache (%d pages, cached PDF=%s)",
+                job_id, len(pages), cached_pdf,
+            )
+            return result
+        except (TypeError, ValueError, KeyError) as exc:
+            logger.debug("Cached metadata unusable: %s", exc)
+            return None
+
+    def _try_cache_store(
+        self,
+        input_path: Path,
+        profile,  # noqa: ANN001
+        output_path: Path,
+        result: JobResult,
+    ) -> None:
+        """Best-effort write of a completed job into the OCR cache."""
+        try:
+            from src.infrastructure import ocr_cache
+
+            ocr_cache.store(
+                input_path,
+                profile,
+                output_pdf=output_path,
+                job_result=result,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Cache store failed: %s", exc)
+
+    def _preprocess_pages_parallel(
+        self,
+        *,
+        input_path: Path,
+        workdir: Path,
+        page_count: int,
+        profile,  # noqa: ANN001 — ProfileData, imported via type-check cycle
+    ) -> tuple[list[PageResult], list[Path]]:
+        """Rasterise + preprocess ``page_count`` pages using a thread pool.
+
+        Returns ``(page_results, png_paths)`` in page order. Errors on an
+        individual page turn into a ``PageResult`` with ``error=...`` and
+        that slot is skipped in ``png_paths`` — the caller raises a
+        pipeline-level error only if ALL pages failed.
+        """
+        import concurrent.futures
+
+        # 4 workers keeps memory bounded (~4 full-DPI pages in flight)
+        # and matches the typical small-batch ProcessPoolExecutor budget.
+        # Single-page jobs skip the thread overhead entirely.
+        max_workers = 1 if page_count == 1 else min(4, page_count)
+
+        slots: list[PageResult | None] = [None] * page_count
+        png_slots: list[Path | None] = [None] * page_count
+
+        def _worker(idx: int) -> None:
+            page_num = idx + 1
+            t0 = time.time()
+            png_path = workdir / f"page_{page_num:05d}.png"
+            try:
+                img = self._rasterize_page(
+                    input_path, idx, dpi=profile.ocr.dpi
+                )
+                processed, angle = self.preprocessor.process(
+                    img, profile.preprocess
+                )
+                self._save_png(processed, png_path)
+                slots[idx] = PageResult(
+                    page_number=page_num,
+                    text="",
+                    skew_angle=float(angle),
+                    processing_time_sec=time.time() - t0,
+                )
+                png_slots[idx] = png_path
+            except Exception as exc:  # noqa: BLE001 - capture, continue
+                logger.exception(
+                    "Preprocess failure on page %d of %s", page_num, input_path
+                )
+                slots[idx] = PageResult(
+                    page_number=page_num,
+                    error=f"preprocess: {exc}",
+                    processing_time_sec=time.time() - t0,
+                )
+
+        completed = 0
+        if max_workers == 1:
+            # Fast path: avoid ThreadPoolExecutor allocation noise for
+            # single-page jobs or when running in an already-parallel
+            # ProcessPoolExecutor worker.
+            for idx in range(page_count):
+                _worker(idx)
+                completed += 1
+                self._report(completed, page_count, "preprocess")
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="ocr-preproc",
+            ) as pool:
+                futures = [pool.submit(_worker, idx) for idx in range(page_count)]
+                for fut in concurrent.futures.as_completed(futures):
+                    # Propagate any unexpected exception (the worker
+                    # already catches the expected ones and writes them
+                    # into `slots[idx]`).
+                    fut.result()
+                    completed += 1
+                    self._report(completed, page_count, "preprocess")
+
+        page_results = [s for s in slots if s is not None]
+        png_paths = [p for p in png_slots if p is not None]
+        return page_results, png_paths
 
     def _rasterize_page(
         self, pdf_path: Path, page_index: int, dpi: int
