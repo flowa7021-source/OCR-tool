@@ -502,18 +502,90 @@ jobs:
           $line | Out-File -Encoding ascii "installer\Output\$($installer.BaseName).sha256"
           Write-Host "SHA-256: $line"
 
-      - name: Sanity-check installer can be read by Inno Setup
+      - name: Sanity-check installer integrity
+        # NOTE: Inno Setup's `/?` and `/HELP` open a GUI dialog even on
+        # headless runners — they do NOT print to stdout and exit. Any
+        # attempt to "ping" the installer with those flags will hang until
+        # the step timeout. Instead we verify the file statically:
+        #   1. Reasonable size (our bundle is ~150-300 MB).
+        #   2. Valid PE executable (MZ + PE\0\0 header).
+        #   3. 7-Zip can enumerate its internal archive — this proves Inno
+        #      Setup wrote a correctly-formed container without actually
+        #      running any code from it.
         shell: pwsh
+        timeout-minutes: 2
         run: |
-          $installer = (Get-ChildItem installer\Output\*.exe | Select-Object -First 1).FullName
-          # /HELP exits 0 on every modern Inno Setup-built installer. We run it
-          # through `timeout` as a belt-and-braces measure — it should never hang.
-          $p = Start-Process -FilePath $installer -ArgumentList "/?" -NoNewWindow -PassThru
-          if (-not $p.WaitForExit(15000)) {
-            $p.Kill()
-            throw "Installer /? did not exit within 15s"
+          $ErrorActionPreference = "Stop"
+          $installer = Get-ChildItem installer\Output\*.exe | Select-Object -First 1
+          if (-not $installer) { throw "No installer produced" }
+          $path = $installer.FullName
+          $sizeMB = [math]::Round($installer.Length / 1MB, 1)
+          Write-Host ("Installer: {0} ({1} MB)" -f $installer.Name, $sizeMB)
+
+          # 1. Size sanity. A real Windows OCR bundle with bundled Tesseract
+          #    and language data can't reasonably be under ~80 MB.
+          if ($installer.Length -lt 80MB) {
+            throw "Installer is suspiciously small ($sizeMB MB) — bundled assets likely missing"
           }
-          Write-Host "Installer responds to /? (exit code $($p.ExitCode))"
+
+          # 2. PE header. Every valid Windows executable starts with "MZ"
+          #    at offset 0 and "PE\0\0" at the offset stored in e_lfanew.
+          $fs = [System.IO.File]::Open($path, 'Open', 'Read', 'Read')
+          try {
+            $br = New-Object System.IO.BinaryReader($fs)
+            $mz = $br.ReadBytes(2)
+            if ($mz[0] -ne 0x4D -or $mz[1] -ne 0x5A) {
+              throw "File does not start with MZ — not a valid PE executable"
+            }
+            $fs.Seek(0x3C, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $peOffset = $br.ReadUInt32()
+            $fs.Seek($peOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $pe = $br.ReadBytes(4)
+            if ($pe[0] -ne 0x50 -or $pe[1] -ne 0x45 -or $pe[2] -ne 0 -or $pe[3] -ne 0) {
+              throw "PE signature not found at offset $peOffset — file corrupt"
+            }
+          } finally {
+            $fs.Dispose()
+          }
+          Write-Host "PE header: OK"
+
+          # 3. 7-Zip should be able to list the Inno Setup archive contents
+          #    without running anything. A corrupt installer would fail here.
+          $sevenZip = $null
+          foreach ($candidate in @(
+            "C:\Program Files\7-Zip\7z.exe",
+            "C:\Program Files (x86)\7-Zip\7z.exe",
+            (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          )) {
+            if ($candidate -and (Test-Path $candidate)) { $sevenZip = $candidate; break }
+          }
+          if (-not $sevenZip) {
+            Write-Warning "7-Zip not found; skipping archive enumeration"
+          } else {
+            $listOut = Join-Path $Env:RUNNER_TEMP "installer-listing.txt"
+            $listErr = Join-Path $Env:RUNNER_TEMP "installer-listing.err"
+            $proc = Start-Process -FilePath $sevenZip -ArgumentList "l", $path `
+                -NoNewWindow -PassThru `
+                -RedirectStandardOutput $listOut -RedirectStandardError $listErr
+            if (-not $proc.WaitForExit(60000)) {
+              $proc.Kill()
+              throw "7z list timed out after 60s"
+            }
+            if ($proc.ExitCode -ne 0) {
+              if (Test-Path $listErr) { Get-Content $listErr | Write-Host }
+              throw "7z list failed with exit code $($proc.ExitCode)"
+            }
+            $listing = Get-Content $listOut
+            # Count entries by matching lines that look like file rows
+            # (7-Zip list output uses "YYYY-MM-DD HH:MM:SS" at column 0).
+            $entryCount = ($listing | Where-Object { $_ -match "^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}" }).Count
+            Write-Host "7-Zip enumerated $entryCount entries inside the installer"
+            if ($entryCount -lt 100) {
+              throw "Installer looks empty — only $entryCount entries listed"
+            }
+          }
+
+          Write-Host "Installer integrity check passed"
 
       # ------------------------------------------------------------------
       # Artifacts + release
