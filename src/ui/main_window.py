@@ -77,6 +77,9 @@ class MainWindow(QMainWindow):
         self._last_result = None
         self._current_profile: ProfileData | None = None
         self._recovery = RecoveryManager()
+        # One-shot per-session flag: don't nag the user again after they
+        # acknowledged the active max_pages preview limit.
+        self._max_pages_warned: bool = False
 
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
         self.setAcceptDrops(True)
@@ -404,6 +407,33 @@ class MainWindow(QMainWindow):
         clone.postprocess = self.postprocess_panel.get_config()
         return clone
 
+    def _warn_if_max_pages_active(self, profile: ProfileData, file_count: int) -> None:
+        """Show a one-shot info dialog if the profile truncates long PDFs.
+
+        The pipeline already logs the truncation (see pipeline.py around
+        line 152), but unless the user checks the log they won't realise
+        that only the first N pages of a 500-page scan got OCR'd. This
+        preflight banner makes it explicit — once per session per setting.
+        """
+        try:
+            max_pages = int(getattr(profile.ocr, "max_pages", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if max_pages <= 0 or self._max_pages_warned:
+            return
+        self._max_pages_warned = True
+        plural = "файл" if file_count == 1 else "файлов"
+        QMessageBox.information(
+            self,
+            APP_NAME,
+            (
+                f"В текущем профиле активен лимит «предпросмотра»: "
+                f"будут обработаны только первые {max_pages} страниц каждого "
+                f"из {file_count} {plural}. Снять ограничение: "
+                f"«Настройки вывода → Макс. страниц = 0»."
+            ),
+        )
+
     # ------------------------------------------------------------ actions
     def _on_open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -496,6 +526,7 @@ class MainWindow(QMainWindow):
 
     def _enqueue_files(self, paths: list[Path]) -> None:
         profile = self._current_profile_with_overrides()
+        self._warn_if_max_pages_active(profile, len(paths))
         for input_path in paths:
             try:
                 output_path = safe_unique_path(suggest_output_path(input_path))

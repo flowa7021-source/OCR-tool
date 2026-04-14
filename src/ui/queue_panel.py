@@ -108,14 +108,11 @@ class QueuePanel(QWidget):
         self._queue = qm
         self._bridge = _SignalBridge()
         self._bridge.queue_event.connect(self._on_queue_event, Qt.ConnectionType.QueuedConnection)
-        try:
-            qm.subscribe(
-                lambda item, event: self._bridge.queue_event.emit(item, event)
-                if self._bridge is not None
-                else None
-            )
-        except AttributeError:
-            logger.warning("QueueManager has no subscribe(); polling not implemented")
+        qm.subscribe(
+            lambda item, event: self._bridge.queue_event.emit(item, event)
+            if self._bridge is not None
+            else None
+        )
         self.refresh()
 
     @Slot(object, str)
@@ -219,9 +216,34 @@ class QueuePanel(QWidget):
             menu.addAction(act)
         menu.addSeparator()
         clear_act = QAction("Очистить завершённые", self)
-        clear_act.triggered.connect(self._on_clear_completed)
+        clear_act.triggered.connect(self._on_clear_completed_requested)
         menu.addAction(clear_act)
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _on_clear_completed_requested(self) -> None:
+        """Menu entry-point: ask for confirmation before deleting rows.
+
+        We show the prompt only when there's actually something to remove —
+        an empty confirm dialog would be just noise. Tests bypass this
+        wrapper and call ``_on_clear_completed`` directly.
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        if self._queue is None:
+            return
+        terminal_statuses = {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+        count = sum(1 for it in self._queue.list_items() if it.status in terminal_statuses)
+        if count == 0:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Очистить очередь",
+            f"Удалить из очереди {count} завершённых/отменённых заданий?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._on_clear_completed()
 
     def _on_clear_completed(self) -> None:
         """Remove every COMPLETED / FAILED / CANCELLED row from the queue."""

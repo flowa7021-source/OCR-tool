@@ -3,6 +3,7 @@
 Документация для пользователей — в каталоге [`docs/`](docs/):
 
 - [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) — UX-сценарии
+- [`docs/CLI.md`](docs/CLI.md) — запуск из командной строки
 - [`docs/KEYBOARD_SHORTCUTS.md`](docs/KEYBOARD_SHORTCUTS.md) — горячие клавиши
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — слои и потоки данных
 - [`docs/PRIVACY.md`](docs/PRIVACY.md) — что пишется на диск
