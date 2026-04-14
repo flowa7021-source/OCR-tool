@@ -218,7 +218,13 @@ class ProfileManager:
             primary_language="rus",
             psm=PSM.AUTO,
             oem=OEM.LSTM_ONLY,
-            dpi=300,
+            # 600 DPI is the sweet spot for max-accuracy scanning: gives
+            # Tesseract's LSTM enough pixel information for tight
+            # kerning and small point sizes, while keeping rasterisation
+            # / OCR wall-clock roughly 4× compared to 300 DPI. Anything
+            # above 600 gives diminishing returns and significantly
+            # larger temp PNGs.
+            dpi=600,
             optimize_level=OptimizeLevel.LOSSLESS,
             confidence_threshold=60.0,
             skip_text=True,
@@ -235,8 +241,9 @@ class ProfileManager:
         return ProfileData(
             name="universal_accurate",
             description=(
-                "Универсальный «максимум точности»: adaptive Gaussian + "
-                "CLAHE + удаление фона + deskew, вся постобработка"
+                "Универсальный «максимум точности»: 600 DPI, adaptive "
+                "Gaussian + CLAHE + удаление фона + deskew, вся "
+                "постобработка"
             ),
             preprocess=preprocess,
             ocr=ocr,

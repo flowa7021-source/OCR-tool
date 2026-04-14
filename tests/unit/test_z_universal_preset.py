@@ -147,6 +147,13 @@ class TestUniversalAccurateProfile:
             "normalize_unicode", "remove_artifacts",
         ):
             assert getattr(profile.postprocess, flag) is True, flag
+        # High-DPI rasterisation is an intentional part of the preset —
+        # anything below 600 defeats the purpose of a "max accuracy"
+        # pick because Tesseract's LSTM benefits significantly from
+        # extra pixel density on tight typography.
+        assert profile.ocr.dpi >= 600, (
+            f"universal_accurate must request ≥600 DPI; got {profile.ocr.dpi}"
+        )
 
     def test_description_hints_at_purpose(self, tmp_path: Path) -> None:
         """Sanity: description mentions accuracy / universal so users find it."""
