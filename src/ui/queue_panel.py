@@ -191,4 +191,16 @@ class QueuePanel(QWidget):
             act = QAction(label, self)
             act.triggered.connect(lambda _checked=False, s=signal, jid=job_id: s.emit(jid))
             menu.addAction(act)
+        menu.addSeparator()
+        clear_act = QAction("Очистить завершённые", self)
+        clear_act.triggered.connect(self._on_clear_completed)
+        menu.addAction(clear_act)
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _on_clear_completed(self) -> None:
+        """Remove every COMPLETED / FAILED / CANCELLED row from the queue."""
+        if self._queue is None:
+            return
+        removed = self._queue.clear_completed()
+        logger.info("Cleared %d terminal queue items", removed)
+        self.refresh()

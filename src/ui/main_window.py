@@ -857,10 +857,7 @@ class MainWindow(QMainWindow):
     def _add_to_recent(self, path: Path) -> None:
         try:
             settings = self._settings_storage.load()
-            p = str(path.resolve())
-            recent = [r for r in settings.recent_files if r != p]
-            recent.insert(0, p)
-            settings.recent_files = recent[:10]
+            settings.add_recent_file(str(path.resolve()))
             self._settings_storage.save(settings)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not update recent files: %s", exc)

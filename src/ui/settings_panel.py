@@ -262,16 +262,39 @@ class SettingsPanel(QWidget):
         optimize = self._cmb_optimize.currentData() or OptimizeLevel.LOSSLESS
         engine = self._cmb_engine.currentData() or OCREngineKind.TESSERACT
 
+        # Defensive validation: every UI widget is bounded, but profile
+        # JSON loads bypass the widgets, so coerce + clamp on the way out
+        # of get_config too.
+        from src.shared.validators import (
+            ValidationError,
+            validate_confidence,
+            validate_dpi,
+            validate_languages,
+        )
+
+        try:
+            languages = validate_languages(languages)
+        except ValidationError:
+            languages = ["rus"]
+        try:
+            dpi_value = validate_dpi(int(dpi))
+        except ValidationError:
+            dpi_value = 300
+        try:
+            confidence = validate_confidence(float(self._slider_conf.value()))
+        except ValidationError:
+            confidence = 60.0
+
         return OCRConfig(
             engine=OCREngineKind(engine) if not isinstance(engine, OCREngineKind) else engine,
             languages=languages,
             primary_language=primary,
             psm=PSM(psm),
             oem=OEM(oem),
-            dpi=int(dpi),
+            dpi=dpi_value,
             char_whitelist=self._edit_whitelist.text(),
             char_blacklist=self._edit_blacklist.text(),
-            confidence_threshold=float(self._slider_conf.value()),
+            confidence_threshold=confidence,
             tesseract_timeout=int(self._spin_timeout.value()),
             optimize_level=OptimizeLevel(int(optimize)),
             skip_text=self._chk_skip_text.isChecked(),

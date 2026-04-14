@@ -442,12 +442,19 @@ class OCRPipeline:
                 if idx >= doc.page_count:
                     continue
                 try:
-                    page = doc.load_page(idx)
-                    raw_text = page.get_text("text") or ""
-                    processed_text = self._postprocess_text(
-                        raw_text, job.profile.postprocess
-                    )
-                    pr.text = processed_text
+                    if pr.text:
+                        # Engine (e.g. GOT-OCR2) already produced text —
+                        # postprocess that, don't re-read from the PDF where
+                        # the layout serialisation may differ.
+                        pr.text = self._postprocess_text(
+                            pr.text, job.profile.postprocess
+                        )
+                    else:
+                        page = doc.load_page(idx)
+                        raw_text = page.get_text("text") or ""
+                        pr.text = self._postprocess_text(
+                            raw_text, job.profile.postprocess
+                        )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "Failed to extract text for page %d: %s",
@@ -465,7 +472,13 @@ class OCRPipeline:
         finally:
             doc.close()
 
-        if self.compute_confidence:
+        # Only run pytesseract-based confidence scoring when the OCR engine
+        # was Tesseract. Other engines (GOT-OCR 2.0, future TrOCR) populate
+        # mean_confidence themselves; re-scoring with pytesseract would
+        # overwrite that with a number derived from a different model.
+        from src.shared.types import OCREngineKind
+
+        if self.compute_confidence and job.profile.ocr.engine is OCREngineKind.TESSERACT:
             self._compute_confidences(page_results, job, png_paths)
 
     def _autosave_partial_txt(
