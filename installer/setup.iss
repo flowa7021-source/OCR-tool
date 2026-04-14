@@ -51,9 +51,14 @@ procedure InitializeUninstallProgressForm();
 begin
   CleanUserDataCheckbox := TNewCheckBox.Create(UninstallProgressForm);
   CleanUserDataCheckbox.Parent := UninstallProgressForm.InnerPage;
-  CleanUserDataCheckbox.Top := UninstallProgressForm.InfoAfterLabel.Top + UninstallProgressForm.InfoAfterLabel.Height + 16;
-  CleanUserDataCheckbox.Left := UninstallProgressForm.InfoAfterLabel.Left;
-  CleanUserDataCheckbox.Width := UninstallProgressForm.InnerPage.Width - 32;
+  // Anchor the checkbox below the "Uninstalling..." status label. The
+  // uninstall form does NOT have an InfoAfterLabel (that's a wizard-form
+  // property); StatusLabel is always present on the uninstall form.
+  CleanUserDataCheckbox.Left := UninstallProgressForm.StatusLabel.Left;
+  CleanUserDataCheckbox.Top := UninstallProgressForm.StatusLabel.Top
+    + UninstallProgressForm.StatusLabel.Height + ScaleY(24);
+  CleanUserDataCheckbox.Width := UninstallProgressForm.InnerPage.Width
+    - (CleanUserDataCheckbox.Left * 2);
   CleanUserDataCheckbox.Caption := 'Удалить все пользовательские данные (профили, логи, модели ~580 МБ)';
   CleanUserDataCheckbox.Checked := False;
 end;
