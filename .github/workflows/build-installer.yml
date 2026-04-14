@@ -224,16 +224,89 @@ jobs:
           }
           Write-Host "Downloaded $([math]::Round($file.Length / 1MB, 1)) MB"
 
-      - name: Install Tesseract silently
+      - name: Extract Tesseract via 7-Zip (no installer run)
+        # Inno Setup installers — including UB Mannheim's Tesseract build —
+        # are recognised by modern 7-Zip as a compound archive. Extracting
+        # them directly is 5-10× faster than the silent installer and, more
+        # importantly, CANNOT hang: there is no UAC prompt, no UI, no
+        # antivirus "smart screen" pause, and no post-install hook. This is
+        # the primary install path. If extraction fails for any reason we
+        # fall back to a watchdog-guarded silent install below.
+        id: tess-extract
+        shell: pwsh
+        timeout-minutes: 8
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installerPath = Resolve-Path "tesseract_dl\tesseract-setup.exe"
+          $extractDir   = "${{ github.workspace }}\tesseract_extract"
+          $dest         = "${{ github.workspace }}\tesseract_install"
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+
+          $sevenZip = $null
+          foreach ($candidate in @(
+            "C:\Program Files\7-Zip\7z.exe",
+            "C:\Program Files (x86)\7-Zip\7z.exe",
+            (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          )) {
+            if ($candidate -and (Test-Path $candidate)) { $sevenZip = $candidate; break }
+          }
+          if (-not $sevenZip) { throw "7-Zip not found on runner" }
+          Write-Host "Using 7-Zip at: $sevenZip"
+
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          # -y answers 'yes' to prompts; -o sets output dir; -bso0 -bsp0 quiet
+          & $sevenZip x $installerPath.Path "-o$extractDir" -y -bso0 -bsp0
+          if ($LASTEXITCODE -ne 0) {
+            throw "7-Zip extraction failed with exit code $LASTEXITCODE"
+          }
+          $sw.Stop()
+          Write-Host ("7-Zip extraction completed in {0:N1}s" -f $sw.Elapsed.TotalSeconds)
+
+          # Find tesseract.exe — it can land under {app}\, app\, or straight
+          # at the root depending on 7-Zip version's handling of Inno Setup.
+          $tessExe = Get-ChildItem -Path $extractDir -Filter "tesseract.exe" -Recurse -File |
+                     Select-Object -First 1
+          if (-not $tessExe) {
+            throw "tesseract.exe not found under $extractDir after 7-Zip extraction"
+          }
+          $tessRoot = $tessExe.Directory.FullName
+          Write-Host "Tesseract root: $tessRoot"
+
+          # Mirror exe + every DLL into $dest, flattening to a single directory.
+          Get-ChildItem -Path $tessRoot -File -Recurse |
+            Where-Object { $_.Extension -in @('.exe', '.dll') -and $_.Name -notlike 'unins*' } |
+            ForEach-Object {
+              Copy-Item $_.FullName -Destination (Join-Path $dest $_.Name) -Force
+            }
+
+          if (-not (Test-Path "$dest\tesseract.exe")) {
+            throw "tesseract.exe missing after copy to $dest"
+          }
+
+          # Smoke test. Some 7-Zip extractions drop required DLLs outside
+          # the app\ folder; running --version exposes those problems here
+          # rather than at PyInstaller or end-user time.
+          try {
+            & "$dest\tesseract.exe" --version
+          } catch {
+            Write-Warning "tesseract.exe --version failed: $($_.Exception.Message)"
+            Write-Warning "Falling back to silent installer..."
+            "needs_installer_fallback=true" | Out-File -FilePath $Env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+
+      - name: Fallback — silent install (watchdog-guarded)
+        if: steps.tess-extract.outputs.needs_installer_fallback == 'true'
         shell: pwsh
         timeout-minutes: 8
         run: |
           $dest = "${{ github.workspace }}\tesseract_install"
+          Remove-Item -Path $dest -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
           $installerPath = "tesseract_dl\tesseract-setup.exe"
-          $stderr = Join-Path $Env:RUNNER_TEMP "tesseract-install.err.log"
           $stdout = Join-Path $Env:RUNNER_TEMP "tesseract-install.out.log"
+          $stderr = Join-Path $Env:RUNNER_TEMP "tesseract-install.err.log"
 
           $sw = [System.Diagnostics.Stopwatch]::StartNew()
           $proc = Start-Process -FilePath $installerPath `
@@ -241,15 +314,8 @@ jobs:
               -RedirectStandardError $stderr `
               -PassThru
 
-          # 5-minute watchdog: a healthy silent install finishes in 30-90s
-          # on windows-latest. Anything over 5 minutes means the installer
-          # is waiting for UI, antivirus has quarantined something, or the
-          # runner is in a bad state — kill it with a clear error instead
-          # of letting the whole job sit until the 6-hour job timeout.
-          $watchdogMs = 5 * 60 * 1000
-          if (-not $proc.WaitForExit($watchdogMs)) {
-            Write-Warning "Tesseract installer did not exit within 5 minutes; killing it"
-            try { $proc.Kill() } catch { Write-Warning "Kill failed: $($_.Exception.Message)" }
+          if (-not $proc.WaitForExit(5 * 60 * 1000)) {
+            try { $proc.Kill() } catch {}
             if (Test-Path $stderr) { Write-Host "--- stderr ---"; Get-Content $stderr | Write-Host }
             if (Test-Path $stdout) { Write-Host "--- installer log ---"; Get-Content $stdout | Select-Object -Last 50 | Write-Host }
             throw "Tesseract silent install exceeded 5-minute watchdog"
@@ -257,13 +323,11 @@ jobs:
 
           $sw.Stop()
           Write-Host ("Installer exited in {0:N1}s with code {1}" -f $sw.Elapsed.TotalSeconds, $proc.ExitCode)
-
           if ($proc.ExitCode -ne 0) {
             if (Test-Path $stderr) { Write-Host "--- stderr ---"; Get-Content $stderr | Write-Host }
             if (Test-Path $stdout) { Write-Host "--- installer log ---"; Get-Content $stdout | Select-Object -Last 50 | Write-Host }
             throw "Tesseract installer exited with non-zero code $($proc.ExitCode)"
           }
-
           if (-not (Test-Path "$dest\tesseract.exe")) {
             throw "Tesseract install reported success but $dest\tesseract.exe is missing"
           }
