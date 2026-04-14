@@ -28,9 +28,33 @@ RECOVERY_DIR: Path = USER_DATA_DIR / "recovery"
 
 # --- Bundled resources (relative to app root) ---
 def get_app_root() -> Path:
-    """Return the application root, either PyInstaller-bundled or source tree."""
+    """Return the directory that holds bundled resources.
+
+    In a source checkout this is the project root. Under a PyInstaller
+    build it must resolve to the location of the ``--add-data`` payload:
+
+    * PyInstaller 6.x ``--onedir`` lays out the app as::
+
+          OCRStudio/
+              OCRStudio.exe
+              _internal/
+                  resources/...
+                  profiles/...
+
+      i.e. data assets live in the ``_internal`` subdirectory, NOT next
+      to the executable. ``sys._MEIPASS`` is set to that ``_internal``
+      directory by the bootloader.
+
+    * PyInstaller ``--onefile`` extracts everything to a temporary
+      directory and likewise sets ``sys._MEIPASS``.
+
+    * Older ``--onedir`` (PyInstaller < 6.0) placed data next to the
+      executable; we keep that fallback so downgrades stay working.
+    """
     if getattr(sys, "frozen", False):
-        # Running under PyInstaller --onedir
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass)
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent.parent.parent
 
