@@ -342,8 +342,36 @@ def _configure_logging(verbosity: int) -> None:
     )
 
 
+def _force_utf8_stdio() -> None:
+    """Reconfigure stdout/stderr to UTF-8 (Windows cp1252 console fix).
+
+    The CLI prints Russian strings (profile listings, progress, error
+    messages). On Windows the default console encoding is cp1252 /
+    cp866 / whatever the system codepage is, and those can't encode
+    Cyrillic — the process crashes with ``UnicodeEncodeError``.
+    ``TextIOWrapper.reconfigure`` (Python 3.7+) switches the streams
+    to UTF-8 without needing an env var. Safe no-op on *nix where
+    the console already speaks UTF-8.
+
+    Best-effort: if stdout has been replaced by something exotic
+    (e.g. a StringIO in tests, or a non-TextIOWrapper pipe) we leave
+    it alone — the caller controls what happens to the output.
+    """
+    import contextlib
+
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            # StringIO / pipes / closed streams surface as AttributeError,
+            # OSError, or ValueError depending on what they swallowed.
+            with contextlib.suppress(AttributeError, OSError, ValueError):
+                reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI. Returns the process exit code."""
+    _force_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     _configure_logging(args.verbose)

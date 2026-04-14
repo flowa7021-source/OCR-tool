@@ -111,6 +111,51 @@ class TestMain:
         # argparse.error() exits with code 2
         assert exc_info.value.code == 2
 
+    def test_force_utf8_stdio_reconfigures_streams(self, monkeypatch) -> None:
+        """Regression for the cp1252 UnicodeEncodeError on Windows runners.
+
+        ``_force_utf8_stdio`` must call ``reconfigure(encoding='utf-8')``
+        on whatever ``sys.stdout`` / ``sys.stderr`` expose as a
+        reconfigure method — that's the mechanism that keeps Russian
+        CLI output from crashing on Windows with default codepage cp1252.
+        """
+        calls: list[tuple[str, dict]] = []
+
+        class _FakeStream:
+            def reconfigure(self, **kwargs) -> None:
+                calls.append(("stream", kwargs))
+
+        monkeypatch.setattr(cli.sys, "stdout", _FakeStream())
+        monkeypatch.setattr(cli.sys, "stderr", _FakeStream())
+        cli._force_utf8_stdio()
+
+        assert len(calls) == 2
+        for _, kwargs in calls:
+            assert kwargs.get("encoding") == "utf-8"
+
+    def test_force_utf8_stdio_survives_missing_reconfigure(
+        self, monkeypatch
+    ) -> None:
+        """StringIO has no reconfigure(); _force_utf8_stdio must not crash."""
+        import io
+
+        monkeypatch.setattr(cli.sys, "stdout", io.StringIO())
+        monkeypatch.setattr(cli.sys, "stderr", io.StringIO())
+        cli._force_utf8_stdio()  # must not raise
+
+    def test_force_utf8_stdio_swallows_reconfigure_errors(
+        self, monkeypatch
+    ) -> None:
+        """A closed or exotic stream raising on reconfigure is ignored."""
+
+        class _Angry:
+            def reconfigure(self, **_kwargs) -> None:
+                raise ValueError("stream is closed")
+
+        monkeypatch.setattr(cli.sys, "stdout", _Angry())
+        monkeypatch.setattr(cli.sys, "stderr", _Angry())
+        cli._force_utf8_stdio()  # swallowed; no crash
+
     def test_no_pdfs_found_returns_nonzero(self, tmp_path: Path) -> None:
         empty_dir = tmp_path / "empty"
         empty_dir.mkdir()

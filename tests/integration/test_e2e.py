@@ -464,6 +464,35 @@ class TestE2ECLI:
         for name in ("default", "low_quality_scan", "contracts_ru", "english_text", "handwritten_mixed"):
             assert name in result.stdout, f"missing {name} in {result.stdout!r}"
 
+    def test_list_profiles_survives_cp1252_stdio(self, tmp_path: Path) -> None:
+        """Regression: Windows CI crashed on Cyrillic ``print()`` with cp1252.
+
+        Force the child Python into cp1252 stdio via ``PYTHONIOENCODING``
+        — this is what the default Windows console gives you. Without
+        the ``_force_utf8_stdio`` shim in ``src/cli.py``, the first
+        ``print("Найдено профилей: …")`` would crash with
+        ``UnicodeEncodeError``. With the shim it survives on any OS.
+        """
+        import os
+        import subprocess
+        import sys
+
+        env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+        result = subprocess.run(
+            [sys.executable, "-m", "src.cli", "--list-profiles"],
+            cwd=Path(__file__).resolve().parent.parent.parent,
+            capture_output=True,
+            # Bytes, not text — the decoding is ours, not the runner's.
+            timeout=30,
+            env=env,
+        )
+        assert result.returncode == 0, (
+            f"CLI crashed under PYTHONIOENCODING=cp1252:\n{result.stderr.decode('utf-8', errors='replace')}"
+        )
+        # stdout is UTF-8 bytes thanks to the shim.
+        out = result.stdout.decode("utf-8", errors="replace")
+        assert "default" in out
+
     def test_version_flag_returns_zero(self) -> None:
         import subprocess
         import sys
