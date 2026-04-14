@@ -15,8 +15,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QSize, Qt
-from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
+from PySide6.QtCore import QByteArray, Qt
+from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
 
 from src.shared.constants import COLOR_TEXT_PRIMARY, ICONS_DIR
 

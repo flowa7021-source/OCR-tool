@@ -8,6 +8,7 @@ they remain human-editable for Russian profile names.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -45,16 +46,14 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False, indent=2)
         fh.flush()
-        try:
+        with contextlib.suppress(OSError):  # pragma: no cover - some FS lack fsync
             os.fsync(fh.fileno())
-        except OSError:  # pragma: no cover - not all FS support fsync
-            pass
     os.replace(tmp, path)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
     """Read and decode a UTF-8 JSON file."""
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
 

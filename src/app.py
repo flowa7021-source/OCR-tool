@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def create_application(argv: list[str]) -> tuple[QApplication, "MainWindow"]:
+def create_application(argv: list[str]) -> tuple[QApplication, MainWindow]:
     """Create the Qt application and main window, wiring all services.
 
     Args:

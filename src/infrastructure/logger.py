@@ -7,6 +7,7 @@ from both the main entry point and individual test setups.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import logging.handlers
 from pathlib import Path
@@ -44,10 +45,8 @@ def setup_logging(level: int = logging.INFO, log_to_console: bool = True) -> Pat
     # Idempotent setup: clear previous handlers so re-calling is safe.
     for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
-        try:
+        with contextlib.suppress(Exception):  # pragma: no cover - best-effort
             handler.close()
-        except Exception:  # pragma: no cover - best-effort cleanup
-            pass
 
     root_logger.setLevel(level)
 

@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from src.core.models import OCRConfig  # noqa: E402
-from src.shared.types import OEM, OptimizeLevel, PSM  # noqa: E402
+from src.shared.types import OEM, PSM, OptimizeLevel  # noqa: E402
 from src.ui.settings_panel import SettingsPanel  # noqa: E402
 
 

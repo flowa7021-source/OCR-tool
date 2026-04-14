@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from src.application.recovery_manager import RecoveryManager
 from src.core.models import OCRJobConfig, ProfileData, QueueItem
 from src.shared.types import JobStatus

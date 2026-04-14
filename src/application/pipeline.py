@@ -18,8 +18,8 @@ import logging
 import shutil
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 
@@ -155,7 +155,7 @@ class OCRPipeline:
             # 2. Preprocess pages -> PNGs
             page_results: list[PageResult] = []
             png_paths: list[Path] = []
-            for idx, info in enumerate(page_infos):
+            for idx, _info in enumerate(page_infos):
                 page_num = idx + 1
                 t0 = time.time()
                 png_path = workdir / f"page_{page_num:05d}.png"
@@ -528,7 +528,7 @@ class OCRPipeline:
 
         threshold = float(job.profile.ocr.confidence_threshold)
 
-        for pr, png_path in zip(page_results, png_paths):
+        for pr, png_path in zip(page_results, png_paths, strict=False):
             if pr.error is not None:
                 continue
             try:
@@ -543,7 +543,9 @@ class OCRPipeline:
                 )
                 confidences: list[float] = []
                 low_words: list[str] = []
-                for conf, word in zip(data.get("conf", []), data.get("text", [])):
+                for conf, word in zip(
+                    data.get("conf", []), data.get("text", []), strict=False
+                ):
                     try:
                         c = float(conf)
                     except (TypeError, ValueError):

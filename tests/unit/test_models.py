@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from src.core.models import OCRConfig, ProfileData, QueueItem
 from src.shared.types import (
-    BinarizationMethod,
-    DenoiseMethod,
     OEM,
     PSM,
+    BinarizationMethod,
+    DenoiseMethod,
 )
 
 

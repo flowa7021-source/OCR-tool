@@ -40,9 +40,8 @@ def test_empty_pdf_raises_empty_error(tmp_path: Path) -> None:
     fake_doc.page_count = 0
     fake_doc.needs_pass = False
 
-    with patch("fitz.open", return_value=fake_doc):
-        with pytest.raises(EmptyPdfError):
-            pipeline._analyze_pdf(tmp_path / "empty.pdf")
+    with patch("fitz.open", return_value=fake_doc), pytest.raises(EmptyPdfError):
+        pipeline._analyze_pdf(tmp_path / "empty.pdf")
     fake_doc.close.assert_called_once()
 
 
@@ -53,9 +52,8 @@ def test_encrypted_pdf_without_password_raises(tmp_path: Path) -> None:
     fake_doc.authenticate.return_value = 0  # failure
     fake_doc.page_count = 5
 
-    with patch("fitz.open", return_value=fake_doc):
-        with pytest.raises(EncryptedPdfError):
-            pipeline._analyze_pdf(tmp_path / "secret.pdf")
+    with patch("fitz.open", return_value=fake_doc), pytest.raises(EncryptedPdfError):
+        pipeline._analyze_pdf(tmp_path / "secret.pdf")
     fake_doc.close.assert_called_once()
 
 

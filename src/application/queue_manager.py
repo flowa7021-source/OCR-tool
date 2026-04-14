@@ -12,7 +12,7 @@ from __future__ import annotations
 import copy
 import logging
 import threading
-from typing import Callable
+from collections.abc import Callable
 
 from src.core.models import QueueItem
 from src.shared.types import JobStatus

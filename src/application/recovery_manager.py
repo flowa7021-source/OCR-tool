@@ -12,15 +12,14 @@ re-queued with its original config.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
-import tempfile
-from dataclasses import asdict
 from pathlib import Path
 
 from src.application.parallel_processor import job_from_dict, job_to_dict
-from src.core.models import OCRJobConfig, QueueItem
+from src.core.models import QueueItem
 from src.shared.constants import RECOVERY_DIR
 from src.shared.types import JobStatus
 
@@ -57,10 +56,8 @@ class RecoveryManager:
             os.replace(tmp, target)
         except OSError as exc:
             logger.warning("Recovery snapshot failed for %s: %s", item.job_id, exc)
-            try:
+            with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     def remove(self, job_id: str) -> None:
         """Delete the snapshot for ``job_id`` if present."""
@@ -99,10 +96,8 @@ class RecoveryManager:
                 items.append(item)
             except (OSError, json.JSONDecodeError, ValueError, KeyError) as exc:
                 logger.warning("Ignoring malformed recovery file %s: %s", path, exc)
-                try:
+                with contextlib.suppress(OSError):
                     path.unlink(missing_ok=True)
-                except OSError:
-                    pass
         return items
 
     def clear_all(self) -> int:

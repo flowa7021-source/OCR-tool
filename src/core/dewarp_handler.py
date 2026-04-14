@@ -14,8 +14,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import cv2
 import numpy as np
@@ -143,13 +144,15 @@ class DewarpHandler:
         # that may not exist on every version of the library.
         try:
             from page_dewarp.dewarp import PageDewarper  # type: ignore[import-not-found]
-        except ImportError:
-            PageDewarper = None  # type: ignore[assignment]
 
-        if PageDewarper is not None:
+            dewarper_cls: Any = PageDewarper
+        except ImportError:
+            dewarper_cls = None
+
+        if dewarper_cls is not None:
             logger.debug("Пробуем page_dewarp.dewarp.PageDewarper")
             try:
-                dewarper: Any = PageDewarper(str(input_path))
+                dewarper: Any = dewarper_cls(str(input_path))
                 # The exact method name differs between versions; try a couple.
                 for method_name in ("dewarp", "run", "process"):
                     method = getattr(dewarper, method_name, None)

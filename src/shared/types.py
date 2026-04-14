@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from enum import Enum, IntEnum
+from enum import IntEnum, StrEnum
 from typing import TypeAlias
 
 import numpy as np
@@ -112,7 +112,7 @@ _OEM_DESCRIPTIONS: dict[OEM, str] = {
 }
 
 
-class Language(str, Enum):
+class Language(StrEnum):
     """Supported OCR languages (maps to tessdata filenames)."""
 
     RUSSIAN = "rus"
@@ -123,7 +123,7 @@ class Language(str, Enum):
         return {"rus": "Русский", "eng": "English"}[self.value]
 
 
-class BinarizationMethod(str, Enum):
+class BinarizationMethod(StrEnum):
     """Binarization algorithms."""
 
     NONE = "none"
@@ -133,7 +133,7 @@ class BinarizationMethod(str, Enum):
     SAUVOLA = "sauvola"
 
 
-class DenoiseMethod(str, Enum):
+class DenoiseMethod(StrEnum):
     """Noise reduction algorithms (can be combined)."""
 
     MEDIAN = "median"
@@ -143,7 +143,7 @@ class DenoiseMethod(str, Enum):
     NLM = "nlm"
 
 
-class JobStatus(str, Enum):
+class JobStatus(StrEnum):
     """Status of an OCR job in the queue."""
 
     PENDING = "pending"
@@ -181,7 +181,7 @@ _JOB_STATUS_ICONS: dict[JobStatus, str] = {
 }
 
 
-class ExportFormat(str, Enum):
+class ExportFormat(StrEnum):
     """Supported export formats."""
 
     PDF = "pdf"

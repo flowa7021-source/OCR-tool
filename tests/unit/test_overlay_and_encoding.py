@@ -121,7 +121,7 @@ class TestExportManagerEncoding:
         ExportManager().export(result, target, ExportFormat.TXT, encoding="cp1251")
         raw = target.read_bytes()
         # UTF-8 byte sequence for Cyrillic should NOT appear
-        assert "Тестовая".encode("utf-8") not in raw
+        assert "Тестовая".encode() not in raw
         # CP1251 decoding round-trips
         text = raw.decode("cp1251")
         assert "Тестовая строка" in text

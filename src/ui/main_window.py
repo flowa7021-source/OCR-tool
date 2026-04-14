@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import base64
+import contextlib
 import copy
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QByteArray, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
@@ -25,17 +25,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.core.models import OCRJobConfig, ProfileData, QueueItem
+from src.application.recovery_manager import RecoveryManager
+from src.core.models import JobResult, OCRJobConfig, ProfileData, QueueItem
+from src.infrastructure.file_utils import safe_unique_path, suggest_output_path
 from src.shared.constants import (
     APP_NAME,
     APP_VERSION,
     IMPORT_FILE_FILTERS,
-    LOGS_DIR,
     LOG_FILE_NAME,
+    LOGS_DIR,
 )
-from src.shared.types import ExportFormat
-from src.application.recovery_manager import RecoveryManager
-from src.infrastructure.file_utils import safe_unique_path, suggest_output_path
+from src.shared.types import ExportFormat, JobStatus
 from src.ui.icons import app_icon, load_icon
 from src.ui.pdf_viewer import PDFViewer
 from src.ui.postprocess_panel import PostprocessPanel
@@ -61,11 +61,11 @@ class MainWindow(QMainWindow):
 
     def __init__(
         self,
-        profile_manager: "ProfileManager",
-        queue_manager: "QueueManager",
-        parallel_processor: "ParallelProcessor",
-        export_manager: "ExportManager",
-        settings_storage: "SettingsStorage",
+        profile_manager: ProfileManager,
+        queue_manager: QueueManager,
+        parallel_processor: ParallelProcessor,
+        export_manager: ExportManager,
+        settings_storage: SettingsStorage,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -318,10 +318,8 @@ class MainWindow(QMainWindow):
         self.preprocessing_panel.set_config(profile.preprocess)
         self.postprocess_panel.set_config(profile.postprocess)
         self.status_profile_label.setText(f"Профиль: {profile.name}")
-        try:
+        with contextlib.suppress(Exception):
             self._profile_manager.set_current(profile.name)
-        except Exception:  # noqa: BLE001
-            pass
 
     def _switch_profile_by_index(self, idx: int) -> None:
         if 0 <= idx < self.profile_combo.count():
@@ -381,8 +379,6 @@ class MainWindow(QMainWindow):
         interrupt a worker mid-page safely. New submissions won't happen
         while paused because QueueManager returns nothing from next_pending().
         """
-        from src.shared.types import JobStatus
-
         items = self._queue_manager.list_items()
         pending = [i for i in items if i.status is JobStatus.PENDING]
         paused = [i for i in items if i.status is JobStatus.PAUSED]
@@ -413,8 +409,6 @@ class MainWindow(QMainWindow):
             cancelled = self._parallel_processor.cancel_all()
         except Exception as exc:  # noqa: BLE001
             logger.warning("cancel_all failed: %s", exc)
-
-        from src.shared.types import JobStatus
 
         for item in self._queue_manager.list_items():
             if item.status in (JobStatus.PENDING, JobStatus.PAUSED):
@@ -455,9 +449,7 @@ class MainWindow(QMainWindow):
                 on_error=lambda exc, jid=item.job_id: self._on_job_failed(jid, exc),
                 job_id=item.job_id,
             )
-            from src.shared.types import JobStatus as _JS
-
-            self._queue_manager.update_status(item.job_id, _JS.RUNNING)
+            self._queue_manager.update_status(item.job_id, JobStatus.RUNNING)
             logger.info("Submitted job %s: %s", item.job_id, future)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Submission failed: %s", exc)
@@ -480,10 +472,8 @@ class MainWindow(QMainWindow):
         self.progress_widget.set_current_file(f"{name} — {stage}", current, total)
         # Periodically refresh the recovery snapshot so a crash resumes from ~ here
         if item is not None and current % 5 == 0:
-            try:
+            with contextlib.suppress(Exception):
                 self._recovery.snapshot(item)
-            except Exception:  # noqa: BLE001
-                pass
 
     def _on_job_complete(self, job_id: str, result: object) -> None:
         # Called from worker thread — marshal into GUI thread
@@ -491,7 +481,10 @@ class MainWindow(QMainWindow):
 
     def _on_job_failed(self, job_id: str, exc: BaseException) -> None:
         QTimer.singleShot(
-            0, lambda: self._queue_manager.update_status(job_id, __import__("src.shared.types", fromlist=["JobStatus"]).JobStatus.FAILED, str(exc))
+            0,
+            lambda: self._queue_manager.update_status(
+                job_id, JobStatus.FAILED, str(exc)
+            ),
         )
 
     def _apply_job_result(self, job_id: str, result: object) -> None:
@@ -504,19 +497,15 @@ class MainWindow(QMainWindow):
             logger.debug("Overlay population failed", exc_info=True)
         # Propagate status into the queue
         try:
-            from src.core.models import JobResult as _JR
-
-            if isinstance(result, _JR):
+            if isinstance(result, JobResult):
                 self._queue_manager.update_status(
                     job_id, result.status, result.error or ""
                 )
         except Exception:  # noqa: BLE001
             logger.debug("Could not update queue status", exc_info=True)
         # Remove from recovery snapshot
-        try:
+        with contextlib.suppress(Exception):
             self._recovery.remove(job_id)
-        except Exception:  # noqa: BLE001
-            pass
 
     def _on_save(self) -> None:
         if self._last_result is None:
@@ -814,8 +803,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             logger.exception("Log viewer failed: %s", exc)
             # Fall back to system default
-            from PySide6.QtGui import QDesktopServices
             from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
 
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_path)))
 
@@ -824,7 +813,6 @@ class MainWindow(QMainWindow):
         """Refresh the queue-summary label in the status bar."""
         try:
             from collections import Counter
-            from src.shared.types import JobStatus
 
             counts = Counter(i.status for i in self._queue_manager.list_items())
             total = sum(counts.values())
@@ -891,8 +879,6 @@ class MainWindow(QMainWindow):
             self._settings_storage.save(settings)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not save window state: %s", exc)
-        try:
+        with contextlib.suppress(Exception):
             self._parallel_processor.shutdown(wait=False)
-        except Exception:  # noqa: BLE001
-            pass
         super().closeEvent(event)

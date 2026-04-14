@@ -29,7 +29,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QScrollArea,
     QSplitter,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -445,7 +444,6 @@ class PDFViewer(QWidget):
                 r = int(239 * (1 - f) + 34 * f)
                 g = int(68 * (1 - f) + 197 * f)
                 b = int(68 * (1 - f) + 94 * f)
-                color = QColor(r, g, b)
                 stroke = QColor(r, g, b, 220)
                 fill = QColor(r, g, b, 40)
                 painter.setPen(QPen(stroke, 1.2))

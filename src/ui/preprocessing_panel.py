@@ -116,10 +116,7 @@ def _ndarray_to_pixmap(arr: Any) -> QPixmap:
     else:
         # Assume BGR from OpenCV, convert to RGB
         h, w, n = arr.shape
-        if n == 3:
-            rgb = arr[:, :, ::-1].copy()
-        else:
-            rgb = arr[:, :, :3][:, :, ::-1].copy()
+        rgb = arr[:, :, ::-1].copy() if n == 3 else arr[:, :, :3][:, :, ::-1].copy()
         rgb = np.ascontiguousarray(rgb)
         img = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
     return QPixmap.fromImage(img)

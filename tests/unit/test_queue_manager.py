@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import threading
-from typing import Any
-
-import pytest
 
 from src.application.queue_manager import (
     EVENT_ADDED,

@@ -20,7 +20,6 @@ from src.shared.constants import (
     DEFAULT_CONFIDENCE_THRESHOLD,
     DEFAULT_DPI,
     DEFAULT_GAUSSIAN_SIGMA,
-    DEFAULT_LANGUAGE,
     DEFAULT_MEDIAN_KSIZE,
     DEFAULT_MORPH_KSIZE,
     DEFAULT_NLM_H,
@@ -29,14 +28,13 @@ from src.shared.constants import (
     DEFAULT_TESSERACT_TIMEOUT_SEC,
 )
 from src.shared.types import (
+    OEM,
+    PSM,
     BinarizationMethod,
     DenoiseMethod,
     JobStatus,
-    OEM,
     OptimizeLevel,
-    PSM,
 )
-
 
 # ---------------------------------------------------------------------------
 # Preprocessing

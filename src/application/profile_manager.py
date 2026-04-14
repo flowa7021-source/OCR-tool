@@ -24,7 +24,7 @@ from src.core.models import (
     ProfileData,
 )
 from src.infrastructure.config_storage import ProfileStorage
-from src.shared.types import BinarizationMethod, DenoiseMethod, OEM, OptimizeLevel, PSM
+from src.shared.types import OEM, PSM, BinarizationMethod, DenoiseMethod, OptimizeLevel
 
 logger = logging.getLogger(__name__)
 

@@ -130,11 +130,14 @@ class TesseractWrapper:
             logger.debug("Binary missing while searching tessdata; continuing")
 
         for candidate in candidates:
-            if candidate.exists() and candidate.is_dir():
-                if any(candidate.glob("*.traineddata")):
-                    logger.info("Tessdata directory found: %s", candidate)
-                    TesseractWrapper._tessdata_path = candidate
-                    return candidate
+            if (
+                candidate.exists()
+                and candidate.is_dir()
+                and any(candidate.glob("*.traineddata"))
+            ):
+                logger.info("Tessdata directory found: %s", candidate)
+                TesseractWrapper._tessdata_path = candidate
+                return candidate
 
         searched = ", ".join(str(c) for c in candidates) or "<none>"
         raise TessdataNotFoundError(

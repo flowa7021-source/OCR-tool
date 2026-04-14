@@ -18,15 +18,15 @@ def processor() -> TextPostprocessor:
 
 def _noop_config(**overrides: bool) -> PostprocessConfig:
     """PostprocessConfig with everything OFF except the flag(s) we pass in."""
-    base = dict(
-        autocorrect_russian=False,
-        autocorrect_english=False,
-        merge_hyphenated=False,
-        normalize_whitespace=False,
-        normalize_unicode=False,
-        remove_artifacts=False,
-        custom_rules=[],
-    )
+    base = {
+        "autocorrect_russian": False,
+        "autocorrect_english": False,
+        "merge_hyphenated": False,
+        "normalize_whitespace": False,
+        "normalize_unicode": False,
+        "remove_artifacts": False,
+        "custom_rules": [],
+    }
     base.update(overrides)
     return PostprocessConfig(**base)
 

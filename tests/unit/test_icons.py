@@ -67,7 +67,7 @@ def test_app_icon_has_multiple_sizes(qapp: QApplication) -> None:
     assert (256, 256) in sizes
 
 
-def test_load_icon_tints_currentColor(qapp: QApplication) -> None:
+def test_load_icon_tints_current_color(qapp: QApplication) -> None:
     """The loader should substitute currentColor with the given hex color."""
     from src.ui import icons as icons_mod
 

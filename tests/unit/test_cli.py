@@ -11,7 +11,6 @@ from src import cli
 from src.core.models import JobResult, PageResult
 from src.shared.types import JobStatus
 
-
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------

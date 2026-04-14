@@ -15,7 +15,8 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from typing import Final, Pattern
+from re import Pattern
+from typing import Final
 
 from src.core.models import PostprocessConfig, RegexRule
 from src.shared.validators import ValidationError

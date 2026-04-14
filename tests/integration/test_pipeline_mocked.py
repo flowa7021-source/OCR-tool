@@ -7,8 +7,6 @@ patched out. The test still exercises the full pipeline glue code end-to-end.
 from __future__ import annotations
 
 import shutil
-import sys
-import types
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch

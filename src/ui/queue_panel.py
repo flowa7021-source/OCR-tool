@@ -79,7 +79,7 @@ class QueuePanel(QWidget):
         layout.addWidget(self.table)
 
     # -------------------------------------------------------------- queue
-    def attach_queue(self, qm: "QueueManager") -> None:
+    def attach_queue(self, qm: QueueManager) -> None:
         """Subscribe to queue events and refresh immediately."""
         self._queue = qm
         self._bridge = _SignalBridge()

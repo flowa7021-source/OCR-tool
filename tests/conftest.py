@@ -19,13 +19,12 @@ from src.core.models import (
     RegexRule,
 )
 from src.shared.types import (
+    OEM,
+    PSM,
     BinarizationMethod,
     DenoiseMethod,
-    OEM,
     OptimizeLevel,
-    PSM,
 )
-
 
 # A minimal, valid single-page PDF (approximately 400 bytes). Rendered blank.
 _MINIMAL_PDF: bytes = (

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from src.application.export_manager import ExportError, ExportManager
+from src.application.export_manager import ExportManager
 from src.core.models import JobResult, PageResult
 from src.shared.types import ExportFormat, JobStatus
 
@@ -60,7 +60,7 @@ class TestExportTxt:
         ExportManager().export_txt(result, target)
         # Ensure we didn't accidentally double-encode Cyrillic
         raw = target.read_bytes()
-        assert "Первая".encode("utf-8") in raw
+        assert "Первая".encode() in raw
 
     def test_bom_when_utf8_sig(self, tmp_path: Path) -> None:
         result = _sample_result(tmp_path / "out.pdf")

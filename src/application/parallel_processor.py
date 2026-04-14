@@ -14,15 +14,17 @@ drains them and fans out to per-job callbacks.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import multiprocessing
 import queue as queue_mod
 import threading
 import uuid
+from collections.abc import Callable
 from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from src.core.models import JobResult, OCRJobConfig, PageResult, ProfileData
 from src.shared.constants import DEFAULT_PARALLEL_WORKERS
@@ -113,7 +115,7 @@ def job_result_from_dict(data: dict[str, Any]) -> JobResult:
 
 def _worker_run_job(
     job_dict: dict[str, Any],
-    progress_queue: "multiprocessing.Queue | None" = None,
+    progress_queue: multiprocessing.Queue | None = None,
     tracking_id: str = "",
 ) -> dict[str, Any]:
     """Process-pool worker. Runs one pipeline start-to-finish.
@@ -166,11 +168,9 @@ def _worker_run_job(
         def _progress(current: int, total: int, stage: str) -> None:
             if progress_queue is None:
                 return
-            try:
+            # Queue full or closed — don't let progress reporting crash the job
+            with contextlib.suppress(Exception):
                 progress_queue.put_nowait((tracking_id, int(current), int(total), str(stage)))
-            except Exception:  # noqa: BLE001
-                # Queue full or closed — don't let progress reporting crash the job
-                pass
 
         # Read autosave setting (best-effort; defaults to 0 if unavailable).
         autosave_interval = 0
@@ -317,10 +317,8 @@ class ParallelProcessor:
             self._progress_thread.join(timeout=2.0)
             self._progress_thread = None
         if self._manager is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._manager.shutdown()
-            except Exception:  # noqa: BLE001
-                pass
             self._manager = None
         self._progress_queue = None
         with self._progress_lock:
@@ -453,7 +451,7 @@ class ParallelProcessor:
 
     # -- context manager ---------------------------------------------------
 
-    def __enter__(self) -> "ParallelProcessor":
+    def __enter__(self) -> ParallelProcessor:
         self._ensure_executor()
         return self
 

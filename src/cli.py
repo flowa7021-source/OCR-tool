@@ -27,8 +27,8 @@ import argparse
 import logging
 import sys
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 from src.shared.constants import APP_NAME, APP_VERSION
 

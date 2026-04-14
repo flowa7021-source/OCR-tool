@@ -7,6 +7,7 @@ and never via string concatenation.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
@@ -113,10 +114,8 @@ def cleanup_temp_dir(temp_dir: Path, older_than_hours: int = 24) -> int:
                     removed += 1
             elif item.is_dir():
                 # Remove empty directories opportunistically.
-                try:
+                with contextlib.suppress(OSError):
                     item.rmdir()
-                except OSError:
-                    pass
         except OSError as exc:
             logger.warning("Failed to remove %s: %s", item, exc)
 

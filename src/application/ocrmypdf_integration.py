@@ -9,9 +9,10 @@ produced a cleaned, binarised, deskewed PDF by the time we invoke OCRmyPDF.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from src.core.models import OCRConfig
 
