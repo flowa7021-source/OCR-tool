@@ -53,10 +53,24 @@ def create_application(argv: list[str]) -> tuple[QApplication, MainWindow]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Startup temp cleanup failed: %s", exc)
 
+    # setHighDpiScaleFactorRoundingPolicy must be called BEFORE any
+    # QApplication is instantiated. If a probe QApplication already
+    # exists (src/main.py spawns one so the single-instance guard's
+    # QLocalSocket has an event loop), this call is a no-op in practice
+    # but also perfectly legal on Qt 6.
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
-    app = QApplication(argv)
+    # Reuse any existing QApplication rather than creating a second one.
+    # Qt 6 / PySide6 raise ``RuntimeError: libshiboken: Please destroy
+    # the QApplication singleton before creating a new QApplication
+    # instance.`` if we try to construct two. ``main.py`` always creates
+    # the first one as a probe for the single-instance guard, so in the
+    # installed-app startup path we should always land here with one
+    # already live.
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName(APP_ORGANIZATION)
