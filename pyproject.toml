@@ -30,6 +30,8 @@ dev = [
     "pytest>=8.0",
     "pytest-qt>=4.4",
     "pytest-cov>=5.0",
+    "pytest-mock>=3.10",
+    "pytest-benchmark>=4.0",
     "black>=24.0",
     "ruff>=0.4",
     "mypy>=1.10",
@@ -72,6 +74,11 @@ strict = true
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# Default test runs ignore tests/benchmarks/ — those are slow and meant
+# to be invoked explicitly with `pytest tests/benchmarks --benchmark-only`.
+testpaths = ["tests/unit", "tests/integration"]
 python_files = "test_*.py"
 addopts = "-v --tb=short"
+markers = [
+    "benchmark: explicit performance benchmark (run via tests/benchmarks)",
+]
