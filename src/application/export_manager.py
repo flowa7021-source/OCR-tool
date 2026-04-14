@@ -105,8 +105,21 @@ class ExportManager:
             lines.append("")
 
         text = "\n".join(lines).rstrip() + "\n"
-        with open(output_path, "w", encoding=encoding, newline="\n") as fh:
-            fh.write(text)
+        try:
+            with open(output_path, "w", encoding=encoding, newline="\n") as fh:
+                fh.write(text)
+        except PermissionError as exc:
+            raise ExportError(
+                f"Файл открыт в другой программе:\n{output_path}\n\n"
+                "Закройте его и попробуйте снова."
+            ) from exc
+        except OSError as exc:
+            # Windows error 112 = ERROR_DISK_FULL; POSIX ENOSPC == 28.
+            if getattr(exc, "errno", None) == 28 or "full" in str(exc).lower():
+                raise ExportError(
+                    f"Недостаточно места на диске для записи {output_path}"
+                ) from exc
+            raise ExportError(f"Не удалось записать TXT: {exc}") from exc
         logger.info(
             "Exported TXT: %s (%d pages, encoding=%s)",
             output_path,
@@ -146,7 +159,16 @@ class ExportManager:
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
+        except PermissionError as exc:
+            raise ExportError(
+                f"Файл открыт в другой программе:\n{target}\n\n"
+                "Закройте его (например, в Adobe Reader) и попробуйте снова."
+            ) from exc
         except OSError as exc:
+            if getattr(exc, "errno", None) == 28 or "full" in str(exc).lower():
+                raise ExportError(
+                    f"Недостаточно места на диске для сохранения PDF в {target}"
+                ) from exc
             raise ExportError(f"Не удалось сохранить PDF: {exc}") from exc
         logger.info("Exported PDF: %s -> %s (%d bytes)", source, target, target.stat().st_size)
         return target

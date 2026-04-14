@@ -144,8 +144,22 @@ class OCRPipeline:
 
             # 1. Analyze
             page_infos = self._analyze_pdf(input_path)
+            full_page_count = len(page_infos)
+            # Preview mode: truncate to the first N pages when the
+            # user asked for it, so running a trial profile on a huge
+            # PDF is measured in seconds rather than hours.
+            max_pages = int(getattr(job.profile.ocr, "max_pages", 0) or 0)
+            if max_pages > 0 and full_page_count > max_pages:
+                logger.info(
+                    "Job %s: preview mode — processing first %d of %d pages",
+                    job_id, max_pages, full_page_count,
+                )
+                page_infos = page_infos[:max_pages]
             total_pages = len(page_infos)
-            logger.info("Job %s: %d pages detected", job_id, total_pages)
+            logger.info(
+                "Job %s: %d page(s) to process (document has %d)",
+                job_id, total_pages, full_page_count,
+            )
             self._report(0, total_pages, "analyze")
 
             # 2. Preprocess pages -> PNGs

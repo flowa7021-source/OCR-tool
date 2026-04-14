@@ -9,10 +9,12 @@ from __future__ import annotations
 import logging
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QAction, QKeySequence, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QPushButton,
     QTextEdit,
@@ -26,6 +28,18 @@ from src.shared.constants import COLOR_TEXT_SECONDARY
 from src.shared.types import ExportFormat
 
 logger = logging.getLogger(__name__)
+
+
+def QTextDocumentFindFlag_Backward():  # noqa: N802 — matches Qt enum name
+    """Return the backward-search flag as a Qt FindFlag value.
+
+    Wrapped so the module loads even when the specific Qt binding name
+    differs across PySide6 versions. QTextDocument.FindBackward is the
+    canonical location.
+    """
+    from PySide6.QtGui import QTextDocument
+
+    return QTextDocument.FindFlag.FindBackward
 
 
 class ResultsPanel(QWidget):
@@ -69,6 +83,42 @@ class ResultsPanel(QWidget):
         self._text_edit.setMinimumHeight(160)
         self._text_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         root.addWidget(self._text_edit, 1)
+
+        # Search bar — hidden by default, toggled by Ctrl+F / the
+        # "Поиск" button. Escape hides it and clears highlights.
+        self._search_row = QHBoxLayout()
+        self._edit_search = QLineEdit(self)
+        self._edit_search.setPlaceholderText("Найти в тексте страницы…")
+        self._edit_search.returnPressed.connect(self._find_next)
+        self._edit_search.textChanged.connect(self._on_search_text_changed)
+        self._btn_find_next = QPushButton("▼", self)
+        self._btn_find_next.setMaximumWidth(40)
+        self._btn_find_next.setToolTip("Следующее совпадение (Enter)")
+        self._btn_find_next.clicked.connect(self._find_next)
+        self._btn_find_prev = QPushButton("▲", self)
+        self._btn_find_prev.setMaximumWidth(40)
+        self._btn_find_prev.setToolTip("Предыдущее (Shift+Enter)")
+        self._btn_find_prev.clicked.connect(self._find_prev)
+        self._lbl_search_count = QLabel("", self)
+        self._lbl_search_count.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY};")
+        self._search_row.addWidget(self._edit_search, 1)
+        self._search_row.addWidget(self._btn_find_prev)
+        self._search_row.addWidget(self._btn_find_next)
+        self._search_row.addWidget(self._lbl_search_count)
+        self._search_container = QWidget(self)
+        self._search_container.setLayout(self._search_row)
+        self._search_container.hide()
+        root.addWidget(self._search_container)
+
+        # Ctrl+F toggles the search bar (scoped to this panel).
+        self._act_find = QAction("Поиск", self)
+        self._act_find.setShortcut(QKeySequence.StandardKey.Find)
+        self._act_find.triggered.connect(self._toggle_search)
+        self.addAction(self._act_find)
+        self._act_find_esc = QAction("Закрыть поиск", self)
+        self._act_find_esc.setShortcut(QKeySequence(Qt.Key.Key_Escape))
+        self._act_find_esc.triggered.connect(self._close_search)
+        self._search_container.addAction(self._act_find_esc)
 
         # Collapsible low-confidence list.
         self._btn_toggle_lowconf = QToolButton(self)
@@ -192,6 +242,83 @@ class ResultsPanel(QWidget):
         self._list_lowconf.clear()
         for word in page.low_confidence_words:
             self._list_lowconf.addItem(word)
+
+    # ------------------------------------------------------------------
+    # Search
+    # ------------------------------------------------------------------
+    def _toggle_search(self) -> None:
+        """Show the search bar and focus the input."""
+        self._search_container.setVisible(True)
+        self._edit_search.setFocus()
+        self._edit_search.selectAll()
+
+    def _close_search(self) -> None:
+        """Hide the search bar and clear any highlighted matches."""
+        self._search_container.hide()
+        self._clear_highlights()
+        self._lbl_search_count.setText("")
+
+    def _on_search_text_changed(self, text: str) -> None:
+        """Re-highlight every occurrence and update the match counter."""
+        self._clear_highlights()
+        if not text:
+            self._lbl_search_count.setText("")
+            return
+        count = self._highlight_all(text)
+        self._lbl_search_count.setText(f"{count}")
+        # Auto-jump to the first match on every keystroke.
+        if count > 0:
+            cursor = self._text_edit.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            self._text_edit.setTextCursor(cursor)
+            self._find_next()
+
+    def _highlight_all(self, needle: str) -> int:
+        """Yellow-highlight every occurrence of ``needle``; return count."""
+        doc = self._text_edit.document()
+        fmt = QTextCharFormat()
+        fmt.setBackground(Qt.GlobalColor.yellow)
+        fmt.setForeground(Qt.GlobalColor.black)
+        cursor = QTextCursor(doc)
+        count = 0
+        while True:
+            cursor = doc.find(needle, cursor)
+            if cursor.isNull():
+                break
+            cursor.mergeCharFormat(fmt)
+            count += 1
+        return count
+
+    def _clear_highlights(self) -> None:
+        doc = self._text_edit.document()
+        cursor = QTextCursor(doc)
+        cursor.select(QTextCursor.SelectionType.Document)
+        fmt = QTextCharFormat()
+        fmt.setBackground(Qt.GlobalColor.transparent)
+        cursor.mergeCharFormat(fmt)
+
+    def _find_next(self) -> None:
+        needle = self._edit_search.text()
+        if not needle:
+            return
+        found = self._text_edit.find(needle)
+        if not found:
+            # Wrap around
+            cursor = self._text_edit.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            self._text_edit.setTextCursor(cursor)
+            self._text_edit.find(needle)
+
+    def _find_prev(self) -> None:
+        needle = self._edit_search.text()
+        if not needle:
+            return
+        found = self._text_edit.find(needle, QTextDocumentFindFlag_Backward())
+        if not found:
+            cursor = self._text_edit.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            self._text_edit.setTextCursor(cursor)
+            self._text_edit.find(needle, QTextDocumentFindFlag_Backward())
 
     def _on_toggle_lowconf(self, checked: bool) -> None:
         """Expand or collapse the low-confidence words list.

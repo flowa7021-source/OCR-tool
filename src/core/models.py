@@ -155,6 +155,10 @@ class OCRConfig:
     tesseract_timeout: int = DEFAULT_TESSERACT_TIMEOUT_SEC
     optimize_level: OptimizeLevel = OptimizeLevel.LOSSLESS
     skip_text: bool = True  # don't re-OCR pages with existing text
+    #: If >0, only the first N pages of each input are processed. 0 (the
+    #: default) disables the limit and means "OCR the whole document".
+    #: Useful for previewing a profile before running a full 500-page job.
+    max_pages: int = 0
 
     @property
     def tesseract_language_string(self) -> str:

@@ -213,7 +213,32 @@ class GOTOCREngine(OCREngine):
                 img,
                 ocr_type="ocr",
             )
-        except Exception as exc:  # noqa: BLE001
+        except MemoryError as exc:
+            # Running out of system RAM is a hard stop — nothing we can
+            # recover on this page, and the next page would fail too.
+            logger.error("GOT-OCR2: system RAM exhausted on a page")
+            self.unload()
+            raise RuntimeError(
+                "Недостаточно оперативной памяти для GOT-OCR 2.0. "
+                "Закройте другие программы или используйте профиль "
+                "с движком Tesseract."
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 — catches torch.cuda OOM etc.
+            err_name = type(exc).__name__
+            # torch.cuda.OutOfMemoryError on PyTorch ≥2.1; surface a
+            # user-friendly dialog instead of the raw CUDA traceback.
+            if "OutOfMemory" in err_name or "CUDA out of memory" in str(exc):
+                logger.error("GOT-OCR2: GPU memory exhausted: %s", exc)
+                try:
+                    import torch  # type: ignore[import-not-found]
+
+                    torch.cuda.empty_cache()
+                except Exception:  # noqa: BLE001
+                    pass
+                raise RuntimeError(
+                    "GPU не хватило памяти для GOT-OCR 2.0 на этой "
+                    "странице. Понизьте DPI в профиле или запустите на CPU."
+                ) from exc
             logger.warning("GOT-OCR2 inference failed on page: %s", exc)
             return "", 0.0
         text = (text or "").strip()

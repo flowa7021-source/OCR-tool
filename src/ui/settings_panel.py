@@ -168,6 +168,18 @@ class SettingsPanel(QWidget):
         self._chk_skip_text = QCheckBox("Пропускать страницы с текстом", self._group_adv)
         adv_layout.addRow("Skip text:", self._chk_skip_text)
 
+        # Preview mode: process only the first N pages. 0 = no limit.
+        self._spin_max_pages = QSpinBox(self._group_adv)
+        self._spin_max_pages.setRange(0, 10000)
+        self._spin_max_pages.setSpecialValueText("без ограничения")
+        self._spin_max_pages.setSuffix(" стр.")
+        self._spin_max_pages.setToolTip(
+            "Режим предпросмотра: обработать только первые N страниц "
+            "документа. Удобно для проверки настроек профиля на большом "
+            "PDF перед полным запуском. 0 — без ограничения."
+        )
+        adv_layout.addRow("Ограничение страниц:", self._spin_max_pages)
+
         root.addWidget(self._group_adv)
         root.addStretch(1)
 
@@ -188,6 +200,7 @@ class SettingsPanel(QWidget):
         self._slider_conf.valueChanged.connect(self._on_conf_changed)
         self._cmb_optimize.currentIndexChanged.connect(self._schedule_emit)
         self._chk_skip_text.toggled.connect(self._schedule_emit)
+        self._spin_max_pages.valueChanged.connect(self._schedule_emit)
 
     # ------------------------------------------------------------------
     # Public API
@@ -235,6 +248,10 @@ class SettingsPanel(QWidget):
             self._chk_skip_text.blockSignals(True)
             self._chk_skip_text.setChecked(cfg.skip_text)
             self._chk_skip_text.blockSignals(False)
+
+            self._spin_max_pages.blockSignals(True)
+            self._spin_max_pages.setValue(int(getattr(cfg, "max_pages", 0) or 0))
+            self._spin_max_pages.blockSignals(False)
         finally:
             self._updating = False
 
@@ -298,6 +315,7 @@ class SettingsPanel(QWidget):
             tesseract_timeout=int(self._spin_timeout.value()),
             optimize_level=OptimizeLevel(int(optimize)),
             skip_text=self._chk_skip_text.isChecked(),
+            max_pages=int(self._spin_max_pages.value()),
         )
 
     def _on_engine_changed(self, _idx: int) -> None:

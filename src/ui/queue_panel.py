@@ -10,7 +10,10 @@ from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QHBoxLayout,
     QHeaderView,
+    QLabel,
+    QLineEdit,
     QMenu,
     QProgressBar,
     QTableWidget,
@@ -60,9 +63,24 @@ class QueuePanel(QWidget):
         self._bridge: _SignalBridge | None = None
 
         self.setAcceptDrops(True)
+        self._filter_text: str = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
+
+        # Filter row — becomes useful once the queue has more than a
+        # handful of files. Substring match on file name, case-
+        # insensitive. Empty filter shows everything.
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.addWidget(QLabel("Фильтр:", self))
+        self._edit_filter = QLineEdit(self)
+        self._edit_filter.setPlaceholderText("Подстрока в имени файла…")
+        self._edit_filter.setClearButtonEnabled(True)
+        self._edit_filter.textChanged.connect(self._on_filter_changed)
+        filter_row.addWidget(self._edit_filter, 1)
+        layout.addLayout(filter_row)
+
         self.table = QTableWidget(0, len(self.COLS), self)
         self.table.setHorizontalHeaderLabels(self.COLS)
         self.table.verticalHeader().setVisible(False)
@@ -105,13 +123,21 @@ class QueuePanel(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
-        """Rebuild table contents from the attached queue."""
+        """Rebuild table contents from the attached queue, honouring the filter."""
         if self._queue is None:
             return
         items = self._queue.list_items()
+        needle = self._filter_text.casefold()
+        if needle:
+            items = [i for i in items if needle in i.file_name.casefold()]
         self.table.setRowCount(len(items))
         for row, item in enumerate(items):
             self._set_row(row, item)
+
+    def _on_filter_changed(self, text: str) -> None:
+        """Filter-line-edit hook: store the needle and re-render."""
+        self._filter_text = text.strip()
+        self.refresh()
 
     def _set_row(self, row: int, item: QueueItem) -> None:
         status = item.status
