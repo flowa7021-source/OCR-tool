@@ -226,14 +226,46 @@ jobs:
 
       - name: Install Tesseract silently
         shell: pwsh
+        timeout-minutes: 8
         run: |
           $dest = "${{ github.workspace }}\tesseract_install"
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          Start-Process -FilePath "tesseract_dl\tesseract-setup.exe" `
-            -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$dest" `
-            -Wait -PassThru | Out-Null
+
+          $installerPath = "tesseract_dl\tesseract-setup.exe"
+          $stderr = Join-Path $Env:RUNNER_TEMP "tesseract-install.err.log"
+          $stdout = Join-Path $Env:RUNNER_TEMP "tesseract-install.out.log"
+
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          $proc = Start-Process -FilePath $installerPath `
+              -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$dest", "/LOG=$stdout" `
+              -RedirectStandardError $stderr `
+              -PassThru
+
+          # 5-minute watchdog: a healthy silent install finishes in 30-90s
+          # on windows-latest. Anything over 5 minutes means the installer
+          # is waiting for UI, antivirus has quarantined something, or the
+          # runner is in a bad state — kill it with a clear error instead
+          # of letting the whole job sit until the 6-hour job timeout.
+          $watchdogMs = 5 * 60 * 1000
+          if (-not $proc.WaitForExit($watchdogMs)) {
+            Write-Warning "Tesseract installer did not exit within 5 minutes; killing it"
+            try { $proc.Kill() } catch { Write-Warning "Kill failed: $($_.Exception.Message)" }
+            if (Test-Path $stderr) { Write-Host "--- stderr ---"; Get-Content $stderr | Write-Host }
+            if (Test-Path $stdout) { Write-Host "--- installer log ---"; Get-Content $stdout | Select-Object -Last 50 | Write-Host }
+            throw "Tesseract silent install exceeded 5-minute watchdog"
+          }
+
+          $sw.Stop()
+          Write-Host ("Installer exited in {0:N1}s with code {1}" -f $sw.Elapsed.TotalSeconds, $proc.ExitCode)
+
+          if ($proc.ExitCode -ne 0) {
+            if (Test-Path $stderr) { Write-Host "--- stderr ---"; Get-Content $stderr | Write-Host }
+            if (Test-Path $stdout) { Write-Host "--- installer log ---"; Get-Content $stdout | Select-Object -Last 50 | Write-Host }
+            throw "Tesseract installer exited with non-zero code $($proc.ExitCode)"
+          }
+
           if (-not (Test-Path "$dest\tesseract.exe")) {
-            throw "Tesseract install failed: $dest\tesseract.exe not found"
+            throw "Tesseract install reported success but $dest\tesseract.exe is missing"
           }
           & "$dest\tesseract.exe" --version
 
