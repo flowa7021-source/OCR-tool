@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +55,82 @@ from src.shared.types import BinarizationMethod, DenoiseMethod
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Preview rasterisation LRU cache
+# ---------------------------------------------------------------------------
+#
+# Every tick of a slider in this panel used to pay for a fresh
+# ``fitz.open`` + ``get_pixmap`` for the same page. On a 300 DPI A4
+# scan that's 80-150 ms — enough to feel laggy when dragging.
+#
+# The cache is an ordered dict keyed by ``(path, mtime, page_num, dpi)``.
+# Keying on mtime means an external edit of the PDF invalidates the
+# cached pixmap automatically without any explicit refresh.
+
+_PREVIEW_CACHE_MAX: int = 3  # at ~10 MB / entry keeps total under 30 MB
+_PREVIEW_CACHE: OrderedDict[tuple[str, int, int, int], Any] = OrderedDict()
+_PREVIEW_CACHE_LOCK: threading.Lock = threading.Lock()
+
+
+def _get_preview_cache() -> tuple[OrderedDict, threading.Lock]:
+    """Return the module-level preview cache + its lock (test hook)."""
+    return _PREVIEW_CACHE, _PREVIEW_CACHE_LOCK
+
+
+def _cached_rasterize(pdf_path: Path, page_num: int, dpi: int) -> Any:
+    """Return a numpy BGR/grayscale image for ``pdf_path``'s page ``page_num``.
+
+    Hits the in-memory LRU when available; falls back to PyMuPDF
+    rasterisation otherwise. Callers MUST treat the returned array as
+    read-only (we return a shallow view to save another copy).
+    """
+    import fitz  # lazy
+    import numpy as np
+
+    cache, lock = _get_preview_cache()
+    try:
+        mtime = int(pdf_path.stat().st_mtime_ns)
+    except OSError:
+        mtime = 0
+    key = (str(pdf_path), mtime, int(page_num), int(dpi))
+
+    with lock:
+        cached = cache.get(key)
+        if cached is not None:
+            cache.move_to_end(key)
+            return cached
+
+    doc = fitz.open(str(pdf_path))
+    try:
+        if page_num < 1 or page_num > doc.page_count:
+            raise ValueError(
+                f"page {page_num} out of range 1..{doc.page_count}"
+            )
+        pix = doc[page_num - 1].get_pixmap(dpi=dpi)
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+            pix.height, pix.width, pix.n
+        )
+        if pix.n == 4:
+            arr = arr[:, :, :3]
+        arr = arr.copy()  # detach from PyMuPDF buffer so the cache survives doc.close
+    finally:
+        doc.close()
+
+    with lock:
+        cache[key] = arr
+        cache.move_to_end(key)
+        while len(cache) > _PREVIEW_CACHE_MAX:
+            cache.popitem(last=False)
+    return arr
+
+
+def clear_preview_cache() -> None:
+    """Drop every cached preview page (used by tests and UI reset hooks)."""
+    cache, lock = _get_preview_cache()
+    with lock:
+        cache.clear()
+
+
 class _PreviewWorker(QRunnable):
     """Background worker that renders a preview step."""
 
@@ -76,26 +154,14 @@ class _PreviewWorker(QRunnable):
 
     def run(self) -> None:  # noqa: D401 — Qt override
         try:
-            import fitz  # PyMuPDF, lazy
-            import numpy as np
-
             from src.core.image_preprocessor import preview_step
 
-            doc = fitz.open(str(self._pdf_path))
-            try:
-                if self._page_num < 1 or self._page_num > doc.page_count:
-                    raise ValueError(f"page {self._page_num} out of range 1..{doc.page_count}")
-                page = doc[self._page_num - 1]
-                pix = page.get_pixmap(dpi=120)
-                arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-                    pix.height, pix.width, pix.n
-                )
-                if pix.n == 4:
-                    arr = arr[:, :, :3]
-                before = arr.copy()
-                after = preview_step(arr, self._stage, self._config)
-            finally:
-                doc.close()
+            # Use the module-level LRU cache: the user typically drags
+            # sliders while staying on the same page, so 99 % of preview
+            # repaints skip rasterisation entirely.
+            arr = _cached_rasterize(self._pdf_path, self._page_num, dpi=120)
+            before = arr  # read-only view; preview_step is not mutating
+            after = preview_step(arr, self._stage, self._config)
 
             before_pix = _ndarray_to_pixmap(before)
             after_pix = _ndarray_to_pixmap(after)

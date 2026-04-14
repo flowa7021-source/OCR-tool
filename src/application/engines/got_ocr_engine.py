@@ -109,6 +109,32 @@ class GOTOCREngine(OCREngine):
             "GOT-OCR2 ready on %s in %.1fs", self._device, time.time() - t0
         )
 
+    def unload(self) -> None:
+        """Release GOT-OCR 2.0 weights (~580 MB RAM / GPU memory).
+
+        Called from :func:`src.application.engines.registry.reset_cache`
+        which runs after a model download, after a delete, and any
+        other time the engine cache is invalidated. The next OCR run
+        triggers a fresh :meth:`_load_model`.
+        """
+        if self._model is None and self._tokenizer is None:
+            return
+        logger.info("Unloading GOT-OCR2 weights (device=%s)", self._device)
+        self._model = None
+        self._tokenizer = None
+        # Help the CUDA allocator return memory to the OS; on CPU this
+        # is purely a hint to the GC.
+        try:
+            import gc
+
+            gc.collect()
+            import torch  # type: ignore[import-not-found]
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            logger.debug("unload cleanup non-fatal error", exc_info=True)
+
     # ----------------------------------------------------------- run
     def run(
         self,

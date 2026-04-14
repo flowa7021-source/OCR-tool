@@ -109,3 +109,14 @@ class OCREngine(ABC):
                 caller should surface a user-friendly message.
             RuntimeError: For unrecoverable internal failures.
         """
+
+    def unload(self) -> None:
+        """Release any expensive resources held by the engine.
+
+        Default implementation is a no-op; override when the engine
+        keeps heavy objects around (ML model weights, GPU buffers,
+        opened file handles). Called by the engine registry when the
+        cache is reset and when the user switches to a different
+        engine via the UI.
+        """
+        return

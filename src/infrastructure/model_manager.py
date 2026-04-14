@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -111,9 +112,18 @@ class ModelDownloadError(RuntimeError):
 class ModelManager:
     """Discover, download, and locate optional HTR model weights."""
 
+    #: How long an ``is_available`` result is trusted before we re-stat
+    #: the filesystem. 5 s is short enough that a download finishing via
+    #: the UI becomes visible on the next refresh, and long enough that
+    #: rapid UI queries (engine dropdown + "Download…" action refresh)
+    #: don't hammer the disk.
+    AVAILABILITY_TTL_SEC: float = 5.0
+
     def __init__(self, models_dir: Path | None = None) -> None:
         self.models_dir = Path(models_dir or MODELS_DIR)
         self.models_dir.mkdir(parents=True, exist_ok=True)
+        # Per-model availability cache: model_id -> (monotonic_time, result)
+        self._availability_cache: dict[str, tuple[float, bool]] = {}
 
     # ---------------------------------------------------------------- spec
     def spec_for(self, model_id: str) -> ModelSpec:
@@ -129,15 +139,43 @@ class ModelManager:
 
     # ----------------------------------------------------------- presence
     def is_available(self, model_id: str) -> bool:
-        """Return True if every file in the manifest exists locally."""
+        """Return True if every file in the manifest exists locally.
+
+        Cached for :data:`AVAILABILITY_TTL_SEC` seconds. Callers that
+        just downloaded or deleted a model should invoke
+        :meth:`invalidate_availability` afterwards to skip the TTL.
+        """
+        now = time.monotonic()
+        cached = self._availability_cache.get(model_id)
+        if cached is not None:
+            stamp, value = cached
+            if now - stamp < self.AVAILABILITY_TTL_SEC:
+                return value
+
         try:
             spec = self.spec_for(model_id)
         except KeyError:
+            self._availability_cache[model_id] = (now, False)
             return False
         target = self.model_dir(model_id)
         if not target.is_dir():
-            return False
-        return all((target / f.name).is_file() for f in spec.files)
+            result = False
+        else:
+            result = all((target / f.name).is_file() for f in spec.files)
+        self._availability_cache[model_id] = (now, result)
+        return result
+
+    def invalidate_availability(self, model_id: str | None = None) -> None:
+        """Drop the cached availability result(s).
+
+        When called with no argument every entry is dropped; otherwise
+        just the one matching ``model_id``. Called from the download
+        dialog on success and from the "Remove model" menu action.
+        """
+        if model_id is None:
+            self._availability_cache.clear()
+        else:
+            self._availability_cache.pop(model_id, None)
 
     def list_local_models(self) -> list[str]:
         """Return ids of fully-downloaded models."""
@@ -207,16 +245,21 @@ class ModelManager:
             downloaded_bytes += dest.stat().st_size
 
         logger.info("Model %s downloaded to %s", model_id, target)
+        # Invalidate the availability cache so the next `is_available`
+        # reflects the newly-downloaded files immediately.
+        self.invalidate_availability(model_id)
         return target
 
     def remove(self, model_id: str) -> bool:
         """Delete the on-disk model directory. Returns True if removed."""
         target = self.model_dir(model_id)
         if not target.exists():
+            self.invalidate_availability(model_id)
             return False
         import shutil
 
         shutil.rmtree(target, ignore_errors=False)
+        self.invalidate_availability(model_id)
         logger.info("Removed model %s", model_id)
         return True
 

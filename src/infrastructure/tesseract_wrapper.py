@@ -276,3 +276,18 @@ class TesseractWrapper:
         cls._tessdata_path = None
         cls._version = None
         cls._configured = False
+
+    def refresh(self) -> tuple[bool, str]:
+        """Re-probe the filesystem and reconfigure pytesseract.
+
+        Call this after any runtime change to the Tesseract install —
+        for example when the user just dropped a new ``*.traineddata``
+        into the tessdata directory, or after a bundled Tesseract
+        update. Cheaper than restarting the app, and the only supported
+        way to make the process pick up the new files without a
+        restart.
+
+        Returns the result of :meth:`verify` on the refreshed cache.
+        """
+        type(self).reset()
+        return self.verify()

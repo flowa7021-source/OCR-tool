@@ -317,7 +317,14 @@ class AppSettings:
 
 
 class SettingsStorage:
-    """Load and save :class:`AppSettings` to ``CONFIG_DIR/settings.json``."""
+    """Load and save :class:`AppSettings` to ``CONFIG_DIR/settings.json``.
+
+    Reads are cached by file ``st_mtime_ns``: as long as the file on
+    disk hasn't changed since the last read we skip JSON parsing
+    entirely. The resource-usage status-bar timer hits ``load()`` every
+    two seconds while the app runs, so the cache saves ~30 JSON.parse
+    calls per minute at negligible memory cost.
+    """
 
     def __init__(self, config_dir: Path | None = None) -> None:
         """Create a new settings storage.
@@ -329,19 +336,64 @@ class SettingsStorage:
         self.config_dir: Path = config_dir if config_dir is not None else CONFIG_DIR
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.path: Path = self.config_dir / "settings.json"
+        # mtime_ns of the cached settings, or None if cache is cold
+        self._cached_mtime: int | None = None
+        self._cached_settings: AppSettings | None = None
 
     def load(self) -> AppSettings:
-        """Load settings from disk, returning defaults on any error."""
+        """Load settings from disk, returning defaults on any error.
+
+        Fast path: if the file's ``st_mtime_ns`` matches the cached
+        value we return a deep copy of the cached object. Slow path:
+        parse JSON, update the cache, return a copy.
+        """
+        import copy as _copy
+
         if not self.path.exists():
-            return AppSettings()
+            # File absent — cache defaults too so repeated calls are cheap
+            if self._cached_settings is None:
+                self._cached_settings = AppSettings()
+                self._cached_mtime = None
+            return _copy.deepcopy(self._cached_settings)
+
+        try:
+            mtime = self.path.stat().st_mtime_ns
+        except OSError:
+            mtime = None
+
+        if (
+            mtime is not None
+            and mtime == self._cached_mtime
+            and self._cached_settings is not None
+        ):
+            return _copy.deepcopy(self._cached_settings)
+
         try:
             data = _read_json(self.path)
-            return AppSettings.from_dict(data)
+            settings = AppSettings.from_dict(data)
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
             logger.error("Failed to load settings (%s); using defaults", exc)
-            return AppSettings()
+            settings = AppSettings()
+            mtime = None
+
+        self._cached_mtime = mtime
+        self._cached_settings = settings
+        return _copy.deepcopy(settings)
 
     def save(self, settings: AppSettings) -> None:
         """Atomically persist ``settings`` to disk."""
+        import copy as _copy
+
         _atomic_write_json(self.path, settings.to_dict())
+        try:
+            self._cached_mtime = self.path.stat().st_mtime_ns
+            self._cached_settings = _copy.deepcopy(settings)
+        except OSError:
+            self._cached_mtime = None
+            self._cached_settings = None
         logger.debug("Settings saved to %s", self.path)
+
+    def invalidate_cache(self) -> None:
+        """Force the next :meth:`load` to re-read from disk."""
+        self._cached_mtime = None
+        self._cached_settings = None

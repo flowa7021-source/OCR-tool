@@ -71,5 +71,17 @@ def list_engines() -> list[tuple[OCREngineKind, str, bool, str]]:
 
 
 def reset_cache() -> None:
-    """Clear the engine cache (test hook)."""
+    """Clear the engine cache, releasing any expensive resources first.
+
+    Every cached engine gets :meth:`OCREngine.unload` called before it
+    is dropped — this is how GOT-OCR 2.0's ~580 MB of weights are
+    returned to the OS after the user switches engines or deletes the
+    model. For engines whose ``unload`` is a no-op (Tesseract) this is
+    free.
+    """
+    for engine in list(_CACHE.values()):
+        try:
+            engine.unload()
+        except Exception:  # noqa: BLE001
+            logger.debug("engine.unload raised", exc_info=True)
     _CACHE.clear()
