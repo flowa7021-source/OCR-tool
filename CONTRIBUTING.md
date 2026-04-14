@@ -1,5 +1,12 @@
 # Участие в разработке OCR Studio
 
+Документация для пользователей — в каталоге [`docs/`](docs/):
+
+- [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) — UX-сценарии
+- [`docs/KEYBOARD_SHORTCUTS.md`](docs/KEYBOARD_SHORTCUTS.md) — горячие клавиши
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — слои и потоки данных
+- [`docs/PRIVACY.md`](docs/PRIVACY.md) — что пишется на диск
+
 ## Настройка окружения
 
 ```bash

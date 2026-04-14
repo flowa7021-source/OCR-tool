@@ -42,6 +42,7 @@ class PreferencesDialog(QDialog):
 
         self._storage = settings_storage
         self._settings: AppSettings = settings_storage.load()
+        self._initial_theme: str = (self._settings.theme or "dark").lower()
 
         self._build_ui()
         self._populate()
@@ -78,8 +79,9 @@ class PreferencesDialog(QDialog):
         ui_form = QFormLayout(ui_group)
         self.dark_theme = QCheckBox("Тёмная тема", self)
         self.dark_theme.setToolTip(
-            "Переключение темы вступает в силу после перезапуска приложения."
+            "Переключение темы применяется мгновенно (без перезапуска)."
         )
+        self.dark_theme.toggled.connect(self._on_theme_toggled)
         ui_form.addRow(self.dark_theme)
         root.addWidget(ui_group)
 
@@ -95,7 +97,7 @@ class PreferencesDialog(QDialog):
             parent=self,
         )
         buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
+        buttons.rejected.connect(self._on_reject)
         root.addWidget(buttons)
 
     def _populate(self) -> None:
@@ -129,8 +131,70 @@ class PreferencesDialog(QDialog):
             logger.exception("Failed to save preferences: %s", exc)
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить настройки: {exc}")
             return
+        # Sync the main window's View→Theme checkbox with the saved choice.
+        parent = self.parent()
+        action = getattr(parent, "action_light_theme", None)
+        if action is not None:
+            try:
+                action.blockSignals(True)
+                action.setChecked(self._settings.theme == "light")
+            finally:
+                action.blockSignals(False)
         self.accept()
+
+    # -------------------------------------------------------------- cancel
+    def _on_reject(self) -> None:
+        """Restore the pre-dialog theme if the user touched the toggle."""
+        from PySide6.QtWidgets import QApplication
+
+        from src.ui.theme import apply_theme
+
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                apply_theme(app, self._initial_theme)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Restoring theme on cancel failed: %s", exc)
+        # Restore the main window's menu checkbox too.
+        parent = self.parent()
+        action = getattr(parent, "action_light_theme", None)
+        if action is not None:
+            try:
+                action.blockSignals(True)
+                action.setChecked(self._initial_theme == "light")
+            finally:
+                action.blockSignals(False)
+        self.reject()
 
     def settings(self) -> AppSettings:
         """Return the (possibly modified) settings after the dialog closes."""
         return self._settings
+
+    # ----------------------------------------------------------- live theme
+    def _on_theme_toggled(self, checked: bool) -> None:
+        """Re-apply the stylesheet immediately so the user sees the change.
+
+        The preference itself is only persisted on OK. If the user cancels,
+        the main window restores the previous theme from settings on close.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        from src.ui.theme import apply_theme
+
+        app = QApplication.instance()
+        if app is None:
+            return
+        try:
+            apply_theme(app, "dark" if checked else "light")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Live theme re-apply failed: %s", exc)
+
+        # Let the main window sync its menu checkbox if one is present.
+        parent = self.parent()
+        action = getattr(parent, "action_light_theme", None)
+        if action is not None:
+            try:
+                action.blockSignals(True)
+                action.setChecked(not checked)
+            finally:
+                action.blockSignals(False)

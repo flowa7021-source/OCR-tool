@@ -282,6 +282,20 @@ class MainWindow(QMainWindow):
         self.action_overlay.toggled.connect(self._on_toggle_overlay)
         view_menu.addAction(self.action_overlay)
 
+        view_menu.addSeparator()
+        self.action_light_theme = QAction("Светлая тема", self)
+        self.action_light_theme.setCheckable(True)
+        self.action_light_theme.setToolTip(
+            "Переключить между тёмной и светлой темой (без перезапуска)"
+        )
+        try:
+            current_theme = (self._settings_storage.load().theme or "dark").lower()
+        except Exception:  # noqa: BLE001
+            current_theme = "dark"
+        self.action_light_theme.setChecked(current_theme == "light")
+        self.action_light_theme.toggled.connect(self._on_toggle_theme)
+        view_menu.addAction(self.action_light_theme)
+
         help_menu = menubar.addMenu("&Справка")
         about_act = QAction("О программе", self)
         about_act.setShortcut(QKeySequence(Qt.Key.Key_F1))
@@ -844,6 +858,31 @@ class MainWindow(QMainWindow):
         """Menu callback: switch OCR overlay on the PDF viewer."""
         self.pdf_viewer.set_overlay_visible(bool(checked))
 
+    # ------------------------------------------------------------ theme
+    def _on_toggle_theme(self, checked: bool) -> None:
+        """Menu callback: re-apply the light or dark stylesheet at runtime.
+
+        The new choice is persisted to ``SettingsStorage`` so the next
+        launch honours it (see ``src/app.py``). Unchecking means dark.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        from src.ui.theme import apply_theme
+
+        kind = "light" if checked else "dark"
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                apply_theme(app, kind)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("apply_theme(%s) failed: %s", kind, exc)
+        try:
+            settings = self._settings_storage.load()
+            settings.theme = kind
+            self._settings_storage.save(settings)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not persist theme preference: %s", exc)
+
     def _populate_overlay_from_result(self, result: object) -> None:
         """Extract word boxes from the produced searchable PDF and feed the viewer.
 
@@ -972,8 +1011,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 APP_NAME,
-                "Настройки сохранены. Некоторые изменения (например, число воркеров) "
-                "вступят в силу после перезапуска.",
+                "Настройки сохранены. Тема применяется сразу; число воркеров "
+                "вступит в силу после перезапуска.",
             )
 
     # ------------------------------------------------------------ help

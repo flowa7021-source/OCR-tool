@@ -14,9 +14,16 @@
 - **Постобработка текста** — автокоррекция типичных OCR-ошибок (rus/eng), пользовательские regex-правила.
 - **Тёмная тема** (QSS, PySide6 / Qt 6).
 
+## Документация
+
+- [Руководство пользователя](docs/USER_GUIDE.md) — установка, первый OCR, профили, HTR.
+- [Горячие клавиши](docs/KEYBOARD_SHORTCUTS.md) — полный список сочетаний.
+- [Архитектура](docs/ARCHITECTURE.md) — схема слоёв и поток данных.
+- [Privacy & data storage](docs/PRIVACY.md) — что хранится локально, что уходит в сеть.
+
 ## Архитектура
 
-Слоистая архитектура (Presentation / Application / Domain / Infrastructure). См. [AGENTS.md](AGENTS.md) или исходный код `src/`.
+Слоистая архитектура (Presentation / Application / Domain / Infrastructure). Подробнее — в [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ```
 src/

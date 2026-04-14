@@ -359,15 +359,24 @@ QLabel[role="error"] {{ color: {COLOR_ERROR}; }}
 """
 
 
-def apply_theme(app: QApplication) -> None:
-    """Apply the dark stylesheet and a matching palette to the QApplication.
+def apply_theme(app: QApplication, kind: str = "dark") -> None:
+    """Apply a themed stylesheet and matching palette to the QApplication.
 
     Args:
         app: Running :class:`QApplication` instance.
+        kind: ``"dark"`` (default) or ``"light"``. Unknown values fall
+            back to dark so the user never loses UI contrast entirely.
     """
     if app is None:  # pragma: no cover - defensive
         raise ValueError("QApplication instance is required")
+    kind = (kind or "dark").lower()
+    if kind == "light":
+        _apply_light(app)
+    else:
+        _apply_dark(app)
 
+
+def _apply_dark(app: QApplication) -> None:
     palette = QPalette()
     palette.setColor(QPalette.ColorRole.Window, QColor(COLOR_BG_MAIN))
     palette.setColor(QPalette.ColorRole.WindowText, QColor(COLOR_TEXT_PRIMARY))
@@ -395,3 +404,161 @@ def apply_theme(app: QApplication) -> None:
     app.setPalette(palette)
     app.setStyleSheet(DARK_QSS)
     logger.debug("Dark theme applied")
+
+
+# Light theme palette: standard Windows/macOS-ish off-white canvas
+# with the same accent as dark mode so branding stays consistent.
+_LIGHT_BG_MAIN = "#FAFAFB"
+_LIGHT_BG_PANEL = "#F0F0F4"
+_LIGHT_BG_CONTROL = "#FFFFFF"
+_LIGHT_TEXT_PRIMARY = "#1A1A22"
+_LIGHT_TEXT_SECONDARY = "#5A5A66"
+_LIGHT_BORDER = "#D0D0DB"
+
+
+LIGHT_QSS: str = f"""
+QMainWindow, QWidget {{
+    background-color: {_LIGHT_BG_MAIN};
+    color: {_LIGHT_TEXT_PRIMARY};
+    font-size: 10pt;
+}}
+QGroupBox {{
+    background-color: {_LIGHT_BG_PANEL};
+    border: 1px solid {_LIGHT_BORDER};
+    border-radius: 4px;
+    margin-top: 1ex;
+    padding: 8px 6px 6px 6px;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 6px;
+}}
+QLineEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
+    background-color: {_LIGHT_BG_CONTROL};
+    color: {_LIGHT_TEXT_PRIMARY};
+    border: 1px solid {_LIGHT_BORDER};
+    border-radius: 3px;
+    padding: 3px 6px;
+}}
+QPushButton {{
+    background-color: {_LIGHT_BG_CONTROL};
+    color: {_LIGHT_TEXT_PRIMARY};
+    border: 1px solid {_LIGHT_BORDER};
+    border-radius: 3px;
+    padding: 5px 12px;
+}}
+QPushButton:hover {{ background-color: #EDEDF0; }}
+QPushButton:pressed {{ background-color: #DCDCE3; }}
+QPushButton:disabled {{ color: {_LIGHT_TEXT_SECONDARY}; }}
+QTableWidget, QListWidget {{
+    background-color: {_LIGHT_BG_CONTROL};
+    alternate-background-color: #F6F6FA;
+    selection-background-color: {COLOR_ACCENT};
+    selection-color: white;
+    border: 1px solid {_LIGHT_BORDER};
+}}
+QHeaderView::section {{
+    background-color: {_LIGHT_BG_PANEL};
+    color: {_LIGHT_TEXT_PRIMARY};
+    padding: 4px 6px;
+    border: none;
+    border-right: 1px solid {_LIGHT_BORDER};
+    border-bottom: 1px solid {_LIGHT_BORDER};
+}}
+QMenuBar {{
+    background-color: {_LIGHT_BG_MAIN};
+    color: {_LIGHT_TEXT_PRIMARY};
+}}
+QMenuBar::item:selected, QMenu::item:selected {{
+    background-color: {COLOR_ACCENT};
+    color: white;
+}}
+QMenu {{
+    background-color: {_LIGHT_BG_CONTROL};
+    color: {_LIGHT_TEXT_PRIMARY};
+    border: 1px solid {_LIGHT_BORDER};
+}}
+QStatusBar {{
+    background-color: {_LIGHT_BG_PANEL};
+    border-top: 1px solid {_LIGHT_BORDER};
+}}
+QToolBar {{
+    background-color: {_LIGHT_BG_PANEL};
+    border: none;
+    spacing: 4px;
+}}
+QTabWidget::pane {{ border: 1px solid {_LIGHT_BORDER}; }}
+QTabBar::tab {{
+    background-color: {_LIGHT_BG_PANEL};
+    color: {_LIGHT_TEXT_SECONDARY};
+    padding: 6px 12px;
+    border: 1px solid {_LIGHT_BORDER};
+    border-bottom: none;
+}}
+QTabBar::tab:selected {{
+    background-color: {_LIGHT_BG_CONTROL};
+    color: {_LIGHT_TEXT_PRIMARY};
+}}
+QScrollBar:vertical, QScrollBar:horizontal {{
+    background-color: {_LIGHT_BG_PANEL};
+    border: none;
+}}
+QScrollBar::handle {{
+    background-color: #BFBFCB;
+    border-radius: 3px;
+    min-height: 20px;
+    min-width: 20px;
+}}
+QScrollBar::handle:hover {{ background-color: #A8A8B8; }}
+QProgressBar {{
+    background-color: {_LIGHT_BG_CONTROL};
+    border: 1px solid {_LIGHT_BORDER};
+    border-radius: 3px;
+    text-align: center;
+}}
+QProgressBar::chunk {{
+    background-color: {COLOR_ACCENT};
+    border-radius: 2px;
+}}
+QSplitter::handle {{ background-color: {_LIGHT_BORDER}; }}
+QDockWidget::title {{
+    background-color: {_LIGHT_BG_PANEL};
+    padding: 4px;
+}}
+QToolTip {{
+    background-color: {_LIGHT_BG_CONTROL};
+    color: {_LIGHT_TEXT_PRIMARY};
+    border: 1px solid {_LIGHT_BORDER};
+    padding: 4px 6px;
+}}
+"""
+
+
+def _apply_light(app: QApplication) -> None:
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(_LIGHT_BG_MAIN))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(_LIGHT_TEXT_PRIMARY))
+    palette.setColor(QPalette.ColorRole.Base, QColor(_LIGHT_BG_CONTROL))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(_LIGHT_BG_PANEL))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(_LIGHT_BG_CONTROL))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(_LIGHT_TEXT_PRIMARY))
+    palette.setColor(QPalette.ColorRole.Text, QColor(_LIGHT_TEXT_PRIMARY))
+    palette.setColor(QPalette.ColorRole.Button, QColor(_LIGHT_BG_CONTROL))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(_LIGHT_TEXT_PRIMARY))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(COLOR_ACCENT))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    palette.setColor(QPalette.ColorRole.Link, QColor(COLOR_ACCENT_ALT))
+    palette.setColor(
+        QPalette.ColorGroup.Disabled,
+        QPalette.ColorRole.Text,
+        QColor(_LIGHT_TEXT_SECONDARY),
+    )
+    palette.setColor(
+        QPalette.ColorGroup.Disabled,
+        QPalette.ColorRole.ButtonText,
+        QColor(_LIGHT_TEXT_SECONDARY),
+    )
+    app.setPalette(palette)
+    app.setStyleSheet(LIGHT_QSS)
+    logger.debug("Light theme applied")

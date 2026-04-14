@@ -67,11 +67,17 @@ def create_application(argv: list[str]) -> tuple[QApplication, MainWindow]:
     # so the user would just see the window disappear.
     _install_excepthook()
 
-    # Apply theme
+    # Apply theme — honour the persisted choice if available.
     try:
+        from src.infrastructure.config_storage import SettingsStorage
         from src.ui.theme import apply_theme
 
-        apply_theme(app)
+        theme_kind = "dark"
+        try:
+            theme_kind = (SettingsStorage().load().theme or "dark").lower()
+        except Exception:  # noqa: BLE001
+            theme_kind = "dark"
+        apply_theme(app, theme_kind)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to apply theme: %s", exc)
 
