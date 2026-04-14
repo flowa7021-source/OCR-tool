@@ -395,8 +395,17 @@ class MainWindow(QMainWindow):
             self.profile_combo.addItem(f"{prefix}{p.name}", userData=p.name)
         self.profile_combo.blockSignals(False)
         if profiles:
-            self.profile_combo.setCurrentIndex(0)
-            self._apply_profile(profiles[0])
+            # Prefer the "universal_accurate" preset as the first-run
+            # pick — it's the opinionated max-accuracy bundle users get
+            # "out of the box" without hand-tuning every knob. If it's
+            # missing (tests with a stripped-down ProfileManager) we
+            # fall back to whatever index 0 happens to be.
+            preferred_idx = next(
+                (i for i, p in enumerate(profiles) if p.name == "universal_accurate"),
+                0,
+            )
+            self.profile_combo.setCurrentIndex(preferred_idx)
+            self._apply_profile(profiles[preferred_idx])
 
     def _on_profile_selected(self, idx: int) -> None:
         name = self.profile_combo.itemData(idx)

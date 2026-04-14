@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 BUILTIN_NAMES: tuple[str, ...] = (
+    "universal_accurate",
     "default",
     "low_quality_scan",
     "contracts_ru",
@@ -144,6 +145,7 @@ class ProfileManager:
         persist across upgrades.
         """
         builders = {
+            "universal_accurate": self._build_universal_accurate,
             "default": self._build_default,
             "low_quality_scan": self._build_low_quality,
             "contracts_ru": self._build_contracts_ru,
@@ -161,6 +163,85 @@ class ProfileManager:
                 logger.info("Seeded builtin profile: %s", profile.name)
 
     # -- individual builders ----------------------------------------------
+
+    def _build_universal_accurate(self) -> ProfileData:
+        """Universal max-accuracy preset.
+
+        The "just give me the best text" profile. Every preprocessing
+        step that helps OCR accuracy across a wide range of inputs is
+        turned on with conservative parameters:
+
+          * **deskew** — auto-detect; essential, non-destructive.
+          * **CLAHE** contrast — ``clip=2.0`` for even lighting without
+            over-amplifying noise.
+          * **Background removal** — flattens page tint / vignetting
+            (``blur_kernel=55`` is large enough to separate text from
+            paper on typical scans).
+          * **Denoise chain** — median ``ksize=3`` then a morphological
+            close ``ksize=2`` to repair sub-pixel breaks in thin glyphs
+            without swallowing dots of ``ё``, ``ь``, ``ъ``.
+          * **Adaptive Gaussian binarisation** (``block=31``, ``C=10``)
+            instead of OTSU: better on uneven lighting and safe on
+            clean pages too.
+          * **OCR** at 300 DPI with PSM=AUTO, OEM=LSTM_ONLY (best quality
+            Tesseract mode), rus+eng, LOSSLESS PDF.
+          * **Post-processing**: everything enabled — Unicode NFC,
+            hyphenation merge, whitespace normalization, artifact line
+            removal, Russian + English autocorrect.
+
+        Users who need raw speed should pick ``default`` (OTSU,
+        single-step median). Users with awful scans should pick
+        ``low_quality_scan`` (NLM denoise + larger CLAHE).
+        """
+        preprocess = PreprocessConfig(
+            deskew=DeskewConfig(enabled=True, auto_detect=True, max_angle=45.0),
+            dewarp=DewarpConfig(enabled=False),
+            binarization=BinarizationConfig(
+                method=BinarizationMethod.ADAPTIVE_GAUSSIAN,
+                adaptive_block_size=31,
+                adaptive_c=10,
+            ),
+            denoise=DenoiseConfig(
+                enabled=True,
+                steps=[
+                    DenoiseStep(method=DenoiseMethod.MEDIAN, ksize=3),
+                    DenoiseStep(method=DenoiseMethod.MORPH_CLOSE, morph_ksize=3),
+                ],
+            ),
+            contrast=ContrastConfig(
+                clahe_enabled=True, clahe_clip=2.0, clahe_tile=8
+            ),
+            background=BackgroundConfig(enabled=True, blur_kernel=55),
+        )
+        ocr = OCRConfig(
+            languages=["rus", "eng"],
+            primary_language="rus",
+            psm=PSM.AUTO,
+            oem=OEM.LSTM_ONLY,
+            dpi=300,
+            optimize_level=OptimizeLevel.LOSSLESS,
+            confidence_threshold=60.0,
+            skip_text=True,
+        )
+        postprocess = PostprocessConfig(
+            autocorrect_russian=True,
+            autocorrect_english=True,
+            merge_hyphenated=True,
+            normalize_whitespace=True,
+            normalize_unicode=True,
+            remove_artifacts=True,
+            custom_rules=[],
+        )
+        return ProfileData(
+            name="universal_accurate",
+            description=(
+                "Универсальный «максимум точности»: adaptive Gaussian + "
+                "CLAHE + удаление фона + deskew, вся постобработка"
+            ),
+            preprocess=preprocess,
+            ocr=ocr,
+            postprocess=postprocess,
+        )
 
     def _build_default(self) -> ProfileData:
         """Balanced defaults suitable for most scans."""

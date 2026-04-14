@@ -450,3 +450,57 @@ def _apply_compiled_rules(
                 exc,
             )
     return current
+
+
+# ---------------------------------------------------------------------------
+# Universal "max cleanup" preset
+# ---------------------------------------------------------------------------
+
+
+def build_universal_postprocess_config() -> PostprocessConfig:
+    """Return the preset used by the ``universal_accurate`` builtin profile.
+
+    Turns on every safe cleanup step:
+
+    * ``normalize_unicode`` — NFC form (canonical composition).
+    * ``merge_hyphenated`` — glue end-of-line hyphens back together.
+    * ``normalize_whitespace`` — collapse runs of spaces, strip trailing,
+      cap blank-line runs at 2.
+    * ``remove_artifacts`` — drop lines that are pure punctuation /
+      OCR noise.
+    * ``autocorrect_russian`` — built-in Russian rule set.
+    * ``autocorrect_english`` — built-in English rule set.
+
+    No user custom rules by default — the universal preset is meant to
+    be a safe baseline on top of which users can layer their own.
+    """
+    return PostprocessConfig(
+        autocorrect_russian=True,
+        autocorrect_english=True,
+        merge_hyphenated=True,
+        normalize_whitespace=True,
+        normalize_unicode=True,
+        remove_artifacts=True,
+        custom_rules=[],
+    )
+
+
+# Module-level singletons — same rationale as the preprocessor's.
+UNIVERSAL_POSTPROCESS_CONFIG: PostprocessConfig = build_universal_postprocess_config()
+_UNIVERSAL_POSTPROCESSOR: TextPostprocessor | None = None
+
+
+def postprocess_universal(text: str) -> str:
+    """One-shot: apply every cleanup step to ``text``.
+
+    Equivalent to::
+
+        post = TextPostprocessor()
+        post.process(text, UNIVERSAL_POSTPROCESS_CONFIG)
+
+    but with the :class:`TextPostprocessor` cached at module scope.
+    """
+    global _UNIVERSAL_POSTPROCESSOR
+    if _UNIVERSAL_POSTPROCESSOR is None:
+        _UNIVERSAL_POSTPROCESSOR = TextPostprocessor()
+    return _UNIVERSAL_POSTPROCESSOR.process(text, UNIVERSAL_POSTPROCESS_CONFIG)

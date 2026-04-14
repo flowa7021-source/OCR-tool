@@ -20,7 +20,7 @@ def test_initialize_builtins_creates_all(manager: ProfileManager) -> None:
     names = {p.name for p in manager.list_profiles()}
     for expected in BUILTIN_NAMES:
         assert expected in names
-    assert len(BUILTIN_NAMES) == 5
+    assert len(BUILTIN_NAMES) == 6
 
 
 def test_builtins_marked_builtin(manager: ProfileManager) -> None:

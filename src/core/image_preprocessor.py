@@ -479,3 +479,70 @@ def _sauvola_binarize(gray: np.ndarray, window_size: int, k: float) -> np.ndarra
 
     binary = (gray > thresh).astype(np.uint8) * 255
     return binary
+
+
+# ---------------------------------------------------------------------------
+# Universal "max accuracy" preset
+# ---------------------------------------------------------------------------
+
+
+def build_universal_preprocess_config() -> PreprocessConfig:
+    """Return the preset used by the ``universal_accurate`` builtin profile.
+
+    This is a single opinionated config that enables every step which
+    reliably improves OCR accuracy across a wide variety of inputs:
+
+    * deskew (auto-detect, up to ±45°) — non-destructive.
+    * CLAHE contrast (clip=2.0, tile=8) — even lighting without noise
+      amplification.
+    * Background removal (blur_kernel=55) — flattens page tint.
+    * Denoise chain: median ksize=3 → morphological close ksize=3.
+      Removes salt-and-pepper artefacts and closes sub-pixel breaks
+      in thin glyphs. Larger ksizes would start eating dots of
+      ``ё``/``ь``, so we stop at the validator minimum.
+    * Adaptive-Gaussian binarisation (block=31, C=10) — safe on clean
+      pages, dramatically better than OTSU on uneven lighting.
+    """
+    return PreprocessConfig(
+        deskew=DeskewConfig(enabled=True, auto_detect=True, max_angle=45.0),
+        dewarp=DewarpConfig(enabled=False),
+        binarization=BinarizationConfig(
+            method=BinarizationMethod.ADAPTIVE_GAUSSIAN,
+            adaptive_block_size=31,
+            adaptive_c=10,
+        ),
+        denoise=DenoiseConfig(
+            enabled=True,
+            steps=[
+                DenoiseStep(method=DenoiseMethod.MEDIAN, ksize=3),
+                DenoiseStep(method=DenoiseMethod.MORPH_CLOSE, morph_ksize=3),
+            ],
+        ),
+        contrast=ContrastConfig(clahe_enabled=True, clahe_clip=2.0, clahe_tile=8),
+        background=BackgroundConfig(enabled=True, blur_kernel=55),
+    )
+
+
+# Module-level singleton: avoids rebuilding the config (and the
+# ImagePreprocessor) every time the helper is called from a tight loop.
+UNIVERSAL_PREPROCESS_CONFIG: PreprocessConfig = build_universal_preprocess_config()
+_UNIVERSAL_PREPROCESSOR: ImagePreprocessor | None = None
+
+
+def preprocess_universal(image: np.ndarray) -> tuple[np.ndarray, float]:
+    """One-shot: apply the full universal preset to ``image``.
+
+    This is the "just run everything" entry point. Equivalent to:
+
+    >>> pre = ImagePreprocessor()
+    >>> pre.process(image, UNIVERSAL_PREPROCESS_CONFIG)
+
+    but with the :class:`ImagePreprocessor` cached at module scope so
+    repeated calls don't pay the constructor cost.
+
+    Returns ``(processed_image, detected_skew_angle)``.
+    """
+    global _UNIVERSAL_PREPROCESSOR
+    if _UNIVERSAL_PREPROCESSOR is None:
+        _UNIVERSAL_PREPROCESSOR = ImagePreprocessor()
+    return _UNIVERSAL_PREPROCESSOR.process(image, UNIVERSAL_PREPROCESS_CONFIG)
