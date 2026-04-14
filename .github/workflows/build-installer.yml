@@ -595,10 +595,16 @@ jobs:
           $sizeMB = [math]::Round($installer.Length / 1MB, 1)
           Write-Host ("Installer: {0} ({1} MB)" -f $installer.Name, $sizeMB)
 
-          # 1. Size sanity. Without HTR a Windows OCR bundle with Tesseract
-          #    + tessdata can't reasonably be under ~80 MB. With HTR (torch
-          #    + transformers) the floor moves to ~600 MB.
-          $minMB = if ("${{ steps.htr_flag.outputs.with_htr }}" -eq "true") { 600 } else { 80 }
+          # 1. Size sanity. Lower bounds after Inno Setup's lzma2/ultra64
+          #    compression:
+          #      - no-HTR bundle (Tesseract + tessdata + Python + Qt) ≈ 80 MB
+          #      - full HTR bundle (+ torch + transformers) ≈ 300-450 MB
+          #        (uncompressed ~2.5 GB; binary .so/.dll compress modestly).
+          #    Thresholds are conservative — a silent HTR drop would shrink
+          #    the installer back to ~80 MB, still well below 250 MB.
+          #    HTR content presence is also verified pre-compression at the
+          #    "Verify HTR bundle" step, so this is a secondary net.
+          $minMB = if ("${{ steps.htr_flag.outputs.with_htr }}" -eq "true") { 250 } else { 80 }
           if ($installer.Length -lt ($minMB * 1MB)) {
             throw "Installer is suspiciously small ($sizeMB MB, expected >= $minMB MB) — bundled assets likely missing"
           }
