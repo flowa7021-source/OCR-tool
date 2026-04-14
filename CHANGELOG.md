@@ -6,13 +6,23 @@
 ## [Unreleased]
 
 ### Added
+- **Автопубликация инсталлятора через GitHub Actions**:
+  - `push` в `main`/dev-ветку → rolling prerelease с тегом `latest-dev`
+    (перезаписывается на каждом успешном build, всегда свежий инсталлятор
+    на странице Releases);
+  - `push` тега `v*` → постоянный Release; `-rc`/`-beta`/`-alpha` →
+    автоматически prerelease;
+  - `pull_request` в `main` → только build без публикации;
+  - `workflow_dispatch` → ручной запуск с опциональным флагом `publish=false`.
+  - Кэширование Tesseract installer и tessdata между прогонами.
+  - Retry-логика для скачиваний (4 попытки с backoff).
+  - Sanity-check инсталлятора (запускается с `/?`, не виснет).
+  - Actions Summary с версией / commit / размером.
 - **GitHub Actions workflow** `build-installer.yml` — собирает полный
-  Windows-инсталлятор автоматически. Скачивает Tesseract 5.5.0 (UB
-  Mannheim), tessdata_best (rus + eng + osd), генерирует `app.ico` из
-  SVG, запускает `pytest` + `compileall`, `PyInstaller --onedir`, затем
-  Inno Setup 6. Триггеры: ручной запуск или `git push --tags v*`.
-  Артефакт: `OCRStudio-Setup-<version>.exe` + `.sha256`.
-  При push тега автоматически прикрепляется к GitHub Release.
+  Windows-инсталлятор. Скачивает Tesseract 5.5.0 (UB Mannheim),
+  tessdata_best (rus + eng + osd), генерирует `app.ico` из SVG,
+  запускает `pytest` + `compileall`, `PyInstaller --onedir`, затем
+  Inno Setup 6. Артефакт: `OCRStudio-Setup-<version>.exe` + `.sha256`.
 - `build.py` теперь подхватывает `resources/icons/app.ico`, если файл
   присутствует (иначе бинарник собирается без Windows-иконки).
 - **CLI-режим** (`src/cli.py`): `python -m src.cli file.pdf`

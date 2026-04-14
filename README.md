@@ -74,26 +74,44 @@ python -m src.cli --list-profiles
 ### Вариант 1 — через GitHub Actions (рекомендуется)
 
 В репозитории есть workflow `.github/workflows/build-installer.yml`, который
-собирает полностью готовый инсталлятор на `windows-latest`:
+собирает полностью готовый инсталлятор на `windows-latest` **автоматически**:
 
-1. **Ручной запуск**: Actions → *Build Windows Installer* → *Run workflow*
-   (можно переопределить версию Tesseract и версию самого инсталлятора).
-2. **Автоматический релиз по тегу**: `git tag v1.0.0 && git push --tags`.
-   В результате на соответствующий GitHub Release прикрепится инсталлятор
-   `OCRStudio-Setup-1.0.0.exe` вместе с `.sha256`.
+1. **Rolling dev-билд**: любой `push` в `main` или в активную dev-ветку
+   запускает сборку и публикует её как prerelease с тегом `latest-dev`.
+   Этот релиз **перезаписывается** на каждом успешном build — всегда на
+   странице Releases лежит свежий инсталлятор с последнего коммита.
+2. **Релиз по тегу**: `git tag v1.0.0 && git push --tags` → создаётся
+   постоянный Release `v1.0.0` с `OCRStudio-Setup-1.0.0.exe` + `.sha256`.
+   Теги с суффиксами `-rc`, `-beta`, `-alpha` автоматически помечаются
+   prerelease.
+3. **Ручной запуск**: Actions → *Build Windows Installer* → *Run workflow*.
+   Можно переопределить версию Tesseract, версию инсталлятора, и
+   выключить публикацию релиза флагом `publish=false` (тогда только
+   workflow-артефакт).
+4. **PR-билд**: pull request'ы в `main` также прогоняют всю сборку для
+   проверки, но релиз не публикуется.
 
-Что делает workflow:
-- скачивает **Tesseract 5.5.0** от UB Mannheim и распаковывает `tesseract.exe`
-  + DLL в `resources/tesseract/`;
-- скачивает **tessdata_best** для `rus` + `eng` + `osd`;
-- генерирует `app.ico` из `app.svg`;
-- запускает unit-тесты и `compileall`;
+Что делает workflow (22 шага):
+- скачивает **Tesseract 5.5.0** от UB Mannheim (с кэшированием инсталлятора
+  между прогонами) и распаковывает `tesseract.exe` + DLL в
+  `resources/tesseract/`;
+- скачивает **tessdata_best** для `rus` + `eng` + `osd` (с кэшированием
+  на уровне runner'а и проверкой минимального размера файлов);
+- генерирует `app.ico` из `app.svg` для Windows-билда (multi-size);
+- запускает unit-тесты и `compileall` как pre-build gate (если не
+  прошли — Tesseract и инсталлятор не собираются вообще);
 - запускает `PyInstaller --onedir`;
+- верифицирует, что Tesseract и tessdata действительно попали в
+  `dist/OCRStudio/` (проверяются оба возможных layout'а PyInstaller);
 - компилирует `installer/setup.iss` через Inno Setup 6;
-- верифицирует, что Tesseract и tessdata попали в собранный пакет;
-- считает SHA-256 и аплодит артефакт на 30 дней.
+- sanity-check: инсталлятор запускается с флагом `/?` и возвращает
+  корректный exit code (не висит);
+- считает SHA-256;
+- аплодит workflow-артефакт на 90 дней + публикует GitHub Release;
+- пишет сводку в Actions Summary.
 
-Артефакт: `OCRStudio-Installer-<version>` (два файла: `.exe` + `.sha256`).
+Артефакт workflow: `OCRStudio-Installer-<version>` (содержит `.exe` +
+`.sha256`). Релиз — на странице Releases.
 
 ### Вариант 2 — локальная сборка на Windows
 
