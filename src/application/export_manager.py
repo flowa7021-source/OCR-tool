@@ -13,6 +13,7 @@ re-run OCR.
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 
 from src.core.models import JobResult
@@ -65,9 +66,7 @@ class ExportManager:
             self.copy_to_clipboard(self._concatenate_text(job_result))
             return output_path
         if format == ExportFormat.PDF:
-            # The OCR'd PDF was produced by OCRmyPDF; nothing to do here.
-            logger.debug("PDF export requested; PDF produced by OCR stage")
-            return Path(job_result.output_path)
+            return self.export_pdf(job_result, output_path)
         raise ExportError(f"Неподдерживаемый формат экспорта: {format}")
 
     # ------------------------------------------------------------------
@@ -115,6 +114,42 @@ class ExportManager:
             encoding,
         )
         return output_path
+
+    def export_pdf(self, job_result: JobResult, output_path: Path) -> Path:
+        """Save the searchable PDF produced by OCRmyPDF to ``output_path``.
+
+        The pipeline already writes a searchable PDF to
+        ``job_result.output_path``. This method simply copies that file to
+        a user-chosen destination — which is all "Save PDF as..." actually
+        needs to do. When the destination matches the source it is a no-op
+        (but still returns the existing path for uniformity).
+
+        Args:
+            job_result: Finished job carrying ``output_path`` of the OCR'd PDF.
+            output_path: Destination path for the saved copy.
+
+        Returns:
+            The path that was written (or confirmed to already exist).
+
+        Raises:
+            ExportError: If the source PDF is missing or the copy fails.
+        """
+        source = Path(job_result.output_path)
+        target = Path(output_path)
+        if not source.exists():
+            raise ExportError(
+                f"OCR'd PDF не найден: {source}. Выполните распознавание заново."
+            )
+        if source.resolve() == target.resolve():
+            logger.debug("PDF export: source == target (%s), nothing to copy", target)
+            return target
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        except OSError as exc:
+            raise ExportError(f"Не удалось сохранить PDF: {exc}") from exc
+        logger.info("Exported PDF: %s -> %s (%d bytes)", source, target, target.stat().st_size)
+        return target
 
     def export_docx(self, job_result: JobResult, output_path: Path) -> Path:
         """Write the OCR text to a ``.docx`` file.

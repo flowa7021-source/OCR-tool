@@ -113,13 +113,68 @@ class TestExportDocx:
         assert "[ERROR: Timeout]" in all_text
 
 
+class TestExportPdf:
+    def test_copy_to_new_location(self, tmp_path: Path) -> None:
+        """Save As to a fresh path copies the searchable PDF."""
+        from src.application.export_manager import ExportManager
+
+        source = tmp_path / "searchable.pdf"
+        source.write_bytes(b"%PDF-1.7\nbody bytes here")
+        result = _sample_result(source)
+
+        target = tmp_path / "elsewhere" / "document_ocr.pdf"
+        written = ExportManager().export_pdf(result, target)
+        assert written == target
+        assert target.exists()
+        assert target.read_bytes() == source.read_bytes()
+        # Source is still intact
+        assert source.exists()
+
+    def test_same_path_is_noop(self, tmp_path: Path) -> None:
+        """Save As to the exact existing path returns the path without error."""
+        from src.application.export_manager import ExportManager
+
+        source = tmp_path / "searchable.pdf"
+        source.write_bytes(b"%PDF-1.7\n")
+        result = _sample_result(source)
+
+        # mtime before; should survive the no-op
+        before = source.stat().st_mtime_ns
+        written = ExportManager().export_pdf(result, source)
+        after = source.stat().st_mtime_ns
+        assert written == source
+        assert before == after
+
+    def test_missing_source_raises(self, tmp_path: Path) -> None:
+        """A job whose output no longer exists produces an ExportError."""
+        from src.application.export_manager import ExportError, ExportManager
+
+        result = _sample_result(tmp_path / "gone.pdf")
+        with pytest.raises(ExportError):
+            ExportManager().export_pdf(result, tmp_path / "target.pdf")
+
+    def test_creates_parent_dir(self, tmp_path: Path) -> None:
+        from src.application.export_manager import ExportManager
+
+        source = tmp_path / "searchable.pdf"
+        source.write_bytes(b"%PDF-1.7\n")
+        result = _sample_result(source)
+        target = tmp_path / "a" / "b" / "c" / "out.pdf"
+        ExportManager().export_pdf(result, target)
+        assert target.exists()
+
+
 class TestExportDispatcher:
-    def test_pdf_passthrough_returns_output_path(self, tmp_path: Path) -> None:
-        target = tmp_path / "searchable.pdf"
-        target.write_bytes(b"%PDF-1.7\n")
-        result = _sample_result(target)
+    def test_pdf_dispatcher_copies(self, tmp_path: Path) -> None:
+        """ExportFormat.PDF through the dispatcher now copies the file."""
+        source = tmp_path / "searchable.pdf"
+        source.write_bytes(b"%PDF-1.7\n")
+        result = _sample_result(source)
+        target = tmp_path / "copy.pdf"
         written = ExportManager().export(result, target, ExportFormat.PDF)
         assert written == target
+        assert target.exists()
+        assert target.read_bytes() == source.read_bytes()
 
     def test_txt_via_dispatcher(self, tmp_path: Path) -> None:
         result = _sample_result(tmp_path / "out.pdf")

@@ -316,6 +316,7 @@ class MainWindow(QMainWindow):
         self.queue_panel.resume_requested.connect(self._queue_manager.resume)
         self.queue_panel.cancel_requested.connect(self._queue_manager.cancel)
         self.results_panel.export_requested.connect(self._on_export_requested)
+        self.results_panel.open_pdf_requested.connect(self._on_open_pdf_result)
 
     # ------------------------------------------------------------ profiles
     def _load_profiles_to_combobox(self) -> None:
@@ -540,8 +541,11 @@ class MainWindow(QMainWindow):
         if self._last_result is None:
             QMessageBox.information(self, APP_NAME, "Нет готовых результатов.")
             return
+        default_name = Path(self._last_result.output_path).name
         path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить как", "", "PDF (*.pdf);;Text (*.txt);;Word (*.docx)"
+            self, "Сохранить результат как",
+            default_name,
+            "PDF (*.pdf);;Text (*.txt);;Word (*.docx)",
         )
         if not path:
             return
@@ -551,10 +555,15 @@ class MainWindow(QMainWindow):
             fmt = ExportFormat.TXT
         elif low.endswith(".docx"):
             fmt = ExportFormat.DOCX
+        encoding = self.results_panel.txt_encoding()
         try:
-            self._export_manager.export(self._last_result, Path(path), fmt)
+            self._export_manager.export(
+                self._last_result, Path(path), fmt, encoding=encoding
+            )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, APP_NAME, f"Ошибка экспорта: {exc}")
+            return
+        self.statusBar().showMessage(f"Сохранено: {path}", 5000)
 
     def _on_export_requested(self, fmt: ExportFormat, path: Path | None) -> None:
         if self._last_result is None:
@@ -571,12 +580,20 @@ class MainWindow(QMainWindow):
                 ExportFormat.DOCX: "Word (*.docx)",
                 ExportFormat.PDF: "PDF (*.pdf)",
             }
-            default_name = (
-                Path(self._last_result.input_path).with_suffix(f".{default_ext}").name
-                if default_ext else ""
+            # For PDF default to the existing job output filename (so users
+            # see e.g. "document_ocr.pdf", same as when they let the pipeline
+            # pick the path). For TXT/DOCX reuse the input stem + extension.
+            if fmt is ExportFormat.PDF:
+                default_name = Path(self._last_result.output_path).name
+            elif default_ext:
+                default_name = Path(self._last_result.input_path).with_suffix(f".{default_ext}").name
+            else:
+                default_name = ""
+            dialog_title = (
+                "Сохранить PDF как" if fmt is ExportFormat.PDF else "Сохранить"
             )
             target, _ = QFileDialog.getSaveFileName(
-                self, "Сохранить", default_name, filter_map.get(fmt, "Все файлы (*.*)")
+                self, dialog_title, default_name, filter_map.get(fmt, "Все файлы (*.*)")
             )
             if not target:
                 return
@@ -591,6 +608,27 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, APP_NAME, f"Ошибка экспорта: {exc}")
+
+    def _on_open_pdf_result(self) -> None:
+        """Open the produced searchable PDF with the system default handler."""
+        if self._last_result is None:
+            QMessageBox.information(self, APP_NAME, "Нет готовых результатов.")
+            return
+        pdf_path = Path(self._last_result.output_path)
+        if not pdf_path.exists():
+            QMessageBox.critical(
+                self, APP_NAME,
+                f"PDF не найден:\n{pdf_path}\n\nВозможно, файл был удалён или перемещён.",
+            )
+            return
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf_path)))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Open PDF failed: %s", exc)
+            QMessageBox.critical(self, APP_NAME, f"Не удалось открыть PDF: {exc}")
 
     # ------------------------------------------------------------ profile ops
     def _on_save_profile(self) -> None:

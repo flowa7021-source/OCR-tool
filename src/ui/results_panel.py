@@ -33,6 +33,10 @@ class ResultsPanel(QWidget):
     """Displays the text output of a completed OCR job."""
 
     export_requested = Signal(object, object)
+    # Fired when the user wants to open the produced searchable PDF with the
+    # system default handler (no path argument — the panel's bound JobResult
+    # knows where the file lives).
+    open_pdf_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """Initialize the panel with an empty state.
@@ -83,6 +87,11 @@ class ResultsPanel(QWidget):
 
         # Export buttons.
         btn_row = QHBoxLayout()
+        self._btn_save_pdf = QPushButton("Сохранить PDF как…", self)
+        self._btn_save_pdf.setToolTip(
+            "Сохранить итоговый searchable PDF (скан + невидимый текстовый слой) "
+            "в выбранное место."
+        )
         self._btn_txt = QPushButton("Сохранить TXT", self)
         self._cmb_txt_encoding = QComboBox(self)
         self._cmb_txt_encoding.addItem("UTF-8", userData="utf-8")
@@ -93,8 +102,12 @@ class ResultsPanel(QWidget):
             "старыми редакторами на Windows."
         )
         self._btn_docx = QPushButton("Сохранить DOCX", self)
-        self._btn_copy = QPushButton("Копировать", self)
+        self._btn_copy = QPushButton("Копировать текст", self)
         self._btn_open_pdf = QPushButton("Открыть PDF", self)
+        self._btn_open_pdf.setToolTip(
+            "Открыть итоговый PDF в программе по умолчанию."
+        )
+        btn_row.addWidget(self._btn_save_pdf)
         btn_row.addWidget(self._btn_txt)
         btn_row.addWidget(self._cmb_txt_encoding)
         btn_row.addWidget(self._btn_docx)
@@ -105,6 +118,9 @@ class ResultsPanel(QWidget):
 
         # Wiring.
         self._cmb_page.currentIndexChanged.connect(self._on_page_changed)
+        self._btn_save_pdf.clicked.connect(
+            lambda: self.export_requested.emit(ExportFormat.PDF, None)
+        )
         self._btn_txt.clicked.connect(
             lambda: self.export_requested.emit(ExportFormat.TXT, None)
         )
@@ -114,9 +130,7 @@ class ResultsPanel(QWidget):
         self._btn_copy.clicked.connect(
             lambda: self.export_requested.emit(ExportFormat.CLIPBOARD, None)
         )
-        self._btn_open_pdf.clicked.connect(
-            lambda: self.export_requested.emit(ExportFormat.PDF, None)
-        )
+        self._btn_open_pdf.clicked.connect(self.open_pdf_requested.emit)
 
     # ------------------------------------------------------------------
     # Public API
