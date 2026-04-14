@@ -63,6 +63,8 @@ class ResultsPanel(QWidget):
 
         self._text_edit = QTextEdit(self)
         self._text_edit.setReadOnly(True)
+        self._text_edit.setMinimumHeight(160)
+        self._text_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         root.addWidget(self._text_edit, 1)
 
         # Collapsible low-confidence list.

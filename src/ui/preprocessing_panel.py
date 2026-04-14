@@ -157,16 +157,18 @@ class PreprocessingPanel(QWidget):
         # Preview row
         self.before_label = QLabel("Оригинал")
         self.before_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.before_label.setMinimumHeight(180)
+        self.before_label.setMinimumSize(200, 260)
         self.after_label = QLabel("Результат")
         self.after_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.after_label.setMinimumHeight(180)
+        self.after_label.setMinimumSize(200, 260)
 
         preview_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        preview_splitter.setChildrenCollapsible(False)
         preview_splitter.addWidget(self.before_label)
         preview_splitter.addWidget(self.after_label)
         preview_splitter.setStretchFactor(0, 1)
         preview_splitter.setStretchFactor(1, 1)
+        preview_splitter.setSizes([260, 260])
         root.addWidget(preview_splitter, 1)
 
         stage_row = QHBoxLayout()

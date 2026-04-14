@@ -169,19 +169,24 @@ class PDFViewer(QWidget):
 
         self._thumbs = QListWidget(self)
         self._thumbs.setIconSize(QSize(UI_THUMBNAIL_SIZE, UI_THUMBNAIL_SIZE))
-        self._thumbs.setFixedWidth(UI_THUMBNAIL_SIZE + 40)
+        # Reserve room for the thumbnail + a scrollbar + page number label.
+        self._thumbs.setMinimumWidth(UI_THUMBNAIL_SIZE + 48)
+        self._thumbs.setMaximumWidth(UI_THUMBNAIL_SIZE + 80)
         self._thumbs.setSpacing(4)
         self._thumbs.itemClicked.connect(self._on_thumb_clicked)
         self._splitter.addWidget(self._thumbs)
 
         self._scroll = QScrollArea(self)
         self._scroll.setWidgetResizable(True)
+        self._scroll.setMinimumWidth(360)
         self._page_label = QLabel(self._scroll)
         self._page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._scroll.setWidget(self._page_label)
         self._splitter.addWidget(self._scroll)
+        self._splitter.setChildrenCollapsible(False)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
+        self._splitter.setSizes([UI_THUMBNAIL_SIZE + 56, 600])
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 

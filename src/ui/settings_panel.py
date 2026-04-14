@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QScrollArea,
     QSlider,
     QSpinBox,
     QVBoxLayout,
@@ -53,7 +54,20 @@ class SettingsPanel(QWidget):
         self._debounce.setInterval(_DEBOUNCE_MS)
         self._debounce.timeout.connect(self._emit_config)
 
-        root = QVBoxLayout(self)
+        # Wrap the whole panel in a QScrollArea so every group is reachable
+        # even when the parent splitter is squeezed.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self._scroll = QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(self._scroll.Shape.NoFrame)
+        outer.addWidget(self._scroll)
+
+        inner = QWidget(self._scroll)
+        self._scroll.setWidget(inner)
+        root = QVBoxLayout(inner)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(8)
 
         # --- Languages group -----------------------------------------
         self._group_langs = QGroupBox("Языки", self)

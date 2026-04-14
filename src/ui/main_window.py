@@ -80,7 +80,10 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
         self.setAcceptDrops(True)
-        self.resize(1400, 900)
+        # Start comfortably large on modern monitors but remain usable
+        # on 1366x768 laptops via the minimum size below.
+        self.resize(1680, 1000)
+        self.setMinimumSize(1200, 780)
         self.setWindowIcon(app_icon())
 
         self._build_widgets()
@@ -103,21 +106,38 @@ class MainWindow(QMainWindow):
         self.progress_widget = ProgressWidget(self)
         self.results_panel = ResultsPanel(self)
 
+        # Minimum widths so nothing collapses into an unusable sliver when
+        # the user drags the splitter handles.
+        self.pdf_viewer.setMinimumWidth(520)
+        self.settings_panel.setMinimumWidth(420)
+        self.preprocessing_panel.setMinimumWidth(420)
+        self.postprocess_panel.setMinimumWidth(420)
+
         # Right side: settings on top, then preprocessing / postprocessing tabs below
         right_splitter = QSplitter(Qt.Orientation.Vertical, self)
+        right_splitter.setChildrenCollapsible(False)
         right_splitter.addWidget(self.settings_panel)
 
         self.right_tabs = QTabWidget(self)
+        self.right_tabs.setMinimumWidth(440)
+        self.right_tabs.setDocumentMode(True)
         self.right_tabs.addTab(self.preprocessing_panel, "Предобработка")
         self.right_tabs.addTab(self.postprocess_panel, "Постобработка")
         right_splitter.addWidget(self.right_tabs)
-        right_splitter.setStretchFactor(0, 1)
-        right_splitter.setStretchFactor(1, 2)
+        # Explicit initial pixel sizes — settings on top is short, tabs below tall.
+        right_splitter.setSizes([320, 620])
+        right_splitter.setStretchFactor(0, 0)
+        right_splitter.setStretchFactor(1, 1)
 
         # Central horizontal splitter: viewer | right
         central_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        central_splitter.setChildrenCollapsible(False)
         central_splitter.addWidget(self.pdf_viewer)
         central_splitter.addWidget(right_splitter)
+        # Give the viewer ~60% of the initial window width and reserve
+        # ~40% (min 440) for the config panels. Explicit sizes beat
+        # pure stretch factors when the content's sizeHint is small.
+        central_splitter.setSizes([960, 640])
         central_splitter.setStretchFactor(0, 3)
         central_splitter.setStretchFactor(1, 2)
         self.setCentralWidget(central_splitter)
@@ -125,8 +145,10 @@ class MainWindow(QMainWindow):
     def _build_docks(self) -> None:
         # Queue dock (bottom)
         queue_wrapper = QWidget(self)
+        queue_wrapper.setMinimumHeight(220)
         q_layout = QVBoxLayout(queue_wrapper)
-        q_layout.setContentsMargins(0, 0, 0, 0)
+        q_layout.setContentsMargins(4, 4, 4, 4)
+        q_layout.setSpacing(6)
         q_layout.addWidget(self.progress_widget)
         q_layout.addWidget(self.queue_panel, 1)
 
@@ -136,15 +158,22 @@ class MainWindow(QMainWindow):
         self.queue_dock.setAllowedAreas(
             Qt.DockWidgetArea.BottomDockWidgetArea | Qt.DockWidgetArea.TopDockWidgetArea
         )
+        self.queue_dock.setMinimumHeight(240)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.queue_dock)
 
         # Results dock (bottom, tabbed with queue)
+        self.results_panel.setMinimumHeight(220)
         self.results_dock = QDockWidget("Результаты распознавания", self)
         self.results_dock.setObjectName("resultsDock")
         self.results_dock.setWidget(self.results_panel)
+        self.results_dock.setMinimumHeight(240)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.results_dock)
         self.tabifyDockWidget(self.queue_dock, self.results_dock)
         self.queue_dock.raise_()
+
+        # Reserve enough vertical real estate for the bottom dock by default
+        # (~260 px), leaving plenty for the viewer/panels above.
+        self.resizeDocks([self.queue_dock], [260], Qt.Orientation.Vertical)
 
     def _build_toolbar(self) -> None:
         tb = QToolBar("Главная", self)
