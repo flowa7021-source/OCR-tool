@@ -80,6 +80,8 @@ class MainWindow(QMainWindow):
         # One-shot per-session flag: don't nag the user again after they
         # acknowledged the active max_pages preview limit.
         self._max_pages_warned: bool = False
+        # Tray notifier is built lazily in setupUi once an icon is available.
+        self._tray: object | None = None
 
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
         self.setAcceptDrops(True)
@@ -88,6 +90,14 @@ class MainWindow(QMainWindow):
         self.resize(1680, 1000)
         self.setMinimumSize(1200, 780)
         self.setWindowIcon(app_icon())
+        # Tray notifier uses the same icon so completion toasts match.
+        try:
+            from src.ui.tray_notifier import TrayNotifier
+
+            self._tray = TrayNotifier(app_icon(), self)
+        except Exception:  # noqa: BLE001
+            logger.debug("Tray notifier unavailable", exc_info=True)
+            self._tray = None
 
         self._build_widgets()
         self._build_docks()
@@ -238,6 +248,19 @@ class MainWindow(QMainWindow):
         prefs_act.setShortcut(QKeySequence("Ctrl+,"))
         prefs_act.triggered.connect(self._on_preferences)
         file_menu.addAction(prefs_act)
+        backup_export_act = QAction("Экспорт конфигурации…", self)
+        backup_export_act.setToolTip(
+            "Сохранить настройки и пользовательские профили в ZIP "
+            "(для переноса на другую машину)"
+        )
+        backup_export_act.triggered.connect(self._on_export_config_backup)
+        file_menu.addAction(backup_export_act)
+        backup_import_act = QAction("Импорт конфигурации…", self)
+        backup_import_act.setToolTip(
+            "Восстановить настройки и профили из ранее сохранённого ZIP"
+        )
+        backup_import_act.triggered.connect(self._on_import_config_backup)
+        file_menu.addAction(backup_import_act)
         file_menu.addSeparator()
         exit_act = QAction("Выход", self)
         exit_act.setShortcut(QKeySequence.StandardKey.Quit)
@@ -654,6 +677,67 @@ class MainWindow(QMainWindow):
         # Remove from recovery snapshot
         with contextlib.suppress(Exception):
             self._recovery.remove(job_id)
+        # Fire a system-tray toast so the user knows a long job finished
+        # even if the window isn't focused. Skip toasts when the user has
+        # turned them off, when the window is already active (redundant),
+        # or when the queue is still grinding through more items (we only
+        # want a single summary ping per batch).
+        try:
+            self._maybe_emit_completion_toast(result)
+        except Exception:  # noqa: BLE001
+            logger.debug("Completion toast failed", exc_info=True)
+
+    def _maybe_emit_completion_toast(self, result: object) -> None:
+        """Fire a tray toast on batch completion or per-job failure.
+
+        We deliberately stay quiet when the main window is already active —
+        the user is watching the progress widget and a toast would be noise.
+        Success toasts are suppressed while more jobs are still pending to
+        avoid spamming one toast per file in a large batch; one final
+        summary toast is emitted when the queue drains. Failures always
+        surface immediately so the user doesn't miss an error.
+        """
+        if self._tray is None:
+            return
+        if not isinstance(result, JobResult):
+            return
+        try:
+            notify = self._settings_storage.load().notify_on_complete
+        except Exception:  # noqa: BLE001
+            notify = True
+        if not notify:
+            return
+        if self.isActiveWindow():
+            return
+
+        name = Path(result.output_path).name if result.output_path else "задание"
+        if result.status is JobStatus.FAILED:
+            self._tray.notify_failure(  # type: ignore[attr-defined]
+                APP_NAME,
+                f"Ошибка при обработке: {name}",
+            )
+            return
+        if result.status is not JobStatus.COMPLETED:
+            return
+        # Anything still waiting? Hold the success toast until the batch drains.
+        remaining = sum(
+            1
+            for it in self._queue_manager.list_items()
+            if it.status in (JobStatus.PENDING, JobStatus.RUNNING, JobStatus.PAUSED)
+        )
+        if remaining > 0:
+            return
+        done_count = sum(
+            1
+            for it in self._queue_manager.list_items()
+            if it.status is JobStatus.COMPLETED
+        )
+        msg = (
+            f"Файл готов: {name}"
+            if done_count <= 1
+            else f"Обработано файлов: {done_count}"
+        )
+        self._tray.notify_complete(APP_NAME, msg)  # type: ignore[attr-defined]
 
     def _on_save(self) -> None:
         if self._last_result is None:
@@ -1046,6 +1130,111 @@ class MainWindow(QMainWindow):
                 "вступит в силу после перезапуска.",
             )
 
+    # --------------------------------------------------- config backup/restore
+    def _on_export_config_backup(self) -> None:
+        """Save settings + user profiles into a portable ZIP bundle."""
+        from src.application.config_backup import default_backup_name, export_config
+        from src.infrastructure.config_storage import ProfileStorage
+
+        target, _ = QFileDialog.getSaveFileName(
+            self,
+            "Экспорт конфигурации",
+            default_backup_name(),
+            "Zip (*.zip)",
+        )
+        if not target:
+            return
+        try:
+            path = export_config(
+                Path(target),
+                settings_storage=self._settings_storage,
+                profile_storage=ProfileStorage(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Config export failed: %s", exc)
+            QMessageBox.critical(
+                self, APP_NAME, f"Не удалось выполнить экспорт:\n{exc}"
+            )
+            return
+        QMessageBox.information(
+            self, APP_NAME, f"Конфигурация сохранена:\n{path}"
+        )
+
+    def _on_import_config_backup(self) -> None:
+        """Restore settings + user profiles from a previously exported ZIP."""
+        from src.application.config_backup import BackupFormatError, import_config
+        from src.infrastructure.config_storage import ProfileStorage
+
+        source, _ = QFileDialog.getOpenFileName(
+            self,
+            "Импорт конфигурации",
+            "",
+            "Zip (*.zip);;Все файлы (*)",
+        )
+        if not source:
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            APP_NAME,
+            (
+                "Импорт конфигурации перезапишет текущие настройки и "
+                "одноимённые пользовательские профили. Продолжить?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            result = import_config(
+                Path(source),
+                settings_storage=self._settings_storage,
+                profile_storage=ProfileStorage(),
+            )
+        except BackupFormatError as exc:
+            QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Config import failed: %s", exc)
+            QMessageBox.critical(
+                self, APP_NAME, f"Не удалось выполнить импорт:\n{exc}"
+            )
+            return
+
+        # Refresh the profile combo with restored entries.
+        try:
+            self._load_profiles_to_combobox()
+        except Exception:  # noqa: BLE001
+            logger.debug("profile combo reload after import failed", exc_info=True)
+
+        # Re-apply the (possibly new) theme immediately.
+        if result.settings_restored:
+            try:
+                from PySide6.QtWidgets import QApplication
+
+                from src.ui.theme import apply_theme
+
+                app = QApplication.instance()
+                if app is not None:
+                    theme = (self._settings_storage.load().theme or "dark").lower()
+                    apply_theme(app, theme)
+                    if hasattr(self, "action_light_theme"):
+                        self.action_light_theme.blockSignals(True)
+                        self.action_light_theme.setChecked(theme == "light")
+                        self.action_light_theme.blockSignals(False)
+            except Exception:  # noqa: BLE001
+                logger.debug("Post-import theme re-apply failed", exc_info=True)
+
+        summary = [
+            f"Схема бэкапа: v{result.schema_version}",
+            f"Настройки: {'восстановлены' if result.settings_restored else 'не найдены в архиве'}",
+            f"Новых профилей: {len(result.profiles_added)}",
+            f"Перезаписано профилей: {len(result.profiles_overwritten)}",
+        ]
+        QMessageBox.information(self, APP_NAME, "\n".join(summary))
+
     # ------------------------------------------------------------ help
     def _on_about(self) -> None:
         QMessageBox.about(
@@ -1254,6 +1443,9 @@ class MainWindow(QMainWindow):
             logger.warning("Could not save window state: %s", exc)
         with contextlib.suppress(Exception):
             self._parallel_processor.shutdown(wait=False)
+        if self._tray is not None:
+            with contextlib.suppress(Exception):
+                self._tray.shutdown()  # type: ignore[attr-defined]
         # Garbage-collect old temporary working directories from previous
         # runs (anything older than 24 h). Best-effort, never blocks shutdown.
         with contextlib.suppress(Exception):

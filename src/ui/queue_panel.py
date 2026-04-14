@@ -83,6 +83,17 @@ class QueuePanel(QWidget):
 
         self.table = QTableWidget(0, len(self.COLS), self)
         self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.setAccessibleName("Очередь обработки OCR")
+        self.table.setAccessibleDescription(
+            "Список файлов в очереди с колонками: номер, файл, страницы, "
+            "прогресс, статус. Используйте стрелки для навигации, Enter для "
+            "выбора, правый клик для контекстного меню."
+        )
+        self._edit_filter.setAccessibleName("Фильтр очереди")
+        self._edit_filter.setAccessibleDescription(
+            "Оставляет в таблице только файлы, имя которых содержит эту "
+            "подстроку. Регистр не важен."
+        )
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(28)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)

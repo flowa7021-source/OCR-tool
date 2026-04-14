@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 from src.core.models import OCRConfig
 from src.shared.constants import COLOR_TEXT_SECONDARY, DPI_CHOICES
 from src.shared.types import OEM, PSM, Language, OCREngineKind, OptimizeLevel
+from src.ui.accessibility import describe
 
 logger = logging.getLogger(__name__)
 
@@ -142,13 +143,38 @@ class SettingsPanel(QWidget):
         adv_layout.addRow("DPI:", self._cmb_dpi)
 
         self._edit_whitelist = QLineEdit(self._group_adv)
+        describe(
+            self._edit_whitelist,
+            name="Whitelist символов",
+            description=(
+                "Если задан — Tesseract распознаёт только перечисленные "
+                "символы. Полезно для узких доменов (штрих-коды, номера "
+                "счетов). Пусто = без ограничения."
+            ),
+        )
         adv_layout.addRow("Whitelist символов:", self._edit_whitelist)
 
         self._edit_blacklist = QLineEdit(self._group_adv)
+        describe(
+            self._edit_blacklist,
+            name="Blacklist символов",
+            description=(
+                "Символы, которые Tesseract не будет выдавать. Удобно, чтобы "
+                "убрать постоянные «мусорные» вкрапления."
+            ),
+        )
         adv_layout.addRow("Blacklist символов:", self._edit_blacklist)
 
         self._spin_timeout = QSpinBox(self._group_adv)
         self._spin_timeout.setRange(10, 600)
+        describe(
+            self._spin_timeout,
+            name="Таймаут страницы",
+            description=(
+                "Максимум секунд на распознавание одной страницы. Превышение "
+                "помечает страницу как ошибочную и продолжает работу дальше."
+            ),
+        )
         adv_layout.addRow("Таймаут страницы (сек):", self._spin_timeout)
 
         conf_row = QHBoxLayout()

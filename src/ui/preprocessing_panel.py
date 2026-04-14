@@ -51,6 +51,7 @@ from src.shared.constants import (
     UI_PREVIEW_UPDATE_DEBOUNCE_MS,
 )
 from src.shared.types import BinarizationMethod, DenoiseMethod
+from src.ui.accessibility import describe
 
 logger = logging.getLogger(__name__)
 
@@ -318,22 +319,57 @@ class PreprocessingPanel(QWidget):
         self.adaptive_block.setRange(*ADAPTIVE_BLOCK_SIZE_RANGE)
         self.adaptive_block.setSingleStep(2)
         self.adaptive_block.valueChanged.connect(self._snap_odd_and_emit)
+        describe(
+            self.adaptive_block,
+            name="Размер блока adaptive",
+            description=(
+                "Размер локального окна в пикселях для адаптивной "
+                "бинаризации. Нечётное. Меньше — больше деталей, но больше "
+                "шума; больше — ровнее фон. Типично 11–51."
+            ),
+        )
         lay.addRow("Размер блока (adaptive):", self.adaptive_block)
 
         self.adaptive_c = QSpinBox(g)
         self.adaptive_c.setRange(*ADAPTIVE_C_RANGE)
         self.adaptive_c.valueChanged.connect(self._on_any_change)
+        describe(
+            self.adaptive_c,
+            name="Константа C adaptive",
+            description=(
+                "Константа, вычитаемая из среднего локального порога. "
+                "Положительные значения делают результат светлее "
+                "(меньше чёрного), отрицательные — темнее."
+            ),
+        )
         lay.addRow("Константа C (adaptive):", self.adaptive_c)
 
         self.sauvola_window = QSpinBox(g)
         self.sauvola_window.setRange(*ADAPTIVE_BLOCK_SIZE_RANGE)
         self.sauvola_window.valueChanged.connect(self._on_any_change)
+        describe(
+            self.sauvola_window,
+            name="Окно Sauvola",
+            description=(
+                "Размер окна Sauvola-бинаризации. Лучше всего работает "
+                "на документах с пятнами и неровной подсветкой. Типично 15–25."
+            ),
+        )
         lay.addRow("Окно (Sauvola):", self.sauvola_window)
 
         self.sauvola_k = QDoubleSpinBox(g)
         self.sauvola_k.setRange(0.05, 0.5)
         self.sauvola_k.setSingleStep(0.05)
         self.sauvola_k.valueChanged.connect(self._on_any_change)
+        describe(
+            self.sauvola_k,
+            name="k Sauvola",
+            description=(
+                "Параметр чувствительности Sauvola. 0.2 — универсальный "
+                "старт; повысьте для плотного тёмного шрифта, понизьте для "
+                "блёклого."
+            ),
+        )
         lay.addRow("k (Sauvola):", self.sauvola_k)
         return g
 
@@ -375,6 +411,14 @@ class PreprocessingPanel(QWidget):
         self.nlm_h = QSpinBox(g)
         self.nlm_h.setRange(*NLM_H_RANGE)
         self.nlm_h.valueChanged.connect(self._on_denoise_h_changed)
+        describe(
+            self.nlm_h,
+            name="NLM h",
+            description=(
+                "Сила Non-Local Means шумоподавления. Больше h — агрессивнее "
+                "чистит шум, но размывает тонкие штрихи букв. Типично 5–10."
+            ),
+        )
         nlm_row.addRow("NLM h (для выбранного шага):", self.nlm_h)
         lay.addLayout(nlm_row)
         return g
@@ -391,11 +435,29 @@ class PreprocessingPanel(QWidget):
         self.clahe_clip.setRange(*CLAHE_CLIP_RANGE)
         self.clahe_clip.setSingleStep(0.5)
         self.clahe_clip.valueChanged.connect(self._on_any_change)
+        describe(
+            self.clahe_clip,
+            name="CLAHE clip limit",
+            description=(
+                "Предел усиления контраста CLAHE. Больше — агрессивнее "
+                "выравнивает освещение, но ярче проявляет шум. "
+                "Типично 1.5–3.0."
+            ),
+        )
         lay.addRow("CLAHE clip limit:", self.clahe_clip)
 
         self.clahe_tile = QSpinBox(g)
         self.clahe_tile.setRange(*CLAHE_TILE_RANGE)
         self.clahe_tile.valueChanged.connect(self._on_any_change)
+        describe(
+            self.clahe_tile,
+            name="CLAHE tile size",
+            description=(
+                "Размер тайла CLAHE в пикселях. Меньше — локальнее "
+                "адаптация (полезно для неоднородного освещения), "
+                "больше — глобальнее."
+            ),
+        )
         lay.addRow("CLAHE tile size:", self.clahe_tile)
 
         self.manual_contrast = QCheckBox("Ручная коррекция", g)

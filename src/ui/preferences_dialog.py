@@ -83,6 +83,16 @@ class PreferencesDialog(QDialog):
         )
         self.dark_theme.toggled.connect(self._on_theme_toggled)
         ui_form.addRow(self.dark_theme)
+
+        self.notify_on_complete = QCheckBox(
+            "Уведомление при завершении задания", self
+        )
+        self.notify_on_complete.setToolTip(
+            "Всплывающее уведомление системного трея, когда очередь OCR "
+            "обработана и главное окно не в фокусе. Ошибки сигнализируются "
+            "независимо от этой настройки."
+        )
+        ui_form.addRow(self.notify_on_complete)
         root.addWidget(ui_group)
 
         note = QLabel(
@@ -108,6 +118,7 @@ class PreferencesDialog(QDialog):
             else UI_AUTOSAVE_INTERVAL_PAGES
         )
         self.dark_theme.setChecked(self._settings.theme == "dark")
+        self.notify_on_complete.setChecked(bool(self._settings.notify_on_complete))
 
     # --------------------------------------------------------------- save
     def _on_accept(self) -> None:
@@ -123,6 +134,7 @@ class PreferencesDialog(QDialog):
         self._settings.parallel_workers = workers
         self._settings.autosave_interval_pages = self.autosave.value()
         self._settings.theme = "dark" if self.dark_theme.isChecked() else "light"
+        self._settings.notify_on_complete = bool(self.notify_on_complete.isChecked())
         try:
             self._storage.save(self._settings)
         except Exception as exc:  # noqa: BLE001

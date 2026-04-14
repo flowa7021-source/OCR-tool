@@ -274,6 +274,7 @@ class AppSettings:
     theme: str = "dark"
     autosave_interval_pages: int = 10
     recent_files: list[str] = field(default_factory=list)
+    notify_on_complete: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dictionary."""
@@ -288,6 +289,7 @@ class AppSettings:
             "theme": self.theme,
             "autosave_interval_pages": self.autosave_interval_pages,
             "recent_files": list(self.recent_files),
+            "notify_on_complete": self.notify_on_complete,
             "app_version": APP_VERSION,
         }
 
@@ -329,6 +331,9 @@ class AppSettings:
                 data.get("autosave_interval_pages", defaults.autosave_interval_pages)
             ),
             recent_files=recent,
+            notify_on_complete=bool(
+                data.get("notify_on_complete", defaults.notify_on_complete)
+            ),
         )
 
     def add_recent_file(self, path: str) -> None:
