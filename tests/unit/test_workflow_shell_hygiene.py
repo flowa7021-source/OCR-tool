@@ -110,3 +110,58 @@ class TestGenerateIcoScript:
             timeout=30,
         )
         assert result.returncode == 0, result.stderr
+
+    def test_script_survives_cairosvg_oserror(self, tmp_path: Path) -> None:
+        """Simulates the Windows-runner scenario: cairosvg is importable
+        but the native libcairo-2.dll is missing, so ``import cairosvg``
+        raises ``OSError``. The script must still exit 0 — the workflow
+        step is ``continue-on-error: true``.
+
+        We inject a shim ``cairosvg/__init__.py`` on the child's
+        ``sys.path`` that raises OSError, replicating the real failure
+        without needing Windows + cairocffi at test time.
+        """
+        import subprocess
+        import sys
+        import textwrap
+
+        # Build a fake cairosvg package that raises OSError on import.
+        shim_root = tmp_path / "shim"
+        pkg = shim_root / "cairosvg"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text(
+            textwrap.dedent(
+                """\
+                raise OSError(
+                    "no library called 'libcairo-2' was found — "
+                    "simulated Windows runner state"
+                )
+                """
+            ),
+            encoding="utf-8",
+        )
+        script = (
+            Path(__file__).parent.parent.parent
+            / ".github" / "scripts" / "generate_ico.py"
+        )
+        env = {
+            **__import__("os").environ,
+            # Prepend the shim so our fake cairosvg is found first.
+            "PYTHONPATH": str(shim_root)
+            + __import__("os").pathsep
+            + __import__("os").environ.get("PYTHONPATH", ""),
+        }
+        result = subprocess.run(
+            [sys.executable, str(script)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            env=env,
+        )
+        assert result.returncode == 0, (
+            f"generate_ico.py must soft-skip on cairosvg OSError but "
+            f"exited {result.returncode}. stderr:\n{result.stderr}"
+        )
+        assert "skipped" in result.stdout.lower()

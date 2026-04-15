@@ -33,10 +33,17 @@ def main() -> int:
         print(f"ICO generation skipped: source SVG not found at {svg_path}")
         return 0
 
+    # Broad except here is intentional. Besides ImportError (package
+    # missing), ``import cairosvg`` can raise OSError on Windows when
+    # the Python package is installed but the native ``libcairo-2.dll``
+    # shared library is not on PATH — that's the default state on
+    # GitHub-hosted windows-latest runners. Either way the workflow's
+    # ``continue-on-error: true`` contract requires exit 0, falling
+    # back to PyInstaller's default icon.
     try:
         import cairosvg  # type: ignore[import-not-found]
         from PIL import Image  # type: ignore[import-not-found]
-    except ImportError as exc:
+    except Exception as exc:  # noqa: BLE001
         print(f"ICO generation skipped: {exc}")
         return 0
 
