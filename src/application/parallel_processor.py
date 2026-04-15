@@ -261,8 +261,33 @@ class ParallelProcessor:
 
     # -- lifecycle ---------------------------------------------------------
 
+    def _is_executor_broken(self) -> bool:
+        """Return True if a worker died and the pool is unusable.
+
+        ``concurrent.futures.process.ProcessPoolExecutor`` flips an
+        internal ``_broken`` flag when any worker terminates abruptly
+        (segfault, OOM kill, missing DLL, recursive freeze_support
+        spawn). After that, every subsequent ``.submit()`` raises
+        ``BrokenProcessPool`` — which surfaces in our UI as
+        "A child process terminated abruptly, the process pool is not
+        usable anymore". We detect this defensively so the next
+        ``_ensure_executor`` call rebuilds the pool instead of locking
+        the user out of OCR for the rest of the session.
+        """
+        ex = self._executor
+        if ex is None:
+            return False
+        broken = getattr(ex, "_broken", None)
+        return bool(broken)
+
     def _ensure_executor(self) -> ProcessPoolExecutor:
         """Lazily instantiate the process pool and start the progress bridge.
+
+        Self-healing: if the previous executor was poisoned by a worker
+        crash (see ``_is_executor_broken``) it is shut down and replaced
+        with a fresh one. This makes the "submit, child dies, every
+        future call fails forever" scenario at most a single-job loss
+        instead of a session-wide hang.
 
         ``max_tasks_per_child=10`` (Python 3.11+) recycles each worker
         after 10 jobs. Long-running sessions used to accumulate gigabytes
@@ -272,6 +297,16 @@ class ParallelProcessor:
         10 jobs caps per-worker RSS at a stable plateau without enough
         churn to dominate the spawn-start cost.
         """
+        if self._executor is not None and self._is_executor_broken():
+            logger.warning(
+                "ProcessPoolExecutor was broken by a worker crash — "
+                "shutting it down and creating a fresh pool."
+            )
+            try:
+                self._executor.shutdown(wait=False, cancel_futures=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Broken-pool shutdown raised: %s", exc)
+            self._executor = None
         if self._executor is None:
             logger.info(
                 "Starting ProcessPoolExecutor with %d workers (recycle=10)",

@@ -143,6 +143,47 @@ class TestCreateApplicationSingletonSafety:
             "the single-instance guard; see the comment in main().main()."
         )
 
+    def test_main_py_calls_freeze_support(self) -> None:
+        """Static check: src/main.py must call multiprocessing.freeze_support().
+
+        Without it, PyInstaller-frozen builds on Windows recursively
+        spawn copies of themselves every time the ProcessPoolExecutor
+        creates a worker (spawn-start re-executes the main script).
+        The user-visible symptom is:
+
+            A child process terminated abruptly, the process pool is
+            not usable anymore
+
+        The call must live inside the ``if __name__ == "__main__":``
+        block as the FIRST statement — otherwise it hits after workers
+        have already re-entered main() and is useless.
+        """
+        import ast
+
+        path = Path(__file__).parent.parent.parent / "src" / "main.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            # Look for `if __name__ == "__main__":`
+            if not isinstance(node, ast.If):
+                continue
+            # Crude match — good enough for a single file.
+            if "__main__" not in ast.dump(node.test):
+                continue
+            # First statement inside must be freeze_support().
+            first = node.body[0] if node.body else None
+            dump = ast.dump(first) if first is not None else ""
+            assert "freeze_support" in dump, (
+                "src/main.py's `if __name__ == '__main__':` block must "
+                "start with multiprocessing.freeze_support() — otherwise "
+                "the frozen Windows .exe will crash with "
+                "'A child process terminated abruptly' on first "
+                "ProcessPoolExecutor.submit."
+            )
+            return
+        import pytest as _pytest
+
+        _pytest.fail("No `if __name__ == '__main__':` block in src/main.py")
+
 
 def _cleanup_qapp_after_session() -> None:
     """Helper hook: ensure no leaked QApplication survives past these tests.

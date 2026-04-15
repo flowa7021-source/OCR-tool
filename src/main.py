@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import sys
 
 
@@ -52,4 +53,22 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # CRITICAL: must be the FIRST thing in __main__ on Windows.
+    #
+    # Without this call, PyInstaller-frozen executables that use
+    # ``multiprocessing`` (our ProcessPoolExecutor) recursively spawn
+    # copies of the app every time a worker is created — because
+    # Windows ``spawn`` starts each worker by re-executing the main
+    # script, which hits this block, which starts another pool, which
+    # spawns more workers, etc. Each of those "workers" actually
+    # reaches ``create_application`` briefly, then the OS kills the
+    # runaway process, which surfaces as:
+    #
+    #   A child process terminated abruptly, the process pool is not
+    #   usable anymore
+    #
+    # ``freeze_support()`` detects the "I am a spawned worker" case
+    # and short-circuits: the worker runs its payload and exits.
+    # No-op on non-frozen Python.
+    multiprocessing.freeze_support()
     sys.exit(main())
