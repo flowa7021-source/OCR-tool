@@ -317,8 +317,6 @@ class TestJobBridgeMarshalsToGuiThread:
             setattr(constants, name, tmp_path / name.lower())
             (tmp_path / name.lower()).mkdir(exist_ok=True)
 
-        from unittest.mock import MagicMock as _Mock
-
         from PySide6.QtWidgets import QApplication, QMessageBox
 
         QApplication.instance() or QApplication([])

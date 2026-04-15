@@ -1805,8 +1805,6 @@ class MainWindow(QMainWindow):
         'you are up-to-date' dialog (used for the automatic startup
         check, where we only want to bug the user about real upgrades).
         """
-        from src.application.update_checker import check_async
-
         # ``check_async`` spawns a plain ``threading.Thread`` to hit
         # GitHub; its callback lands on that non-Qt thread. Using
         # ``QTimer.singleShot`` here would silently drop the callable
@@ -1814,7 +1812,9 @@ class MainWindow(QMainWindow):
         # ``_JobBridge``). Use ``QMetaObject.invokeMethod`` with a
         # queued connection, which is the official Qt cross-thread
         # handoff.
-        from PySide6.QtCore import QMetaObject, Q_ARG
+        from PySide6.QtCore import Q_ARG, QMetaObject
+
+        from src.application.update_checker import check_async
 
         def _report(info) -> None:  # noqa: ANN001
             QMetaObject.invokeMethod(
