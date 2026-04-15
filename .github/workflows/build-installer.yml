@@ -653,15 +653,54 @@ jobs:
           #    is embedded. Every .exe produced by ISCC contains the
           #    literal "Inno Setup" plus a version fingerprint somewhere
           #    in its data section.
-          $bytes = [System.IO.File]::ReadAllBytes($path)
-          $text = [System.Text.Encoding]::ASCII.GetString($bytes)
-          if (-not $text.Contains("Inno Setup")) {
+          #
+          #    Streaming scan. ``ReadAllBytes`` + ``GetString`` used to
+          #    work for the ~350 MB bundle, but the HTR-with-bundled-
+          #    weights installer is ~1.3 GB and that path OOMs PowerShell
+          #    ("Exception of type 'System.OutOfMemoryException' was
+          #    thrown."). We now read 4 MB chunks through a StreamReader
+          #    with ASCII encoding and keep a trailing window so a match
+          #    that straddles a chunk boundary is still found.
+          $signature = "Inno Setup"
+          $found = $false
+          $context = $null
+          $fs2 = [System.IO.File]::Open($path, 'Open', 'Read', 'Read')
+          try {
+            $sr = New-Object System.IO.StreamReader($fs2, [System.Text.Encoding]::ASCII)
+            $bufferSize = 4 * 1024 * 1024   # 4 MB
+            $buffer = New-Object char[] $bufferSize
+            $tail = ""
+            while (($read = $sr.Read($buffer, 0, $bufferSize)) -gt 0) {
+              $chunk = $tail + [string]::new($buffer, 0, $read)
+              $idx = $chunk.IndexOf($signature)
+              if ($idx -ge 0) {
+                $found = $true
+                # Grab ~48 bytes of context after the hit for the
+                # version-extraction regex below.
+                $end = [Math]::Min($idx + $signature.Length + 48, $chunk.Length)
+                $context = $chunk.Substring($idx, $end - $idx)
+                break
+              }
+              # Keep trailing bytes so a signature straddling a chunk
+              # boundary is still caught on the next iteration.
+              if ($chunk.Length -gt $signature.Length) {
+                $tail = $chunk.Substring($chunk.Length - $signature.Length)
+              } else {
+                $tail = $chunk
+              }
+            }
+          } finally {
+            if ($sr) { $sr.Dispose() }
+            $fs2.Dispose()
+          }
+          if (-not $found) {
             throw "Installer does not contain the 'Inno Setup' signature — probably not a valid installer"
           }
-          # Report the embedded version for easier diagnosis
-          $m = [regex]::Match($text, "Inno Setup \(([^)]+)\)")
+          # Report the embedded version for easier diagnosis (from the
+          # 48-byte context we captured around the signature hit).
+          $m = [regex]::Match($context, "Inno Setup \(([^)]+)\)")
           if (-not $m.Success) {
-            $m = [regex]::Match($text, "Inno Setup[^\x00]{0,40}")
+            $m = [regex]::Match($context, "Inno Setup[^\x00]{0,40}")
           }
           if ($m.Success) {
             Write-Host "Inno Setup signature: $($m.Value)"

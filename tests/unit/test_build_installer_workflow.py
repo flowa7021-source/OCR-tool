@@ -93,3 +93,55 @@ class TestInstallerSizeFloor:
             f"HTR floor ({htr} MB) must be > no-HTR floor ({no_htr} MB) — "
             f"otherwise a silently-dropped HTR bundle wouldn't be caught."
         )
+
+
+class TestIntegrityCheckMemoryFriendly:
+    """Guard the installer-integrity step against an OOM regression.
+
+    The HTR-with-bundled-weights installer is ~1.3 GB. Loading that
+    via ``[System.IO.File]::ReadAllBytes + GetString`` (as the step
+    used to do) throws ``System.OutOfMemoryException`` inside
+    PowerShell because the resulting string allocation exceeds the
+    runtime's single-object size limit. The step now uses a
+    StreamReader + 4 MB chunking, which this test locks in.
+    """
+
+    def _integrity_section(self) -> str:
+        """Return just the ``Sanity-check installer integrity`` step body.
+
+        We scope all the assertions to this one step so unrelated
+        PowerShell blocks elsewhere in the workflow don't false-match.
+        """
+        content = _read()
+        start = content.find("Sanity-check installer integrity")
+        assert start >= 0, "integrity step name not found"
+        end_marker = "Installer integrity check passed"
+        end = content.find(end_marker, start)
+        assert end > start, "end of integrity step body not found"
+        return content[start:end + len(end_marker)]
+
+    def test_integrity_step_does_not_readallbytes(self) -> None:
+        """No actual call to ReadAllBytes — comments mentioning it are fine."""
+        code_lines = [
+            line for line in self._integrity_section().splitlines()
+            # Drop pure-comment lines (ignoring leading indentation).
+            if not line.lstrip().startswith("#")
+        ]
+        code = "\n".join(code_lines)
+        assert "ReadAllBytes" not in code, (
+            "Installer integrity step calls [System.IO.File]::ReadAllBytes "
+            "— OOMs PowerShell on 1 GB+ HTR installers. Use a chunked "
+            "StreamReader scan instead."
+        )
+
+    def test_integrity_step_streams_with_readerloop(self) -> None:
+        section = self._integrity_section()
+        # Must use StreamReader + chunk loop.
+        assert "StreamReader" in section, (
+            "Integrity step must stream the file via StreamReader "
+            "to avoid OOM on large installers."
+        )
+        assert "$sr.Read" in section or "sr.Read(" in section, (
+            "Integrity step must call the Read(buffer, 0, size) "
+            "overload in a loop to process the file in chunks."
+        )
