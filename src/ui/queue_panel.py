@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, Qt, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -64,6 +64,15 @@ class QueuePanel(QWidget):
 
         self.setAcceptDrops(True)
         self._filter_text: str = ""
+
+        # Coalesce refresh bursts: a running OCR job emits a queue
+        # event per page (1-10 Hz). Rebuilding the whole QTableWidget
+        # at that rate visibly janks the GUI. This timer batches all
+        # refresh requests into one real redraw per 100 ms window.
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(100)
+        self._refresh_timer.timeout.connect(self._do_refresh)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -124,14 +133,28 @@ class QueuePanel(QWidget):
             if self._bridge is not None
             else None
         )
-        self.refresh()
+        # Direct user action (attaching a queue) — refresh immediately so
+        # the first render is synchronous and tests / the user see the
+        # initial state straight away.
+        self._do_refresh()
 
     @Slot(object, str)
     def _on_queue_event(self, _item: object, _event: str) -> None:
         self.refresh()
 
     def refresh(self) -> None:
-        """Rebuild table contents from the attached queue, honouring the filter."""
+        """Schedule a batched table rebuild on the GUI thread.
+
+        Starting the singleshot timer is a no-op if it's already
+        pending — so 100 progress events in a 100 ms window cause one
+        actual redraw. Previously each event was a full
+        ``setRowCount`` + per-cell rebuild, which was a measurable
+        GUI-thread freeze on multi-file batches.
+        """
+        self._refresh_timer.start()
+
+    def _do_refresh(self) -> None:
+        """Actual table rebuild. Called from the coalescing timer."""
         if self._queue is None:
             return
         items = self._queue.list_items()
@@ -143,9 +166,15 @@ class QueuePanel(QWidget):
             self._set_row(row, item)
 
     def _on_filter_changed(self, text: str) -> None:
-        """Filter-line-edit hook: store the needle and re-render."""
+        """Filter-line-edit hook: store the needle and re-render.
+
+        Immediate (not debounced): human typing is at most ~10 Hz, and
+        users expect the table to change the instant they type a
+        character. Debounce is reserved for machine-driven progress
+        bursts which can fire at 10× that rate.
+        """
         self._filter_text = text.strip()
-        self.refresh()
+        self._do_refresh()
 
     def _set_row(self, row: int, item: QueueItem) -> None:
         status = item.status
@@ -262,4 +291,6 @@ class QueuePanel(QWidget):
             return
         removed = self._queue.clear_completed()
         logger.info("Cleared %d terminal queue items", removed)
-        self.refresh()
+        # Direct user action — refresh immediately so the feedback is
+        # instant, not 100 ms later.
+        self._do_refresh()

@@ -112,6 +112,25 @@ def job_result_from_dict(data: dict[str, Any]) -> JobResult:
 # ---------------------------------------------------------------------------
 
 
+def _prewarm_worker() -> str:
+    """No-op worker that imports everything a real job will need.
+
+    On Windows ``ProcessPoolExecutor`` uses ``spawn``, which means each
+    worker freshly imports the whole Python environment on first use.
+    For a PyInstaller-frozen build that includes torch + transformers
+    that can be 3-8 seconds on disk I/O alone — during which the GUI
+    thread sits waiting for ``future.result()``.
+
+    Calling :func:`ParallelProcessor.prewarm` from a background thread
+    forces a worker to start + import eagerly right after the main
+    window appears, so the user's first click of "Start OCR" returns
+    to the event loop immediately.
+    """
+    import src.application.pipeline  # noqa: F401
+
+    return "ready"
+
+
 def _worker_run_job(
     job_dict: dict[str, Any],
     progress_queue: multiprocessing.Queue | None = None,
@@ -251,6 +270,24 @@ class ParallelProcessor:
             self._executor = ProcessPoolExecutor(max_workers=self.max_workers)
             self._start_progress_bridge()
         return self._executor
+
+    def prewarm(self) -> None:
+        """Spin up the pool + a dummy job so the user's first submit is fast.
+
+        Must be called off the GUI thread — constructing
+        :class:`multiprocessing.Manager` spawns a subprocess which can
+        block the caller for ~1 s on Windows. Safe to call multiple
+        times; subsequent calls are a no-op once the executor is up.
+        """
+        try:
+            executor = self._ensure_executor()
+            # Submit a cheap no-op that imports the heavy modules so
+            # Windows spawn-start cost is paid *now*, off the GUI thread.
+            # We don't care about the future; the pool is keyed by state
+            # stored on ``self``.
+            executor.submit(_prewarm_worker)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ParallelProcessor prewarm failed: %s", exc)
 
     def _start_progress_bridge(self) -> None:
         """Start the manager, queue, and drain thread if not already running."""

@@ -33,25 +33,11 @@ def create_application(argv: list[str]) -> tuple[QApplication, MainWindow]:
     log_path = setup_logging()
     logger.info("Starting %s %s, logging to %s", APP_NAME, APP_VERSION, log_path)
 
-    # Garbage-collect stale temp workdirs left by previous sessions.
-    # closeEvent runs the same cleanup on graceful exit, but a hard
-    # kill / crash / BSOD never gets there — over weeks the temp/
-    # directory can accumulate many GB of pre-processed PNGs. Doing
-    # it here too bounds the on-disk cost to "one app run" even under
-    # the worst shutdown path.
-    try:
-        from src.infrastructure.file_utils import cleanup_temp_dir
-        from src.shared.constants import TEMP_DIR
-
-        removed = cleanup_temp_dir(TEMP_DIR, older_than_hours=24)
-        if removed:
-            logger.info(
-                "Startup: cleaned %d stale temp files from %s",
-                removed,
-                TEMP_DIR,
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Startup temp cleanup failed: %s", exc)
+    # Stale temp cleanup is deferred to a background thread AFTER the
+    # main window is shown (see ``MainWindow._schedule_temp_cleanup``).
+    # Doing it inline here made startup block on a filesystem walk of
+    # ``%LOCALAPPDATA%/OCRStudio/temp/`` which could easily take 500 ms
+    # on an HDD with many leftover job directories from prior crashes.
 
     # setHighDpiScaleFactorRoundingPolicy must be called BEFORE any
     # QApplication is instantiated. If a probe QApplication already

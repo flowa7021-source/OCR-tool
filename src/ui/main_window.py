@@ -78,8 +78,78 @@ class _OverlaySignals(QObject):
     failed = Signal(str)
 
 
+class _PoolPrewarmRunnable(QRunnable):
+    """Start the ProcessPoolExecutor off the GUI thread.
+
+    ``multiprocessing.Manager()`` spawns a subprocess which on Windows
+    takes ~1 s; first ``ProcessPoolExecutor.submit()`` spawn-starts a
+    worker and imports the whole bundle, another 2-6 s. If both happen
+    synchronously when the user clicks "Start OCR" the GUI freezes for
+    3-8 seconds and looks dead. This runnable pays that cost right
+    after window-show so the later click returns to the event loop
+    instantly.
+    """
+
+    def __init__(self, parallel_processor) -> None:  # noqa: ANN001
+        super().__init__()
+        self._pp = parallel_processor
+
+    @Slot()
+    def run(self) -> None:  # noqa: D401
+        try:
+            self._pp.prewarm()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Pool prewarm raised: %s", exc)
+
+
 class _TesseractVerifySignals(QObject):
     result = Signal(bool, str)  # (ok, message)
+
+
+class _TempCleanupRunnable(QRunnable):
+    """Walk ``TEMP_DIR`` in a worker thread and delete stale workdirs.
+
+    Fired once shortly after window-show. Walking a deep ``temp/``
+    tree on an HDD with 100+ leftover job dirs can easily take
+    half a second — enough to be noticeable as a startup "sticky".
+    """
+
+    @Slot()
+    def run(self) -> None:  # noqa: D401
+        try:
+            from src.infrastructure.file_utils import cleanup_temp_dir
+            from src.shared.constants import TEMP_DIR
+
+            removed = cleanup_temp_dir(TEMP_DIR, older_than_hours=24)
+            if removed:
+                logger.info(
+                    "Background temp cleanup: removed %d stale file(s) from %s",
+                    removed, TEMP_DIR,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Background temp cleanup failed: %s", exc)
+
+
+class _RecoverySnapshotRunnable(QRunnable):
+    """Persist a :class:`QueueItem` recovery snapshot off the GUI thread.
+
+    Fire-and-forget from ``_apply_job_progress`` every 5 pages. A
+    failed write is logged at DEBUG and otherwise ignored — the
+    worst-case is a slightly stale snapshot on a hard crash, which is
+    strictly better than a janked progress bar.
+    """
+
+    def __init__(self, recovery, item) -> None:  # noqa: ANN001
+        super().__init__()
+        self._recovery = recovery
+        self._item = item
+
+    @Slot()
+    def run(self) -> None:  # noqa: D401
+        try:
+            self._recovery.snapshot(self._item)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Background recovery snapshot failed: %s", exc)
 
 
 class _TesseractVerifyRunnable(QRunnable):
@@ -253,6 +323,25 @@ class MainWindow(QMainWindow):
             self._verify_timer.setSingleShot(True)
             self._verify_timer.timeout.connect(self._start_tesseract_verify_async)
             self._verify_timer.start(100)
+
+            # Pre-warm the ProcessPoolExecutor + multiprocessing.Manager
+            # in a background thread so the user's FIRST click of
+            # "Start OCR" doesn't pay the 3-8 second Windows
+            # spawn-start cost on the GUI thread. Fires 500 ms after
+            # window-show so the visible UI stabilises first.
+            self._prewarm_timer = QTimer(self)
+            self._prewarm_timer.setSingleShot(True)
+            self._prewarm_timer.timeout.connect(self._prewarm_parallel_pool)
+            self._prewarm_timer.start(500)
+
+            # Temp-dir GC also moved off the GUI thread. Previously ran
+            # synchronously in ``src/app.py`` before QApplication was
+            # instantiated — which still delayed the visible window by
+            # 100-500 ms on an HDD with many leftover job dirs.
+            self._temp_cleanup_timer = QTimer(self)
+            self._temp_cleanup_timer.setSingleShot(True)
+            self._temp_cleanup_timer.timeout.connect(self._schedule_temp_cleanup)
+            self._temp_cleanup_timer.start(1500)
 
     # ------------------------------------------------------------ build UI
     def _build_widgets(self) -> None:
@@ -733,10 +822,10 @@ class MainWindow(QMainWindow):
                 )
                 item = QueueItem(config=job_cfg, progress_total=0)
                 self._queue_manager.add(item)
-                try:
-                    self._recovery.snapshot(item)
-                except Exception:  # noqa: BLE001
-                    logger.debug("recovery snapshot failed", exc_info=True)
+                # Recovery snapshot off the GUI thread — batch drag-drop
+                # of 50 files would otherwise do 50 synchronous disk
+                # writes while the user is still moving the mouse.
+                self._schedule_recovery_snapshot(item)
                 self._submit_job(item)
                 self._add_to_recent(input_path)
             except Exception as exc:  # noqa: BLE001
@@ -775,10 +864,13 @@ class MainWindow(QMainWindow):
         item = self._queue_manager.get(job_id) if hasattr(self._queue_manager, "get") else None
         name = item.file_name if item is not None else ""
         self.progress_widget.set_current_file(f"{name} — {stage}", current, total)
-        # Periodically refresh the recovery snapshot so a crash resumes from ~ here
+        # Periodically refresh the recovery snapshot so a crash resumes
+        # from ~ here. Moved off the GUI thread via QThreadPool:
+        # ``snapshot`` is a disk write (JSON + replace) which on HDDs
+        # can easily hit 50-200 ms and was visibly janking the progress
+        # bar.
         if item is not None and current % 5 == 0:
-            with contextlib.suppress(Exception):
-                self._recovery.snapshot(item)
+            self._schedule_recovery_snapshot(item)
 
     def _on_job_complete(self, job_id: str, result: object) -> None:
         # Called from worker thread — marshal into GUI thread
@@ -1174,6 +1266,34 @@ class MainWindow(QMainWindow):
             self._settings_storage.save(settings)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not persist theme preference: %s", exc)
+
+    def _schedule_recovery_snapshot(self, item) -> None:  # noqa: ANN001
+        """Submit a background recovery snapshot. Fire-and-forget."""
+        try:
+            runnable = _RecoverySnapshotRunnable(self._recovery, item)
+            QThreadPool.globalInstance().start(runnable)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Could not schedule recovery snapshot: %s", exc)
+
+    def _schedule_temp_cleanup(self) -> None:
+        """Submit the startup temp-dir GC to the thread pool."""
+        try:
+            QThreadPool.globalInstance().start(_TempCleanupRunnable())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Could not schedule temp cleanup: %s", exc)
+
+    def _prewarm_parallel_pool(self) -> None:
+        """Submit the ProcessPoolExecutor prewarm to the thread pool.
+
+        Cheap wrapper — the real work lives in :class:`_PoolPrewarmRunnable`
+        which runs on QThreadPool so the GUI thread is never blocked by
+        the ~1 s manager spawn and ~2-6 s first-worker import.
+        """
+        try:
+            runnable = _PoolPrewarmRunnable(self._parallel_processor)
+            QThreadPool.globalInstance().start(runnable)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Could not schedule pool prewarm: %s", exc)
 
     def _start_tesseract_verify_async(self) -> None:
         """Kick Tesseract verification off the GUI thread.
