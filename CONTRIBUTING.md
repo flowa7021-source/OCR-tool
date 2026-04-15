@@ -3,6 +3,7 @@
 Документация для пользователей — в каталоге [`docs/`](docs/):
 
 - [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) — UX-сценарии
+- [`docs/SYSTEM_REQUIREMENTS.md`](docs/SYSTEM_REQUIREMENTS.md) — минимум / рекомендация по железу и ОС
 - [`docs/CLI.md`](docs/CLI.md) — запуск из командной строки
 - [`docs/KEYBOARD_SHORTCUTS.md`](docs/KEYBOARD_SHORTCUTS.md) — горячие клавиши
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — слои и потоки данных
