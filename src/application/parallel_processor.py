@@ -262,12 +262,36 @@ class ParallelProcessor:
     # -- lifecycle ---------------------------------------------------------
 
     def _ensure_executor(self) -> ProcessPoolExecutor:
-        """Lazily instantiate the process pool and start the progress bridge."""
+        """Lazily instantiate the process pool and start the progress bridge.
+
+        ``max_tasks_per_child=10`` (Python 3.11+) recycles each worker
+        after 10 jobs. Long-running sessions used to accumulate gigabytes
+        of per-worker memory — torch caches, PyMuPDF mmaps, OCRmyPDF
+        temp-files holding onto file-descriptor caches — because the
+        default executor keeps workers alive forever. Recycling after
+        10 jobs caps per-worker RSS at a stable plateau without enough
+        churn to dominate the spawn-start cost.
+        """
         if self._executor is None:
             logger.info(
-                "Starting ProcessPoolExecutor with %d workers", self.max_workers
+                "Starting ProcessPoolExecutor with %d workers (recycle=10)",
+                self.max_workers,
             )
-            self._executor = ProcessPoolExecutor(max_workers=self.max_workers)
+            # max_tasks_per_child was added in 3.11; fall back if we
+            # ever get run on an older interpreter.
+            try:
+                self._executor = ProcessPoolExecutor(
+                    max_workers=self.max_workers,
+                    max_tasks_per_child=10,
+                )
+            except TypeError:
+                logger.debug(
+                    "max_tasks_per_child unsupported on this Python; "
+                    "workers will not recycle"
+                )
+                self._executor = ProcessPoolExecutor(
+                    max_workers=self.max_workers
+                )
             self._start_progress_bridge()
         return self._executor
 

@@ -76,6 +76,76 @@ def _render_page_pixmap(doc: Any, page_index: int, zoom: float) -> QPixmap:
     return QPixmap.fromImage(image)
 
 
+class _FirstPageSignals(QObject):
+    """Signals emitted by :class:`_FirstPageRenderer`.
+
+    Parent this to the :class:`PDFViewer` so the queued connection is
+    severed when the viewer is destroyed — otherwise the worker's
+    emission can target a deleted C++ object and segfault under
+    pytest teardown.
+    """
+
+    ready = Signal(int, QPixmap)  # (page_number, rendered_pixmap)
+    failed = Signal(str)
+
+
+class _FirstPageRenderer(QRunnable):
+    """Render a single PDF page in a worker thread.
+
+    Used by :meth:`PDFViewer.open` so the user doesn't see the GUI
+    freeze for 200-800 ms while PyMuPDF rasterises the first page of
+    a freshly-opened document. The worker opens its OWN fitz.Document
+    (PyMuPDF Documents are not thread-safe across instances, but
+    opening the same file from two threads is — each gets its own
+    mmap view).
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        page: int,
+        zoom: float,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__()
+        self.signals = _FirstPageSignals(parent)
+        self._path = path
+        self._page = page
+        self._zoom = zoom
+
+    def run(self) -> None:  # noqa: D401
+        # Every emit is wrapped in ``_safe_emit`` because the signal's
+        # QObject parent can be deleted between scheduling and run —
+        # typical under pytest teardown. PySide6 raises
+        # ``RuntimeError: Signal source has been deleted`` in that case,
+        # which the thread pool would log as an unhandled exception.
+        try:
+            fitz = _import_fitz()
+            doc = fitz.open(str(self._path))
+        except Exception as exc:  # noqa: BLE001
+            self._safe_emit(self.signals.failed, f"open failed: {exc}")
+            return
+        try:
+            pixmap = _render_page_pixmap(doc, self._page - 1, self._zoom)
+            self._safe_emit(self.signals.ready, self._page, pixmap)
+        except Exception as exc:  # noqa: BLE001
+            self._safe_emit(self.signals.failed, f"render failed: {exc}")
+        finally:
+            import contextlib as _ctx
+
+            with _ctx.suppress(Exception):
+                doc.close()
+
+    @staticmethod
+    def _safe_emit(signal, *args) -> None:  # noqa: ANN001
+        # ``RuntimeError: Signal source has been deleted`` is expected
+        # under pytest teardown — nothing to do.
+        import contextlib as _ctx
+
+        with _ctx.suppress(RuntimeError):
+            signal.emit(*args)
+
+
 class _ThumbSignals(QObject):
     """Signals emitted by :class:`_ThumbnailWorker`."""
 
@@ -221,8 +291,12 @@ class PDFViewer(QWidget):
     def open(self, path: Path) -> None:
         """Open a PDF document and display its first page.
 
-        Args:
-            path: Path to the PDF file.
+        Opening the fitz Document itself is fast (mmap), but the
+        first ``get_pixmap`` rasterisation is 200-800 ms for typical
+        scans and was blocking the GUI thread the moment the user
+        selected a file. We now show a placeholder immediately and
+        hand the first-page render to a worker thread via
+        :class:`_FirstPageRenderer`.
         """
         self.close_document()
         try:
@@ -234,10 +308,49 @@ class PDFViewer(QWidget):
             return
         self._document_path = path
         self._current_page = 1
-        self._render_current()
+        # Show a "loading" placeholder so the user sees immediate
+        # feedback. The actual pixmap arrives via signal when the
+        # worker finishes.
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            self._page_label.setText("Загрузка страницы…")
+        self._schedule_first_page_render(path, page=1)
         self._start_thumbnail_worker()
         self.document_opened.emit(str(path))
         self.page_changed.emit(self._current_page)
+
+    def _schedule_first_page_render(self, path: Path, page: int) -> None:
+        """Run the first page render off the GUI thread."""
+        runnable = _FirstPageRenderer(
+            path, page=page, zoom=self._zoom, parent=self
+        )
+        runnable.signals.ready.connect(
+            self._on_first_page_ready, Qt.ConnectionType.QueuedConnection
+        )
+        runnable.signals.failed.connect(
+            lambda msg: logger.debug("First-page render: %s", msg),
+            Qt.ConnectionType.QueuedConnection,
+        )
+        QThreadPool.globalInstance().start(runnable)
+
+    def _on_first_page_ready(self, page: int, pixmap: QPixmap) -> None:
+        """Install the async-rendered first page if we're still on it.
+
+        The user may have paged to another page while the render was
+        in-flight — in that case the synchronous ``_render_current``
+        path on page-change will have already produced the right
+        image and we should not clobber it.
+        """
+        if page != self._current_page or self._doc is None:
+            return
+        try:
+            if self._overlay_visible:
+                pixmap = self._paint_overlay(pixmap, page)
+            self._page_label.setPixmap(pixmap)
+            self._page_label.resize(pixmap.size())
+        except Exception:
+            logger.exception("Failed to install async first-page pixmap")
 
     def close_document(self) -> None:
         """Close the currently open document and reset state."""

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
@@ -91,6 +91,14 @@ class ResultsPanel(QWidget):
         self._edit_search.setPlaceholderText("Найти в тексте страницы…")
         self._edit_search.returnPressed.connect(self._find_next)
         self._edit_search.textChanged.connect(self._on_search_text_changed)
+        # Debounce timer: highlighting every occurrence across a large
+        # text edit is O(chars × matches) and used to freeze the GUI
+        # on every keystroke. 200 ms is well under the human
+        # perceptual threshold but enough to coalesce typing.
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.setInterval(200)
+        self._search_debounce.timeout.connect(self._apply_pending_search)
         self._btn_find_next = QPushButton("▼", self)
         self._btn_find_next.setMaximumWidth(40)
         self._btn_find_next.setToolTip("Следующее совпадение (Enter)")
@@ -259,14 +267,30 @@ class ResultsPanel(QWidget):
         self._lbl_search_count.setText("")
 
     def _on_search_text_changed(self, text: str) -> None:
-        """Re-highlight every occurrence and update the match counter."""
+        """Schedule a debounced highlight + counter refresh.
+
+        Full-document highlight on every keystroke used to freeze the
+        GUI on large OCR results. This restart-on-each-change timer
+        collapses typing bursts into one real highlight pass.
+        Immediate clear on empty string keeps the cleared state snappy.
+        """
+        if not text:
+            self._search_debounce.stop()
+            self._clear_highlights()
+            self._lbl_search_count.setText("")
+            return
+        self._search_debounce.start()
+
+    def _apply_pending_search(self) -> None:
+        """Actually run the highlight pass after the debounce."""
+        text = self._edit_search.text()
         self._clear_highlights()
         if not text:
             self._lbl_search_count.setText("")
             return
         count = self._highlight_all(text)
         self._lbl_search_count.setText(f"{count}")
-        # Auto-jump to the first match on every keystroke.
+        # Auto-jump to the first match after the burst settles.
         if count > 0:
             cursor = self._text_edit.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.Start)

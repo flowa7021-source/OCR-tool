@@ -60,8 +60,10 @@ class TestResultsPanelSearch:
         # result (textChanged signal → highlight + counter) is the
         # same as if the user had typed.
         panel._edit_search.setText("один")
-        qtbot.wait(50)
-        assert panel._lbl_search_count.text() == "3"
+        # Wait past the 200 ms search debounce plus a margin.
+        qtbot.waitUntil(
+            lambda: panel._lbl_search_count.text() == "3", timeout=1000
+        )
 
     def test_escape_closes_search(self, qtbot) -> None:
         from src.ui.results_panel import ResultsPanel
