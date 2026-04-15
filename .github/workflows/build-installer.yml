@@ -26,7 +26,11 @@ on:
   push:
     branches:
       - main
-      - "claude/ocr-app-development-**"
+      # Match every Claude-managed branch so hot-fix / feature branches
+      # (e.g. claude/fix-file-recognition-hang-*) trigger an installer
+      # build alongside the existing claude/ocr-app-development-* one.
+      # Aligned with ci.yml which already uses `claude/**`.
+      - "claude/**"
     tags:
       - "v*"
   pull_request:
