@@ -97,3 +97,78 @@ def test_listener_exception_does_not_crash_drain_thread() -> None:
 
     pp.shutdown(wait=False)
     assert calls == [7]
+
+
+def test_concurrent_ensure_executor_creates_only_one_pool() -> None:
+    """prewarm (QThreadPool) and submit (GUI thread) race on the first
+    click of Start OCR. Without a lock they each construct their own
+    ProcessPoolExecutor + Manager, leaving one orphaned and workers
+    potentially reporting into a queue nobody drains.
+    """
+    import threading
+
+    pp = ParallelProcessor(max_workers=1)
+    created: list[object] = []
+
+    # Stub the heavy constructors so the test doesn't spawn real subprocesses.
+    from src.application import parallel_processor as pp_mod
+
+    class _FakeExecutor:
+        def __init__(self, *a, **kw):
+            created.append(self)
+            # Simulate the slow Windows Manager spawn so the race window is real.
+            time.sleep(0.1)
+
+        def submit(self, *a, **kw):
+            class _F:
+                def add_done_callback(self, _):
+                    pass
+
+                def result(self):
+                    return {}
+
+            return _F()
+
+        def shutdown(self, *a, **kw):
+            pass
+
+    with (
+        _patch(pp_mod, "ProcessPoolExecutor", _FakeExecutor),
+        _patch_method(pp, "_start_progress_bridge", lambda: None),
+    ):
+        threads = [threading.Thread(target=pp._ensure_executor) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    assert len(created) == 1, (
+        f"Expected exactly one ProcessPoolExecutor, got {len(created)} — "
+        "race condition in _ensure_executor regressed"
+    )
+
+
+# ---- tiny helpers used only by the race test -----------------------------
+
+
+import contextlib  # noqa: E402
+
+
+@contextlib.contextmanager
+def _patch(owner, name, value):
+    original = getattr(owner, name)
+    setattr(owner, name, value)
+    try:
+        yield
+    finally:
+        setattr(owner, name, original)
+
+
+@contextlib.contextmanager
+def _patch_method(instance, name, value):
+    original = getattr(instance, name)
+    setattr(instance, name, value)
+    try:
+        yield
+    finally:
+        setattr(instance, name, original)

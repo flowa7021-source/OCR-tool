@@ -254,6 +254,14 @@ class ParallelProcessor:
         self._progress_thread: threading.Thread | None = None
         self._progress_stop = threading.Event()
         self._progress_lock = threading.Lock()
+        # Serialises executor + progress-bridge creation. Without this,
+        # a near-simultaneous ``prewarm`` (QThreadPool worker) and
+        # ``submit`` (GUI thread) both observe ``self._executor is None``
+        # and each construct their own ProcessPoolExecutor +
+        # multiprocessing.Manager — leaving orphan subprocesses, two
+        # progress queues, and in the worst case workers reporting into
+        # a queue nobody drains (→ "Start OCR, nothing happens").
+        self._executor_lock = threading.Lock()
         # tracking_id -> (on_progress, job_id_for_callback)
         self._progress_listeners: dict[str, tuple[OnProgress | None, str]] = {}
         # job_id -> Future (for cancellation)
@@ -297,38 +305,39 @@ class ParallelProcessor:
         10 jobs caps per-worker RSS at a stable plateau without enough
         churn to dominate the spawn-start cost.
         """
-        if self._executor is not None and self._is_executor_broken():
-            logger.warning(
-                "ProcessPoolExecutor was broken by a worker crash — "
-                "shutting it down and creating a fresh pool."
-            )
-            try:
-                self._executor.shutdown(wait=False, cancel_futures=True)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("Broken-pool shutdown raised: %s", exc)
-            self._executor = None
-        if self._executor is None:
-            logger.info(
-                "Starting ProcessPoolExecutor with %d workers (recycle=10)",
-                self.max_workers,
-            )
-            # max_tasks_per_child was added in 3.11; fall back if we
-            # ever get run on an older interpreter.
-            try:
-                self._executor = ProcessPoolExecutor(
-                    max_workers=self.max_workers,
-                    max_tasks_per_child=10,
+        with self._executor_lock:
+            if self._executor is not None and self._is_executor_broken():
+                logger.warning(
+                    "ProcessPoolExecutor was broken by a worker crash — "
+                    "shutting it down and creating a fresh pool."
                 )
-            except TypeError:
-                logger.debug(
-                    "max_tasks_per_child unsupported on this Python; "
-                    "workers will not recycle"
+                try:
+                    self._executor.shutdown(wait=False, cancel_futures=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Broken-pool shutdown raised: %s", exc)
+                self._executor = None
+            if self._executor is None:
+                logger.info(
+                    "Starting ProcessPoolExecutor with %d workers (recycle=10)",
+                    self.max_workers,
                 )
-                self._executor = ProcessPoolExecutor(
-                    max_workers=self.max_workers
-                )
-            self._start_progress_bridge()
-        return self._executor
+                # max_tasks_per_child was added in 3.11; fall back if we
+                # ever get run on an older interpreter.
+                try:
+                    self._executor = ProcessPoolExecutor(
+                        max_workers=self.max_workers,
+                        max_tasks_per_child=10,
+                    )
+                except TypeError:
+                    logger.debug(
+                        "max_tasks_per_child unsupported on this Python; "
+                        "workers will not recycle"
+                    )
+                    self._executor = ProcessPoolExecutor(
+                        max_workers=self.max_workers
+                    )
+                self._start_progress_bridge()
+            return self._executor
 
     def prewarm(self) -> None:
         """Spin up the pool + a dummy job so the user's first submit is fast.
