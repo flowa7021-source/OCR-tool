@@ -121,11 +121,20 @@ class _JobBridge(QObject):
     connecting it with ``Qt.QueuedConnection`` is the supported Qt
     cross-thread handoff: the signal's payload is queued into the
     main-thread event loop regardless of which thread called ``emit``.
+
+    ``update_info`` rides the same bridge so the background
+    update-checker thread can deliver its payload safely. Earlier
+    revisions used ``QMetaObject.invokeMethod`` with ``Q_ARG(object,
+    ...)`` for that, which raised ``RuntimeError: qArgDataFromPyType:
+    Unable to find a QMetaType for "object"`` on PySide6 — Q_ARG only
+    accepts Qt-registered types, not arbitrary Python objects.
+    Signals, by contrast, carry Python objects natively.
     """
 
     progress = Signal(str, int, int, str)  # job_id, current, total, stage
     completed = Signal(str, object)  # job_id, JobResult
     failed = Signal(str, object)  # job_id, Exception
+    update_info = Signal(object, bool)  # UpdateInfo | None, quiet
 
 
 class _TempCleanupRunnable(QRunnable):
@@ -328,6 +337,9 @@ class MainWindow(QMainWindow):
         )
         self._job_bridge.failed.connect(
             self._apply_job_failure, Qt.ConnectionType.QueuedConnection
+        )
+        self._job_bridge.update_info.connect(
+            self._show_update_info_slot, Qt.ConnectionType.QueuedConnection
         )
 
         self._build_widgets()
@@ -1806,24 +1818,17 @@ class MainWindow(QMainWindow):
         check, where we only want to bug the user about real upgrades).
         """
         # ``check_async`` spawns a plain ``threading.Thread`` to hit
-        # GitHub; its callback lands on that non-Qt thread. Using
-        # ``QTimer.singleShot`` here would silently drop the callable
-        # (same failure mode as the OCR progress bug — see
-        # ``_JobBridge``). Use ``QMetaObject.invokeMethod`` with a
-        # queued connection, which is the official Qt cross-thread
-        # handoff.
-        from PySide6.QtCore import Q_ARG, QMetaObject
-
+        # GitHub; its callback lands on that non-Qt thread. Route the
+        # result through the ``_job_bridge.update_info`` signal — a
+        # QueuedConnection signal carries Python objects natively and
+        # avoids the ``qArgDataFromPyType: Unable to find a QMetaType
+        # for 'object'`` error that ``QMetaObject.invokeMethod`` with
+        # ``Q_ARG(object, ...)`` raises on PySide6 for arbitrary Python
+        # payloads.
         from src.application.update_checker import check_async
 
         def _report(info) -> None:  # noqa: ANN001
-            QMetaObject.invokeMethod(
-                self,
-                "_show_update_info_slot",
-                Qt.ConnectionType.QueuedConnection,
-                Q_ARG(object, info),
-                Q_ARG(bool, quiet),
-            )
+            self._job_bridge.update_info.emit(info, quiet)
 
         check_async(_report)
 

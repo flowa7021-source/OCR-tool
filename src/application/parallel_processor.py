@@ -162,6 +162,35 @@ def _worker_run_job(
         root.addHandler(handler)
         root.setLevel(logging.INFO)
 
+    # Dump native-level tracebacks on access violation / segfault. Without
+    # this, a crash inside OCRmyPDF / PyMuPDF / Tesseract surfaces to the
+    # host as a bare ``BrokenProcessPool`` with no indication which C
+    # library died. ``faulthandler`` writes to a per-process log file in
+    # the user's AppData/logs so the traceback survives the crash. The
+    # host-side logger is a different process, so we can't share a
+    # handler — a file is the only robust channel.
+    try:
+        import faulthandler as _fh
+        import os as _os
+
+        logs_dir = _os.environ.get("OCRSTUDIO_LOGS_DIR")
+        if not logs_dir:
+            # Windows AppData fallback — matches src/shared/constants.LOGS_DIR
+            # without importing it (avoids a circular import at worker start).
+            appdata = _os.environ.get("LOCALAPPDATA") or _os.environ.get("APPDATA")
+            if appdata:
+                logs_dir = _os.path.join(appdata, "OCRStudio", "logs")
+        if logs_dir:
+            _os.makedirs(logs_dir, exist_ok=True)
+            crash_path = _os.path.join(
+                logs_dir, f"worker-crash-{_os.getpid()}.log"
+            )
+            _fh_file = open(crash_path, "w", encoding="utf-8")  # noqa: SIM115
+            _fh.enable(_fh_file)
+    except Exception:  # noqa: BLE001
+        # faulthandler is best-effort diagnostics; never block the job.
+        pass
+
     worker_logger = logging.getLogger(__name__ + ".worker")
 
     try:
@@ -463,9 +492,35 @@ class ParallelProcessor:
         with self._progress_lock:
             self._progress_listeners[tracking_id] = (on_progress, exposed_id)
 
-        future = executor.submit(
-            _worker_run_job, job_to_dict(job), self._progress_queue, tracking_id
-        )
+        # ``BrokenProcessPool`` at submit time is a known race: the
+        # previous job's worker can die after ``_ensure_executor``
+        # already returned a "fine" executor but before the pool's
+        # internal manager thread has flipped ``_broken``. The check in
+        # ``_ensure_executor`` therefore misses the freshly-broken
+        # state, and ``executor.submit`` below throws. Catch it once,
+        # force a rebuild, and retry — ``_ensure_executor`` will spin
+        # up a fresh pool the second time around.
+        from concurrent.futures.process import BrokenProcessPool
+
+        try:
+            future = executor.submit(
+                _worker_run_job, job_to_dict(job), self._progress_queue, tracking_id
+            )
+        except BrokenProcessPool:
+            logger.warning(
+                "BrokenProcessPool at submit — rebuilding pool and retrying once"
+            )
+            with self._executor_lock:
+                try:
+                    self._executor.shutdown(wait=False, cancel_futures=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Broken-pool shutdown raised: %s", exc)
+                self._executor = None
+            executor = self._ensure_executor()
+            future = executor.submit(
+                _worker_run_job, job_to_dict(job), self._progress_queue, tracking_id
+            )
+
         with self._progress_lock:
             self._futures[exposed_id] = future
 

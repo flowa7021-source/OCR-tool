@@ -302,6 +302,41 @@ class TestJobBridgeMarshalsToGuiThread:
                             "signal (QueuedConnection) instead."
                         )
 
+    def test_on_check_updates_ast_avoids_q_arg_object(self) -> None:
+        """AST guard: _on_check_updates must NOT use Q_ARG(object, ...).
+
+        PySide6 raises ``RuntimeError: qArgDataFromPyType: Unable to
+        find a QMetaType for 'object'`` at runtime — Q_ARG only accepts
+        Qt-registered types. Use a Signal (QueuedConnection) instead;
+        signals carry Python objects natively.
+        """
+        import ast
+
+        src = (Path(__file__).parent.parent.parent / "src" / "ui" / "main_window.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(src)
+
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.FunctionDef) and node.name == "_on_check_updates"
+            ):
+                continue
+            for inner in ast.walk(node):
+                if not (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)):
+                    continue
+                if inner.func.id != "Q_ARG":
+                    continue
+                # First arg is the type; reject if it's the bare ``object`` name.
+                if inner.args and isinstance(inner.args[0], ast.Name) and inner.args[0].id == "object":
+                    import pytest as _pytest
+
+                    _pytest.fail(
+                        "_on_check_updates uses Q_ARG(object, ...) — "
+                        "PySide6 rejects this at runtime with "
+                        "qArgDataFromPyType. Use a Signal instead."
+                    )
+
     def test_progress_from_background_thread_reaches_gui_thread(
         self, qtbot, tmp_path: Path
     ) -> None:

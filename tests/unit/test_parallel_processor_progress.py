@@ -99,6 +99,62 @@ def test_listener_exception_does_not_crash_drain_thread() -> None:
     assert calls == [7]
 
 
+def test_submit_retries_once_on_broken_process_pool() -> None:
+    """If ``executor.submit`` throws BrokenProcessPool (worker died
+    after _ensure_executor's broken-check), the pool must self-heal
+    and the job must be submitted against the fresh executor.
+    """
+    from concurrent.futures.process import BrokenProcessPool
+    from unittest.mock import MagicMock
+
+    from src.core.models import OCRJobConfig, ProfileData
+
+    pp = ParallelProcessor(max_workers=1)
+
+    submit_calls: list[object] = []
+
+    class _Future:
+        def add_done_callback(self, _):
+            pass
+
+    class _FirstExecutor:
+        def submit(self, *_a, **_kw):
+            submit_calls.append("first")
+            raise BrokenProcessPool("worker died")
+
+        def shutdown(self, *_a, **_kw):
+            pass
+
+    class _SecondExecutor:
+        def submit(self, *_a, **_kw):
+            submit_calls.append("second")
+            return _Future()
+
+        def shutdown(self, *_a, **_kw):
+            pass
+
+    executors = iter([_FirstExecutor(), _SecondExecutor()])
+
+    def _fake_ensure():
+        pp._executor = next(executors)  # type: ignore[attr-defined]
+        return pp._executor  # type: ignore[attr-defined]
+
+    pp._ensure_executor = _fake_ensure  # type: ignore[assignment]
+    pp._start_progress_bridge = lambda: None  # type: ignore[assignment]
+
+    job = OCRJobConfig(
+        input_path="x.pdf",
+        output_path="y.pdf",
+        profile=ProfileData(name="test"),
+    )
+    future = pp.submit(job, on_progress=MagicMock(), on_complete=MagicMock())
+
+    assert submit_calls == ["first", "second"], (
+        f"Expected one retry after BrokenProcessPool, got: {submit_calls}"
+    )
+    assert future is not None
+
+
 def test_concurrent_ensure_executor_creates_only_one_pool() -> None:
     """prewarm (QThreadPool) and submit (GUI thread) race on the first
     click of Start OCR. Without a lock they each construct their own
