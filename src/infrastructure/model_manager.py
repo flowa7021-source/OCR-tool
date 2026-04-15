@@ -69,13 +69,17 @@ GOT_OCR2_SPEC = ModelSpec(
     label="GOT-OCR 2.0",
     description="Универсальный transformer-OCR (Apache-2.0, ~580 МБ).",
     total_size_bytes=580 * 1024 * 1024,
+    # stepfun-ai/GOT-OCR2_0 uses a Qwen tokenizer distributed as a
+    # tiktoken BPE file (``qwen.tiktoken``) PLUS the usual
+    # ``tokenizer_config.json`` + ``special_tokens_map.json`` — there is
+    # NO ``tokenizer.json`` in the repo, so we must not list it (pulls
+    # 404 from HuggingFace mid-download).
     files=[
         ModelFile(name="config.json", url=f"{GOT_OCR2_HF}/config.json"),
         ModelFile(
             name="generation_config.json",
             url=f"{GOT_OCR2_HF}/generation_config.json",
         ),
-        ModelFile(name="tokenizer.json", url=f"{GOT_OCR2_HF}/tokenizer.json"),
         ModelFile(
             name="tokenizer_config.json",
             url=f"{GOT_OCR2_HF}/tokenizer_config.json",

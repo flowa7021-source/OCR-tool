@@ -89,3 +89,47 @@ class TestDownloadScriptStructure:
         # the whole point is to avoid drift.
         assert "GOT_OCR2_SPEC" in src
         assert "src.infrastructure.model_manager" in src
+
+
+class TestSpecContentsMatchRepoReality:
+    """Guard the GOT-OCR 2.0 file manifest against 404 regressions.
+
+    The HuggingFace repo ``stepfun-ai/GOT-OCR2_0`` does NOT ship a
+    ``tokenizer.json`` (it uses a tiktoken-format ``qwen.tiktoken``
+    instead). Downloading ``tokenizer.json`` returns 404 and kills
+    the CI "Pre-download GOT-OCR 2.0 weights" step mid-flight.
+    """
+
+    def test_no_tokenizer_json_in_manifest(self) -> None:
+        from src.infrastructure.model_manager import GOT_OCR2_SPEC
+
+        names = {f.name for f in GOT_OCR2_SPEC.files}
+        assert "tokenizer.json" not in names, (
+            "tokenizer.json is NOT present in the stepfun-ai/GOT-OCR2_0 "
+            "repo — listing it here causes a 404 mid-download. The real "
+            "tokenizer ships as qwen.tiktoken + tokenizer_config.json "
+            "+ special_tokens_map.json."
+        )
+
+    def test_qwen_tiktoken_is_in_manifest(self) -> None:
+        """And the thing that IS the tokenizer must stay listed."""
+        from src.infrastructure.model_manager import GOT_OCR2_SPEC
+
+        names = {f.name for f in GOT_OCR2_SPEC.files}
+        assert "qwen.tiktoken" in names
+
+    def test_model_weights_and_configs_are_listed(self) -> None:
+        """Sanity baseline: the files GOT-OCR 2.0 actually needs to run."""
+        from src.infrastructure.model_manager import GOT_OCR2_SPEC
+
+        names = {f.name for f in GOT_OCR2_SPEC.files}
+        required = {
+            "config.json",
+            "generation_config.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "model.safetensors",
+            "qwen.tiktoken",
+        }
+        missing = required - names
+        assert not missing, f"Missing required files: {missing}"
