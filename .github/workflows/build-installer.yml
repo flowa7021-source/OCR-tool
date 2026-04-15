@@ -132,18 +132,36 @@ jobs:
           Write-Host "Bundle HTR: $bundle"
           "with_htr=$bundle" | Out-File -FilePath $Env:GITHUB_OUTPUT -Append -Encoding utf8
 
+      # Cache the pip download cache explicitly. ``setup-python``'s
+      # built-in pip cache is keyed on ``requirements.txt`` only and does
+      # NOT cover torch/transformers (installed separately from the PyTorch
+      # CPU index) nor the CI-only tooling (pyinstaller, pytest, cairosvg).
+      # Directly caching ``%LOCALAPPDATA%\pip\Cache`` lets re-runs skip
+      # the ~200 MB torch download entirely — saves 2-3 min per build.
+      - name: Cache pip downloads
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: pip-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-htr${{ steps.htr_flag.outputs.with_htr }}-${{ hashFiles('requirements.txt', '.github/workflows/build-installer.yml') }}
+          restore-keys: |
+            pip-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-htr${{ steps.htr_flag.outputs.with_htr }}-
+            pip-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-
+
       - name: Install Python dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip wheel
-          pip install -r requirements.txt
-          pip install "pyinstaller>=6.6,<7" pytest pytest-mock pytest-qt Pillow cairosvg
+          # --prefer-binary: never build a wheel from an sdist if a
+          # pre-built one exists. Saves multi-minute C-extension compiles
+          # when a package briefly loses its wheel on PyPI.
+          pip install --prefer-binary -r requirements.txt
+          pip install --prefer-binary "pyinstaller>=6.6,<7" pytest pytest-mock pytest-qt Pillow cairosvg
           if ("${{ steps.htr_flag.outputs.with_htr }}" -eq "true") {
             Write-Host "Installing [htr] extras (torch, transformers, tiktoken)…"
             # CPU-only torch wheel keeps the bundle ~1 GB smaller than the
             # CUDA build. Users who want GPU acceleration can replace torch
             # in the deployed env, but the CPU build runs everywhere.
-            pip install --extra-index-url https://download.pytorch.org/whl/cpu `
+            pip install --prefer-binary --extra-index-url https://download.pytorch.org/whl/cpu `
                 "torch>=2.1,<3" "transformers>=4.40" "tiktoken>=0.5"
             python -c "import torch, transformers; print('torch', torch.__version__, '/ transformers', transformers.__version__)"
           }
@@ -487,8 +505,20 @@ jobs:
       # install. The download script reuses the same manifest as the
       # runtime downloader (src/infrastructure/model_manager.py) so
       # neither can drift.
-      - name: Pre-download GOT-OCR 2.0 weights (bundled install)
+      #
+      # Cache key is hashed over the manifest definition + downloader
+      # script — weights only need re-downloading when either actually
+      # changes. Saves 2-5 min of HuggingFace traffic per run.
+      - name: Cache GOT-OCR 2.0 weights
         if: steps.htr_flag.outputs.with_htr == 'true'
+        id: cache-got-ocr2
+        uses: actions/cache@v4
+        with:
+          path: resources/models/got_ocr2
+          key: got-ocr2-weights-${{ hashFiles('src/infrastructure/model_manager.py', '.github/scripts/download_got_ocr2.py') }}
+
+      - name: Pre-download GOT-OCR 2.0 weights (bundled install)
+        if: steps.htr_flag.outputs.with_htr == 'true' && steps.cache-got-ocr2.outputs.cache-hit != 'true'
         shell: pwsh
         timeout-minutes: 15
         run: python .github/scripts/download_got_ocr2.py

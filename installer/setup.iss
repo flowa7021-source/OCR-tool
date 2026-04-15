@@ -21,8 +21,19 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=auto
 OutputDir=.\Output
 OutputBaseFilename=OCRStudio-Setup-{#MyAppVersion}
-Compression=lzma2/ultra64
+; lzma2/max (64 MB dictionary) instead of lzma2/ultra64 (1 GB dict).
+; ultra64 is effectively single-threaded — Inno Setup's docs:
+; "multi-threading is generally much less effective with lzma2/ultra64".
+; On the ~2 GB HTR bundle that's 15-20 min single-threaded vs 5-8 min
+; multi-threaded with /max on a 4-core Windows runner. Installer grows
+; by ~5-10% (50-150 MB on the HTR build), an acceptable trade for
+; cutting CI time by 10+ minutes. App functionality is identical —
+; compression level only affects the outer container.
+Compression=lzma2/max
 SolidCompression=yes
+; Use every available core. Default is auto, but make it explicit so
+; future Inno Setup versions don't silently regress to 1 thread.
+LZMANumBlockThreads=4
 WizardStyle=modern
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
