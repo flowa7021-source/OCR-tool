@@ -275,6 +275,10 @@ class AppSettings:
     autosave_interval_pages: int = 10
     recent_files: list[str] = field(default_factory=list)
     notify_on_complete: bool = True
+    # OCR disk-cache budget in megabytes. ``0`` disables caching
+    # entirely (useful on disk-constrained systems). The default maps
+    # to the historic 2 GB cap — kept identical for upgrade parity.
+    ocr_cache_max_mb: int = 2048
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dictionary."""
@@ -290,6 +294,7 @@ class AppSettings:
             "autosave_interval_pages": self.autosave_interval_pages,
             "recent_files": list(self.recent_files),
             "notify_on_complete": self.notify_on_complete,
+            "ocr_cache_max_mb": self.ocr_cache_max_mb,
             "app_version": APP_VERSION,
         }
 
@@ -333,6 +338,10 @@ class AppSettings:
             recent_files=recent,
             notify_on_complete=bool(
                 data.get("notify_on_complete", defaults.notify_on_complete)
+            ),
+            ocr_cache_max_mb=max(
+                0,
+                int(data.get("ocr_cache_max_mb", defaults.ocr_cache_max_mb)),
             ),
         )
 

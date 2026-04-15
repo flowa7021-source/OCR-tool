@@ -208,10 +208,12 @@ class MainWindow(QMainWindow):
         # Start comfortably large on modern monitors but remain usable
         # on 1366x768 laptops via the minimum size below.
         # Default size targets a common 1080p laptop (1366×768). Minimum
-        # shrinks to 1100×640 so the app is still usable on 1280×720 /
-        # 1366×768 displays without the panels overflowing.
+        # fits a 1024×768 panel after accounting for title-bar + taskbar
+        # chrome; scrollbars take over inside each config panel below
+        # that, so the app stays functional on low-end laptops / thin
+        # clients without cropping any controls.
         self.resize(1440, 860)
-        self.setMinimumSize(1100, 640)
+        self.setMinimumSize(1000, 620)
         self.setWindowIcon(app_icon())
         # Tray notifier uses the same icon so completion toasts match.
         try:
@@ -282,9 +284,9 @@ class MainWindow(QMainWindow):
             sa.setFrameShape(QScrollArea.Shape.NoFrame)
             return sa
 
-        settings_scroll = _scroll(self.settings_panel, min_width=300)
-        preprocess_scroll = _scroll(self.preprocessing_panel, min_width=300)
-        postprocess_scroll = _scroll(self.postprocess_panel, min_width=300)
+        settings_scroll = _scroll(self.settings_panel, min_width=280)
+        preprocess_scroll = _scroll(self.preprocessing_panel, min_width=280)
+        postprocess_scroll = _scroll(self.postprocess_panel, min_width=280)
 
         # Right side: settings on top, then preprocessing / postprocessing tabs below
         right_splitter = QSplitter(Qt.Orientation.Vertical, self)
@@ -492,6 +494,9 @@ class MainWindow(QMainWindow):
         diag_act = QAction("Экспорт диагностики…", self)
         diag_act.triggered.connect(self._on_export_diagnostics)
         help_menu.addAction(diag_act)
+        sysinfo_act = QAction("Системная информация", self)
+        sysinfo_act.triggered.connect(self._on_show_system_info)
+        help_menu.addAction(sysinfo_act)
         update_act = QAction("Проверить обновления", self)
         update_act.triggered.connect(self._on_check_updates)
         help_menu.addAction(update_act)
@@ -1518,6 +1523,83 @@ class MainWindow(QMainWindow):
             from PySide6.QtGui import QDesktopServices
 
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_path)))
+
+    def _on_show_system_info(self) -> None:
+        """Show a summary of detected hardware + current app settings.
+
+        Lets a user (or a support engineer) see what the app thinks
+        of the host — useful when diagnosing "is it using all my
+        cores?" / "why only 1 worker?" type questions. Nothing here
+        leaves the machine; this is a local-only inspection dialog.
+        """
+        import platform
+
+        from src.infrastructure.host_resources import detect
+
+        host = detect()
+        try:
+            settings = self._settings_storage.load()
+        except Exception:  # noqa: BLE001
+            settings = None
+        lines: list[str] = []
+        lines.append(f"<b>OS:</b> {platform.platform()}")
+        lines.append(f"<b>Python:</b> {platform.python_version()}")
+        if host.detected:
+            lines.append(
+                f"<b>CPU:</b> {host.cpu_count} logical threads"
+            )
+            lines.append(
+                f"<b>RAM:</b> {host.total_ram_gb:.1f} GB "
+                f"(доступно: {host.available_ram_gb:.1f} GB)"
+            )
+            lines.append(
+                f"<b>Свободно на диске:</b> {host.free_disk_gb:.1f} GB"
+            )
+        else:
+            lines.append("<i>Детектор psutil недоступен — данные о железе не собраны.</i>")
+        try:
+            import torch  # type: ignore[import-not-found]
+
+            if torch.cuda.is_available():
+                lines.append(
+                    f"<b>GPU:</b> CUDA {torch.version.cuda} — "
+                    f"{torch.cuda.get_device_name(0)} "
+                    f"({torch.cuda.get_device_properties(0).total_memory / (1024**3):.1f} GB VRAM)"
+                )
+            else:
+                lines.append("<b>GPU:</b> CUDA недоступна — GOT-OCR работает на CPU")
+        except ImportError:
+            lines.append("<b>GPU:</b> torch не установлен (HTR недоступен)")
+
+        lines.append("")  # blank
+        if settings is not None:
+            lines.append(f"<b>Воркеров:</b> {settings.parallel_workers}")
+            lines.append(
+                "<b>Кэш OCR:</b> "
+                + (
+                    "отключён"
+                    if settings.ocr_cache_max_mb == 0
+                    else f"{settings.ocr_cache_max_mb} МБ"
+                )
+            )
+            lines.append(
+                f"<b>Автосохранение:</b> каждые {settings.autosave_interval_pages} стр."
+                if settings.autosave_interval_pages
+                else "<b>Автосохранение:</b> отключено"
+            )
+
+        if host.low_memory:
+            lines.append("")
+            lines.append(
+                "<i>Режим экономии памяти активен автоматически "
+                "(RAM < 6 ГБ).</i>"
+            )
+
+        QMessageBox.information(
+            self,
+            APP_NAME,
+            "<br>".join(lines),
+        )
 
     def _on_export_diagnostics(self) -> None:
         """Build a privacy-safe diagnostics zip for bug reports."""

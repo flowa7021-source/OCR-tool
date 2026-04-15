@@ -421,15 +421,30 @@ class OCRPipeline:
         output_path: Path,
         result: JobResult,
     ) -> None:
-        """Best-effort write of a completed job into the OCR cache."""
+        """Best-effort write of a completed job into the OCR cache.
+
+        Honours ``AppSettings.ocr_cache_max_mb``. A zero value disables
+        caching outright (for users on tight disk budgets); any other
+        value caps the total cache size at that many megabytes with
+        LRU eviction.
+        """
         try:
             from src.infrastructure import ocr_cache
+            from src.infrastructure.config_storage import SettingsStorage
 
+            try:
+                cap_mb = int(SettingsStorage().load().ocr_cache_max_mb)
+            except Exception:  # noqa: BLE001
+                cap_mb = 2048
+            if cap_mb <= 0:
+                logger.debug("OCR cache disabled (max_mb=0) — skipping store")
+                return
             ocr_cache.store(
                 input_path,
                 profile,
                 output_pdf=output_path,
                 job_result=result,
+                max_bytes=cap_mb * 1024 * 1024,
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("Cache store failed: %s", exc)

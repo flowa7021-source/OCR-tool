@@ -174,7 +174,7 @@ class TestWindowGeometry:
         _, window = create_application([])
         try:
             m = window.minimumSize()
-            assert m.width() <= 1280, f"min width {m.width()} wouldn't fit 1280-px screen"
+            assert m.width() <= 1024, f"min width {m.width()} wouldn't fit 1024-px screen"
             assert m.height() <= 720, f"min height {m.height()} wouldn't fit 720-px screen"
         finally:
             window.close()

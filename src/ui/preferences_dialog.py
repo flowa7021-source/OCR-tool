@@ -73,6 +73,28 @@ class PreferencesDialog(QDialog):
             "0 — отключено."
         )
         rel_form.addRow("Интервал автосохранения:", self.autosave)
+
+        # Disk-cache budget. Permanent cache under %LOCALAPPDATA%/
+        # ocr-cache/ — second run of the same PDF with the same profile
+        # is served from it for free. Tighter than 500 MB is rarely
+        # useful; 0 disables the cache entirely.
+        from PySide6.QtWidgets import QComboBox
+
+        self.cache_budget = QComboBox(self)
+        for label, value in (
+            ("Отключён", 0),
+            ("512 МБ", 512),
+            ("1 ГБ", 1024),
+            ("2 ГБ (по-умолчанию)", 2048),
+            ("5 ГБ", 5120),
+        ):
+            self.cache_budget.addItem(label, value)
+        self.cache_budget.setToolTip(
+            "Лимит дискового кэша результатов OCR. Повторный прогон "
+            "того же PDF с тем же профилем в рамках лимита "
+            "возвращает результат мгновенно."
+        )
+        rel_form.addRow("Кэш OCR:", self.cache_budget)
         root.addWidget(reliability_group)
 
         ui_group = QGroupBox("Интерфейс")
@@ -119,6 +141,14 @@ class PreferencesDialog(QDialog):
         )
         self.dark_theme.setChecked(self._settings.theme == "dark")
         self.notify_on_complete.setChecked(bool(self._settings.notify_on_complete))
+        # Select the cache-budget combo item matching the stored value.
+        saved_cache = int(self._settings.ocr_cache_max_mb)
+        idx = self.cache_budget.findData(saved_cache)
+        if idx < 0:
+            # Non-standard value — show the closest preset. The user's
+            # custom number is still honoured until they change it.
+            idx = self.cache_budget.findData(2048)
+        self.cache_budget.setCurrentIndex(max(0, idx))
 
     # --------------------------------------------------------------- save
     def _on_accept(self) -> None:
@@ -135,6 +165,9 @@ class PreferencesDialog(QDialog):
         self._settings.autosave_interval_pages = self.autosave.value()
         self._settings.theme = "dark" if self.dark_theme.isChecked() else "light"
         self._settings.notify_on_complete = bool(self.notify_on_complete.isChecked())
+        cache_mb = self.cache_budget.currentData()
+        if isinstance(cache_mb, int):
+            self._settings.ocr_cache_max_mb = int(cache_mb)
         try:
             self._storage.save(self._settings)
         except Exception as exc:  # noqa: BLE001

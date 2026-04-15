@@ -128,6 +128,22 @@ def create_application(argv: list[str]) -> tuple[QApplication, MainWindow]:
     settings_storage = SettingsStorage()
     settings = settings_storage.load()
 
+    # Adaptive defaults on low-spec machines: 2 parallel workers at
+    # 300 DPI peak at ~1.4 GB RAM, which pushes 4 GB laptops into swap.
+    # Drop the worker count + cache budget in that case so the app
+    # stays usable out of the box on entry-level hardware.
+    try:
+        from src.infrastructure.host_resources import (
+            adjust_settings_for_host,
+            detect,
+        )
+
+        host = detect()
+        if adjust_settings_for_host(settings, host):
+            settings_storage.save(settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Host-resource adaptation failed: %s", exc)
+
     queue_manager = QueueManager()
     parallel_processor = ParallelProcessor(max_workers=settings.parallel_workers)
     export_manager = ExportManager()
