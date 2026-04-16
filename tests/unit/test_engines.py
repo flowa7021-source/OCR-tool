@@ -162,8 +162,86 @@ class TestTesseractEngine:
                 config=OCRConfig(),
                 progress_callback=lambda c, t, s: events.append((c, t, s)),
             )
-
         assert events == [(0, 1, "ocr"), (1, 1, "ocr")]
+
+
+class TestRunOcrmypdfIntegration:
+    """Guards around ``run_ocrmypdf`` — the OCRmyPDF wrapper.
+
+    Separate from TesseractEngine tests because they patch
+    ``run_ocrmypdf`` wholesale; these poke the wrapper directly.
+    """
+
+    def test_ocr_called_positionally(self, tmp_path: Path) -> None:
+        """input/output paths must be passed POSITIONALLY to ocrmypdf.ocr.
+
+        Regression: OCRmyPDF 17 renamed the first parameter from
+        ``input_file`` to ``input_file_or_options``. Passing either
+        name as a keyword breaks on one or both versions. Passing the
+        paths positionally is the only forward-compatible call
+        convention. End-user logs showed:
+          ``TypeError: ocr() missing 1 required positional argument:
+          'input_file_or_options'``
+        when the packaged OCRmyPDF was 17.x.
+        """
+        from src.application.ocrmypdf_integration import (
+            OCRmyPDFOptions,
+            run_ocrmypdf,
+        )
+
+        in_pdf = tmp_path / "in.pdf"
+        in_pdf.write_bytes(b"%PDF-1.7\n")
+        out_pdf = tmp_path / "out.pdf"
+
+        options = OCRmyPDFOptions(
+            input_file=in_pdf,
+            output_file=out_pdf,
+            language="eng",
+            oem=1,
+            psm=3,
+            optimize=1,
+            skip_text=True,
+            tesseract_timeout=600,
+        )
+
+        fake_ocrmypdf = MagicMock()
+        fake_ocrmypdf.ocr = MagicMock()
+
+        class _FakeExitCodeError(Exception):  # stand-in for ExitCodeException
+            exit_code = 0
+
+        fake_exceptions = MagicMock()
+        fake_exceptions.ExitCodeException = _FakeExitCodeError
+
+        import sys
+
+        with patch.dict(
+            sys.modules,
+            {
+                "ocrmypdf": fake_ocrmypdf,
+                "ocrmypdf.exceptions": fake_exceptions,
+            },
+        ):
+            run_ocrmypdf(options)
+
+        assert fake_ocrmypdf.ocr.call_count == 1
+        call = fake_ocrmypdf.ocr.call_args
+        # First two args MUST be positional input/output paths, not kwargs.
+        assert len(call.args) == 2, (
+            f"ocrmypdf.ocr should be called with 2 positional args "
+            f"(input_file, output_file), got {len(call.args)}: {call.args!r}"
+        )
+        assert call.args[0] == str(in_pdf)
+        assert call.args[1] == str(out_pdf)
+        # And neither name should appear in kwargs — both are
+        # positional, and any stale ``input_file`` kwarg would crash on
+        # OCRmyPDF 17+ with the same TypeError.
+        assert "input_file" not in call.kwargs
+        assert "output_file" not in call.kwargs
+        assert "input_file_or_options" not in call.kwargs
+        # Sanity: our preprocessing-disabling kwargs survived.
+        assert call.kwargs.get("deskew") is False
+        assert call.kwargs.get("language") == "eng"
 
 
 # ---------------------------------------------------------------------------

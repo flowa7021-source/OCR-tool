@@ -130,9 +130,16 @@ def run_ocrmypdf(options: OCRmyPDFOptions) -> None:
     import ocrmypdf  # noqa: WPS433
     from ocrmypdf.exceptions import ExitCodeException  # noqa: WPS433
 
+    # Build the keyword-arg dict WITHOUT input/output — those have to
+    # be passed positionally because OCRmyPDF 17+ renamed the first
+    # parameter from ``input_file`` to ``input_file_or_options``.
+    # Passing by keyword ties us to a specific version; passing
+    # positionally works on every release since 14.x and will keep
+    # working when they rename the slot again.
+    input_file = str(options.input_file)
+    output_file = str(options.output_file)
+
     kwargs: dict[str, Any] = {
-        "input_file": str(options.input_file),
-        "output_file": str(options.output_file),
         "language": options.language,
         # Disable OCRmyPDF preprocessing — we've done it ourselves.
         "deskew": False,
@@ -155,6 +162,17 @@ def run_ocrmypdf(options: OCRmyPDFOptions) -> None:
 
     # Merge any advanced extras (allows callers to pass e.g. ``rotate_pages``).
     for key, value in options.extra.items():
+        # ``input_file`` / ``output_file`` in ``extra`` would collide with
+        # our positional args — prefer the explicit options fields and
+        # drop any override from ``extra`` with a warning, so a stale
+        # caller can't produce two conflicting positional-vs-keyword
+        # arguments for the same slot.
+        if key in ("input_file", "output_file", "input_file_or_options"):
+            logger.warning(
+                "Ignoring `extra[%s]=%r` — use OCRmyPDFOptions.%s_file instead",
+                key, value, "input" if "input" in key else "output",
+            )
+            continue
         kwargs[key] = value
 
     if options.progress_bar is not None:
@@ -175,7 +193,7 @@ def run_ocrmypdf(options: OCRmyPDFOptions) -> None:
     )
 
     try:
-        ocrmypdf.ocr(**kwargs)
+        ocrmypdf.ocr(input_file, output_file, **kwargs)
     except ExitCodeException as exc:
         exit_code = getattr(exc, "exit_code", None)
         logger.error("ocrmypdf failed with exit_code=%s: %s", exit_code, exc)
