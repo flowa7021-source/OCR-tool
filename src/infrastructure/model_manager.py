@@ -74,6 +74,19 @@ GOT_OCR2_SPEC = ModelSpec(
     # ``tokenizer_config.json`` + ``special_tokens_map.json`` — there is
     # NO ``tokenizer.json`` in the repo, so we must not list it (pulls
     # 404 from HuggingFace mid-download).
+    #
+    # The model also ships FOUR Python modules that ``trust_remote_code=True``
+    # imports at load time. They implement the custom tokenizer class
+    # (``tokenization_qwen.py``), the GOT model architecture
+    # (``modeling_GOT.py``), its vision encoder (``got_vision_b.py``),
+    # and a rendering helper used by the ``format`` ocr mode
+    # (``render_tools.py``). Without these, ``AutoTokenizer.from_pretrained``
+    # throws ``OSError: ... does not appear to have a file named
+    # tokenization_qwen.py`` — the exact failure observed in production
+    # logs before this fix. All four are public, Apache-2.0, and live at
+    # the HF repo root. They are tiny (< 70 KB combined) and must be
+    # listed here so both the runtime downloader AND the CI installer
+    # pipeline fetch them.
     files=[
         ModelFile(name="config.json", url=f"{GOT_OCR2_HF}/config.json"),
         ModelFile(
@@ -91,6 +104,14 @@ GOT_OCR2_SPEC = ModelSpec(
             size_bytes=560 * 1024 * 1024,
         ),
         ModelFile(name="qwen.tiktoken", url=f"{GOT_OCR2_HF}/qwen.tiktoken"),
+        # trust_remote_code Python modules.
+        ModelFile(
+            name="tokenization_qwen.py",
+            url=f"{GOT_OCR2_HF}/tokenization_qwen.py",
+        ),
+        ModelFile(name="modeling_GOT.py", url=f"{GOT_OCR2_HF}/modeling_GOT.py"),
+        ModelFile(name="got_vision_b.py", url=f"{GOT_OCR2_HF}/got_vision_b.py"),
+        ModelFile(name="render_tools.py", url=f"{GOT_OCR2_HF}/render_tools.py"),
     ],
 )
 

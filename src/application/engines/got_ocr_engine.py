@@ -186,22 +186,41 @@ class GOTOCREngine(OCREngine):
             "Loading GOT-OCR2 weights from %s (hf_path=%s)", model_dir, hf_path
         )
         t0 = time.time()
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            hf_path, trust_remote_code=True
-        )
+        try:
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                hf_path, trust_remote_code=True
+            )
+        except OSError as exc:
+            # HuggingFace raises OSError when ``trust_remote_code``
+            # cannot find one of the custom ``.py`` modules
+            # (``tokenization_qwen.py`` / ``modeling_GOT.py`` / …). Its
+            # built-in message interpolates our local path as if it were
+            # a HF repo id, producing the surreal ``Checkout
+            # 'https://huggingface.co/C:\Users\...\got_ocr2/tree/main'``
+            # that end users saw. Re-wrap so the diagnosis points at
+            # the real remediation: our model manifest grew a new file,
+            # the existing local download is stale, re-download it.
+            self._raise_stale_model_error(model_dir, exc)
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         # fp16 on CUDA halves VRAM and gives a 2-3× inference speedup on
         # modern GPUs (T4, A10, RTX 30xx+) with no measurable accuracy
         # loss for GOT-OCR2. CPU-only path stays float32 — bf16/fp16 on
         # CPU is slower than fp32 in PyTorch without explicit AMP.
         torch_dtype = torch.float16 if self._device == "cuda" else torch.float32
-        self._model = AutoModel.from_pretrained(
-            hf_path,
-            trust_remote_code=True,
-            low_cpu_mem_usage=True,
-            device_map=self._device,
-            torch_dtype=torch_dtype,
-        )
+        try:
+            self._model = AutoModel.from_pretrained(
+                hf_path,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+                device_map=self._device,
+                torch_dtype=torch_dtype,
+            )
+        except OSError as exc:
+            # Same failure mode but surfacing from the model class rather
+            # than the tokenizer (``modeling_GOT.py`` / ``got_vision_b.py``
+            # missing). Treat identically — the user has a stale
+            # download.
+            self._raise_stale_model_error(model_dir, exc)
         self._model.eval()
         logger.info(
             "GOT-OCR2 ready on %s (%s) in %.1fs",
@@ -209,6 +228,32 @@ class GOTOCREngine(OCREngine):
             torch_dtype,
             time.time() - t0,
         )
+
+    def _raise_stale_model_error(self, model_dir: Path, cause: BaseException) -> None:
+        """Translate HF ``OSError`` into a clear, actionable message.
+
+        Invalidates the ``ModelManager`` availability cache first so
+        the next ``is_available()`` call re-checks the filesystem
+        against the current manifest — that way the UI's "Скачать
+        модель" button is enabled again without the user having to
+        restart the app.
+        """
+        try:
+            self._model_manager.invalidate_availability(GOT_OCR2_SPEC.model_id)
+        except Exception:  # noqa: BLE001 — diagnostic only
+            logger.debug("invalidate_availability raised", exc_info=True)
+        logger.error(
+            "GOT-OCR2 model directory %s is missing a file required by "
+            "trust_remote_code: %s",
+            model_dir, cause,
+        )
+        raise EngineNotAvailableError(
+            "Файлы модели GOT-OCR 2.0 устарели или неполные — отсутствует "
+            "один из Python-модулей trust_remote_code "
+            "(например, tokenization_qwen.py или modeling_GOT.py). "
+            "Откройте Настройки → OCR-движок → Скачать модель, чтобы "
+            "докачать недостающие файлы, и повторите распознавание."
+        ) from cause
 
     def unload(self) -> None:
         """Release GOT-OCR 2.0 weights (~580 MB RAM / GPU memory).
