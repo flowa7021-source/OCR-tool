@@ -90,11 +90,11 @@ def test_setup_worker_logging_writes_file(tmp_path, monkeypatch) -> None:
     worker_logger.info("hello from worker %d", os.getpid())
 
     # Flush + close so the file is readable on Windows.
+    import contextlib as _ctx
+
     for h in list(logging.getLogger().handlers):
-        try:
+        with _ctx.suppress(Exception):
             h.flush()
-        except Exception:  # noqa: BLE001
-            pass
 
     log_path = tmp_path / f"worker-{os.getpid()}.log"
     assert log_path.exists(), f"worker log file not created at {log_path}"
@@ -107,10 +107,8 @@ def test_setup_worker_logging_writes_file(tmp_path, monkeypatch) -> None:
     # next test starts from a clean root logger.
     for h in list(logging.getLogger().handlers):
         logging.getLogger().removeHandler(h)
-        try:
+        with _ctx.suppress(Exception):
             h.close()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def test_listener_exception_does_not_crash_drain_thread() -> None:

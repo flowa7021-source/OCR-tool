@@ -33,6 +33,45 @@ def test_corrupt_pdf_raises_typed_error(tmp_path: Path) -> None:
         pipeline._analyze_pdf(bad)
 
 
+def test_save_png_handles_unicode_path(tmp_path: Path) -> None:
+    """Regression: ``cv2.imwrite`` fails on non-ASCII Windows paths.
+
+    End-user logs showed ``RuntimeError: Не удалось сохранить PNG``
+    for every page on a machine where the user profile was
+    ``C:\\Users\\Т.Н. 020\\...``. Root cause: ``cv2.imwrite`` calls
+    ``fopen`` internally, which on Windows uses the ANSI code page
+    and cannot open files whose path contains characters outside it.
+    Workaround: encode via ``cv2.imencode`` and write through
+    :meth:`Path.write_bytes`, which is Unicode-aware.
+
+    This test exercises the Unicode-path case on any platform — on
+    Linux it simply verifies the new encode-then-write flow works;
+    on Windows it's the actual regression coverage.
+    """
+    cv2 = pytest.importorskip("cv2")
+    import numpy as np
+
+    pipeline = _make_pipeline()
+    # Arbitrary small 3-channel image.
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+
+    unicode_dir = tmp_path / "Т.Н. 020" / "subdir with space"
+    target = unicode_dir / "page_00001.png"
+
+    # Must not raise.
+    pipeline._save_png(image, target)
+
+    assert target.exists(), f"PNG not written to {target}"
+    # File should be a valid PNG (magic bytes \x89PNG).
+    header = target.read_bytes()[:4]
+    assert header == b"\x89PNG", f"output is not a valid PNG, header={header!r}"
+    # And round-trip: decode it back.
+    raw = np.frombuffer(target.read_bytes(), dtype=np.uint8)
+    decoded = cv2.imdecode(raw, cv2.IMREAD_UNCHANGED)
+    assert decoded is not None
+    assert decoded.shape == image.shape
+
+
 def test_empty_pdf_raises_empty_error(tmp_path: Path) -> None:
     """Simulate a PDF reporting zero pages by mocking fitz.open."""
     pipeline = _make_pipeline()

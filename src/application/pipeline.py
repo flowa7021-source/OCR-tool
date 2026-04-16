@@ -605,13 +605,26 @@ class OCRPipeline:
             doc.close()
 
     def _save_png(self, image: np.ndarray, path: Path) -> None:
-        """Write a numpy image to PNG on disk."""
+        """Write a numpy image to PNG on disk.
+
+        Uses ``cv2.imencode`` + :meth:`Path.write_bytes` instead of the
+        more obvious ``cv2.imwrite`` because the latter goes through
+        ``fopen`` on Windows, which takes an ANSI-encoded path and
+        silently fails for any character outside the active code page.
+        In practice that means users whose Windows profile contains
+        Cyrillic characters (e.g. ``C:\\Users\\Т.Н. 020\\...``) get
+        ``Не удалось сохранить PNG: ...`` for every page, every job.
+        Piping the encoded bytes through Python's own filesystem layer
+        bypasses the issue — :meth:`Path.write_bytes` honours Unicode
+        paths natively on every platform.
+        """
         import cv2
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        ok = cv2.imwrite(str(path), image)
-        if not ok:
-            raise RuntimeError(f"Не удалось сохранить PNG: {path}")
+        ok, buf = cv2.imencode(".png", image)
+        if not ok or buf is None:
+            raise RuntimeError(f"Не удалось закодировать PNG: {path}")
+        path.write_bytes(buf.tobytes())
 
     def _assemble_pdf(self, png_paths: list[Path], output_pdf: Path) -> None:
         """Assemble a PDF from a list of PNGs (one page per image).
@@ -788,7 +801,12 @@ class OCRPipeline:
             if pr.error is not None:
                 continue
             try:
-                img = cv2.imread(str(png_path), cv2.IMREAD_UNCHANGED)
+                # Unicode-safe read — ``cv2.imread`` fails on non-ASCII
+                # Windows paths the same way ``cv2.imwrite`` does (see
+                # :meth:`_save_png`). Read the bytes via Python and let
+                # ``cv2.imdecode`` parse them.
+                raw = np.frombuffer(png_path.read_bytes(), dtype=np.uint8)
+                img = cv2.imdecode(raw, cv2.IMREAD_UNCHANGED) if raw.size else None
                 if img is None:
                     continue
                 data = pytesseract.image_to_data(
