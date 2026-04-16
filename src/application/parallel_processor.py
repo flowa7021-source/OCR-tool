@@ -300,19 +300,48 @@ def _worker_run_job(
             getattr(job.profile.ocr, "tesseract_language_string", "?"),
         )
 
+        current_stage = "register_external_tools"
+        worker_logger.info(
+            "[3a/6] Registering bundled external binaries on PATH…"
+        )
+        try:
+            from src.infrastructure.external_tools import (
+                ensure_on_path,
+                verify_required_for_ocrmypdf,
+            )
+
+            resolved = ensure_on_path()
+            for name, path in resolved.items():
+                worker_logger.info(
+                    "[3a/6]   %s -> %s", name, path or "NOT FOUND",
+                )
+            missing = verify_required_for_ocrmypdf()
+            if missing:
+                worker_logger.error(
+                    "[3a/6] Required external tools missing: %s — OCRmyPDF "
+                    "will fail. Pipeline will short-circuit with a clear "
+                    "error.",
+                    ", ".join(missing),
+                )
+        except Exception as exc:  # noqa: BLE001
+            worker_logger.warning(
+                "[3a/6] ensure_on_path raised (continuing): %s",
+                exc, exc_info=True,
+            )
+
         current_stage = "configure_tesseract"
-        worker_logger.info("[3/6] Configuring Tesseract…")
+        worker_logger.info("[3b/6] Configuring Tesseract…")
         tess = TesseractWrapper()
         try:
             tess.configure_pytesseract()
             worker_logger.info(
-                "[3/6] Tesseract OK: bin=%s tessdata=%s",
+                "[3b/6] Tesseract OK: bin=%s tessdata=%s",
                 getattr(tess, "_binary_path", "?"),
                 getattr(tess, "_tessdata_path", "?"),
             )
         except Exception as exc:  # noqa: BLE001
             worker_logger.warning(
-                "[3/6] configure_pytesseract failed: %s", exc, exc_info=True
+                "[3b/6] configure_pytesseract failed: %s", exc, exc_info=True
             )
 
         current_stage = "build_pipeline"

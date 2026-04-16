@@ -251,7 +251,23 @@ class TesseractWrapper:
         return True, " | ".join(messages)
 
     def configure_pytesseract(self) -> None:
-        """Set ``pytesseract.tesseract_cmd`` and ``TESSDATA_PREFIX`` env var."""
+        """Set ``pytesseract.tesseract_cmd``, ``TESSDATA_PREFIX`` and ``PATH``.
+
+        ``pytesseract.tesseract_cmd`` only helps code that goes through
+        the ``pytesseract`` library. OCRmyPDF — which is the actual OCR
+        engine we run — uses its own ``shutil.which("tesseract")`` to
+        locate the binary. If the bundled ``tesseract.exe`` isn't on
+        ``PATH``, OCRmyPDF raises::
+
+            MissingDependencyError: Could not find program 'tesseract'
+
+        even though we just "configured" it for pytesseract. Prepending
+        the bundled binary's directory to ``PATH`` makes it visible to
+        every subprocess — pytesseract, ocrmypdf's subprocess module,
+        ghostscript spawning tesseract, all uniformly.
+
+        Idempotent: re-running it doesn't stack duplicate entries on PATH.
+        """
         binary = self.find_tesseract_binary()
         tessdata = self.find_tessdata_dir()
 
@@ -261,6 +277,15 @@ class TesseractWrapper:
 
         pytesseract.pytesseract.tesseract_cmd = str(binary)
         os.environ["TESSDATA_PREFIX"] = str(tessdata)
+
+        bin_dir = str(binary.parent)
+        path_entries = os.environ.get("PATH", "").split(os.pathsep)
+        if bin_dir not in path_entries:
+            os.environ["PATH"] = (
+                bin_dir + os.pathsep + os.environ.get("PATH", "")
+            )
+            logger.info("Prepended Tesseract bin dir to PATH: %s", bin_dir)
+
         TesseractWrapper._configured = True
         logger.info(
             "pytesseract configured (cmd=%s, TESSDATA_PREFIX=%s)", binary, tessdata

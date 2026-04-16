@@ -26,6 +26,20 @@ from src.shared.types import (
     OptimizeLevel,
 )
 
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register custom markers used across the suite.
+
+    ``exercise_preflight`` opts tests out of the autouse bypass of
+    ``verify_required_for_ocrmypdf`` — those tests want to exercise
+    the pre-flight logic against real / mocked registries directly.
+    """
+    config.addinivalue_line(
+        "markers",
+        "exercise_preflight: test wants the real external-tools "
+        "pre-flight check, not the auto-mocked one",
+    )
+
 # A minimal, valid single-page PDF (approximately 400 bytes). Rendered blank.
 _MINIMAL_PDF: bytes = (
     b"%PDF-1.4\n"
@@ -138,3 +152,30 @@ def fake_pdf_path(tmp_path: Path, minimal_pdf_bytes: bytes) -> Path:
     p = tmp_path / "sample.pdf"
     p.write_bytes(minimal_pdf_bytes)
     return p
+
+
+@pytest.fixture(autouse=True)
+def _bypass_external_tools_preflight(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Treat OCRmyPDF external binaries as present in every test.
+
+    Many tests stub the entire OCR pipeline (they patch
+    ``run_ocrmypdf`` / ``ocrmypdf.ocr``) and care only about orchestration,
+    not about whether ``tesseract``/``gs`` are actually installed on the
+    test machine. Without this autouse bypass, the pre-flight check
+    added to ``OCRPipeline.run`` short-circuits those tests with a
+    FAILED job status because the CI / dev environment legitimately
+    doesn't have Ghostscript on PATH.
+
+    Tests that specifically want to exercise the pre-flight logic
+    (see ``tests/unit/test_external_tools.py``) opt out by adding the
+    ``exercise_preflight`` marker.
+    """
+    if "exercise_preflight" in request.keywords:
+        return
+    try:
+        from src.infrastructure import external_tools as _ext
+    except Exception:  # noqa: BLE001
+        return
+    monkeypatch.setattr(_ext, "verify_required_for_ocrmypdf", lambda: [])

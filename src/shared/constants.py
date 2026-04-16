@@ -67,6 +67,12 @@ APP_ROOT: Path = get_app_root()
 RESOURCES_DIR: Path = APP_ROOT / "resources"
 TESSDATA_DIR: Path = RESOURCES_DIR / "tessdata"
 TESSERACT_BIN_DIR: Path = RESOURCES_DIR / "tesseract"
+# Ghostscript is a hard runtime dependency of OCRmyPDF. Even with
+# ``clean=False, remove_background=False, deskew=False`` OCRmyPDF still
+# invokes ``gs`` to merge the hOCR layer onto the PDF and to produce the
+# PDF/A output. If we don't bundle it, users see a cryptic
+# ``MissingDependencyError: Could not find program 'gs'`` at OCR time.
+GHOSTSCRIPT_BIN_DIR: Path = RESOURCES_DIR / "ghostscript"
 ICONS_DIR: Path = RESOURCES_DIR / "icons"
 STYLES_DIR: Path = RESOURCES_DIR / "styles"
 BUNDLED_PROFILES_DIR: Path = APP_ROOT / "profiles"

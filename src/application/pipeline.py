@@ -217,8 +217,47 @@ class OCRPipeline:
             from src.application.engines import get_engine
             from src.application.engines.base import EngineNotAvailableError
 
-            output_path.parent.mkdir(parents=True, exist_ok=True)
+            # Pre-flight: verify every external binary OCRmyPDF spawns
+            # actually exists. Without this, failure surfaces as a long
+            # OCRmyPDF traceback with a cryptic line like "Could not
+            # find program 'tesseract' on the PATH" — even when
+            # tesseract.exe is sitting right there in our bundle
+            # (OCRmyPDF doesn't know about ``pytesseract.tesseract_cmd``,
+            # it uses shutil.which only). We've already called
+            # ``ensure_on_path`` in worker startup, so if a tool is
+            # still missing here it really is absent from the install.
             engine_kind = job.profile.ocr.engine
+            try:
+                from src.shared.types import OCREngineKind
+
+                if engine_kind is OCREngineKind.TESSERACT:
+                    from src.infrastructure.external_tools import (
+                        verify_required_for_ocrmypdf,
+                    )
+
+                    missing = verify_required_for_ocrmypdf()
+                    if missing:
+                        msg = (
+                            "Не найдены внешние программы, необходимые "
+                            "для OCRmyPDF: "
+                            + ", ".join(missing)
+                            + ". Переустановите OCR Studio — в сборке "
+                            "отсутствуют бандленные бинарники "
+                            "(tesseract / ghostscript)."
+                        )
+                        logger.error(
+                            "Job %s stage=ocr pre-flight FAILED: %s",
+                            job_id, msg,
+                        )
+                        result.status = JobStatus.FAILED
+                        result.error = msg
+                        result.pages = page_results
+                        result.total_time_sec = time.time() - started
+                        return result
+            except Exception as exc:  # noqa: BLE001 - pre-flight is advisory
+                logger.debug("Pre-flight check raised, continuing: %s", exc)
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             logger.info(
                 "Job %s stage=ocr: engine=%s lang=%s psm=%s oem=%s optimize=%s",
                 job_id, engine_kind,

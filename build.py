@@ -74,6 +74,17 @@ def ensure_resources() -> None:
             "Application will fall back to system PATH."
         )
 
+    # Ghostscript is a HARD dependency of OCRmyPDF; a missing bundle
+    # means every OCR job fails with "Could not find program 'gs'".
+    gs_bin = PROJECT_ROOT / "resources" / "ghostscript" / "gswin64c.exe"
+    if os.name == "nt" and not gs_bin.exists():
+        print(
+            f"[build] WARNING: Ghostscript binary not found at {gs_bin}. "
+            "OCRmyPDF will fail at runtime unless Ghostscript is on the "
+            "system PATH. Build the CI workflow or run the Ghostscript "
+            "download step manually before packaging for end users."
+        )
+
 
 def build_pyinstaller(onefile: bool = False, with_htr: bool = False) -> int:
     """Invoke PyInstaller and return its exit code.
@@ -104,6 +115,15 @@ def build_pyinstaller(onefile: bool = False, with_htr: bool = False) -> int:
         f"--add-data=resources/icons{sep}resources/icons",
         f"--add-data=resources/styles{sep}resources/styles",
         f"--add-data=profiles{sep}profiles",
+        # Ghostscript is optional on developer machines (the CI workflow
+        # downloads + drops it into resources/ghostscript/; source checkouts
+        # typically don't have it). Adding --add-data for a missing source
+        # makes PyInstaller fail the entire build, so gate on existence.
+        *(
+            [f"--add-data=resources/ghostscript{sep}resources/ghostscript"]
+            if (PROJECT_ROOT / "resources" / "ghostscript").is_dir()
+            else []
+        ),
         # Hidden imports that PyInstaller sometimes misses
         "--collect-submodules=ocrmypdf",
         "--collect-submodules=pikepdf",

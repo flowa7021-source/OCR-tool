@@ -486,6 +486,108 @@ jobs:
           Get-ChildItem $dst | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,2)}}
 
       # ------------------------------------------------------------------
+      # Ghostscript — HARD runtime dependency of OCRmyPDF
+      # ------------------------------------------------------------------
+      # OCRmyPDF calls ``gs``/``gswin64c.exe`` via shutil.which() to merge
+      # the OCR text layer onto the PDF and to produce PDF/A output. It
+      # is NOT optional — even with clean/deskew/remove_background
+      # disabled, the merge step still goes through Ghostscript. Without
+      # a bundled copy the user sees ``MissingDependencyError: Could not
+      # find program 'gs'`` at the first OCR attempt.
+      #
+      # We pull the portable zip from the official Artifex releases and
+      # lift just the console executable + the shared DLL into
+      # ``resources/ghostscript/``. That's all OCRmyPDF needs; the full
+      # distribution (lib/, iccprofiles/, Resource/) would nearly double
+      # the bundle for features we don't use.
+      - name: Cache Ghostscript portable
+        id: cache-gs
+        uses: actions/cache@v4
+        with:
+          path: ghostscript_dl
+          key: ghostscript-portable-10.04.0-win64-v1
+
+      - name: Download Ghostscript portable (Artifex)
+        if: steps.cache-gs.outputs.cache-hit != 'true'
+        shell: pwsh
+        timeout-minutes: 8
+        run: |
+          # Artifex ships self-extracting installers, not clean zips.
+          # Using the .exe + 7-Zip extraction (same pattern as Tesseract)
+          # avoids needing admin rights to run the installer silently.
+          $version = "10.04.0"
+          $asset = "gs$($version -replace '\.','')w64.exe"
+          $url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs$($version -replace '\.','')/$asset"
+          New-Item -ItemType Directory -Force -Path ghostscript_dl | Out-Null
+          Write-Host "Downloading $url"
+          $tries = 0
+          while ($tries -lt 4) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile "ghostscript_dl\$asset" -UseBasicParsing
+              break
+            } catch {
+              $tries++
+              if ($tries -ge 4) { throw }
+              Write-Warning "Download attempt $tries failed: $($_.Exception.Message)"
+              Start-Sleep -Seconds (2 * $tries)
+            }
+          }
+          $file = Get-Item "ghostscript_dl\$asset"
+          if ($file.Length -lt 5MB) {
+            throw "Ghostscript download is suspiciously small ($($file.Length) bytes)"
+          }
+          Write-Host "Downloaded Ghostscript: $([math]::Round($file.Length/1MB,1)) MB"
+
+      - name: Extract Ghostscript + copy into resources/ghostscript
+        shell: pwsh
+        timeout-minutes: 4
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Get-ChildItem ghostscript_dl\*.exe | Select-Object -First 1
+          if (-not $installer) { throw "Ghostscript installer not found" }
+
+          $extractDir = "${{ github.workspace }}\ghostscript_extract"
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+
+          $sevenZip = $null
+          foreach ($candidate in @(
+            "C:\Program Files\7-Zip\7z.exe",
+            "C:\Program Files (x86)\7-Zip\7z.exe",
+            (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          )) {
+            if ($candidate -and (Test-Path $candidate)) { $sevenZip = $candidate; break }
+          }
+          if (-not $sevenZip) { throw "7-Zip not found on runner" }
+
+          & $sevenZip x $installer.FullName "-o$extractDir" -y -bso0 -bsp0
+          if ($LASTEXITCODE -ne 0) {
+            throw "7-Zip extraction of Ghostscript failed (exit=$LASTEXITCODE)"
+          }
+
+          $dst = "${{ github.workspace }}\resources\ghostscript"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+
+          # Lift gswin64c.exe + gsdll64.dll only. OCRmyPDF's OCR merge
+          # path doesn't exercise Fontmap/iccprofiles/Resource assets,
+          # and bundling them adds ~30 MB for zero gain.
+          foreach ($wanted in @("gswin64c.exe", "gsdll64.dll")) {
+            $hit = Get-ChildItem -Path $extractDir -Filter $wanted -Recurse -File |
+                   Select-Object -First 1
+            if (-not $hit) {
+              throw "Ghostscript extraction missing expected file: $wanted"
+            }
+            Copy-Item $hit.FullName -Destination (Join-Path $dst $wanted) -Force
+            Write-Host ("Copied {0} ({1:N1} MB)" -f $wanted, ($hit.Length/1MB))
+          }
+
+          # Smoke test.
+          & "$dst\gswin64c.exe" --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bundled gswin64c.exe --version failed (exit=$LASTEXITCODE)"
+          }
+          Get-ChildItem $dst | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,2)}}
+
+      # ------------------------------------------------------------------
       # Windows .ico from SVG
       # ------------------------------------------------------------------
       - name: Generate app.ico from app.svg
@@ -562,16 +664,18 @@ jobs:
           }
           # PyInstaller 6.x --onedir bundles data under _internal\; fallback to top-level on older versions.
           $searchRoots = @("dist\OCRStudio\_internal", "dist\OCRStudio")
-          $tessOk = $false; $dataOk = $false; $torchOk = $false; $transformersOk = $false; $weightsOk = $false
+          $tessOk = $false; $dataOk = $false; $gsOk = $false; $torchOk = $false; $transformersOk = $false; $weightsOk = $false
           foreach ($root in $searchRoots) {
             if (Test-Path "$root\resources\tesseract\tesseract.exe") { $tessOk = $true }
             if (Test-Path "$root\resources\tessdata\rus.traineddata") { $dataOk = $true }
+            if (Test-Path "$root\resources\ghostscript\gswin64c.exe") { $gsOk = $true }
             if (Test-Path "$root\torch") { $torchOk = $true }
             if (Test-Path "$root\transformers") { $transformersOk = $true }
             if (Test-Path "$root\resources\models\got_ocr2\model.safetensors") { $weightsOk = $true }
           }
           if (-not $tessOk) { throw "Bundled Tesseract missing from PyInstaller output" }
           if (-not $dataOk) { throw "Bundled tessdata (rus) missing from PyInstaller output" }
+          if (-not $gsOk) { throw "Bundled Ghostscript (gswin64c.exe) missing from PyInstaller output — OCRmyPDF would fail at first run" }
           if ("${{ steps.htr_flag.outputs.with_htr }}" -eq "true") {
             if (-not $torchOk) { throw "Bundled torch missing from PyInstaller output (--with-htr was set)" }
             if (-not $transformersOk) { throw "Bundled transformers missing from PyInstaller output (--with-htr was set)" }
