@@ -94,7 +94,14 @@ MIN_DPI: int = 150
 MAX_DPI: int = 600
 DPI_CHOICES: tuple[int, ...] = (150, 200, 300, 400, 600)
 DEFAULT_CONFIDENCE_THRESHOLD: float = 60.0
-DEFAULT_TESSERACT_TIMEOUT_SEC: int = 120
+# 5 minutes. Covers complex Russian contracts rasterised at 600 DPI on
+# mid-tier hardware, where pages with dense diacritics + graphics legit-
+# imately take 2-3 minutes per page. The old default of 120s was too
+# tight: OCRmyPDF aborted the whole job with ``FileNotFoundError`` in
+# its graft phase because Tesseract skipped the page and never produced
+# the expected HOCR. 300s leaves headroom while still catching genuinely
+# stuck Tesseract processes that would otherwise hang indefinitely.
+DEFAULT_TESSERACT_TIMEOUT_SEC: int = 300
 
 # --- Parallel processing ---
 DEFAULT_PARALLEL_WORKERS: int = 2

@@ -244,24 +244,97 @@ class TestRunOcrmypdfIntegration:
         assert call.kwargs.get("language") == "eng"
 
 
-    def test_graft_hocr_miss_maps_to_tesseract_timeout_hint(
+    def test_graft_hocr_miss_triggers_auto_retry_with_longer_timeout(
         self, tmp_path: Path
     ) -> None:
-        """A timed-out page triggers a clear error, not the raw WinError 2.
+        """First-attempt graft-hocr-miss → automatic second call with 3× timeout.
 
-        Regression: when Tesseract exceeds ``tesseract_timeout`` on a
-        page, OCRmyPDF logs ``took too long to OCR - skipping`` and
-        then crashes deep in the graft phase because it still tries
-        to stat the per-page HOCR that was never produced::
+        When Tesseract exceeds ``tesseract_timeout`` on a page, OCRmyPDF
+        logs ``took too long to OCR - skipping`` and then crashes deep
+        in the graft phase with a ``FileNotFoundError`` pointing at a
+        missing ``*_ocr_hocr.hocr``. The wrapper must NOT surface that
+        error straight to the UI — it must first retry once with a
+        longer timeout (and ``use_threads=False`` to remove CPU
+        contention). Only if the retry also fails do we bubble up to
+        the user.
 
-            File "ocrmypdf/_graft.py", line 350, in _parse_hocr_pages
-              File "pathlib.py", line 1013, in stat
-            FileNotFoundError: [WinError 2] ... '000003_ocr_hocr.hocr'
+        This test exercises the "retry succeeds" path: first call
+        raises the graft-hocr-miss shape, second call returns cleanly,
+        and ``run_ocrmypdf`` completes without raising.
+        """
+        from src.application.ocrmypdf_integration import (
+            OCRmyPDFOptions,
+            run_ocrmypdf,
+        )
 
-        End users saw ``OCRmyPDF failed: [WinError 2] ...`` pointing at
-        a temp path they cannot do anything about. The wrapper now
-        intercepts that specific FileNotFoundError shape and emits
-        Russian guidance naming ``tesseract_timeout`` and DPI.
+        in_pdf = tmp_path / "in.pdf"
+        in_pdf.write_bytes(b"%PDF-1.7\n")
+        out_pdf = tmp_path / "out.pdf"
+
+        options = OCRmyPDFOptions(
+            input_file=in_pdf,
+            output_file=out_pdf,
+            language="rus+eng",
+            oem=1,
+            psm=3,
+            optimize=1,
+            skip_text=True,
+            tesseract_timeout=120,
+        )
+
+        graft_path = (
+            r"C:\Users\USER~1.020\AppData\Local\Temp\ocrmypdf.io.abcd\000003_ocr_hocr.hocr"
+        )
+        graft_err = FileNotFoundError(2, "No such file", graft_path)
+
+        fake_ocrmypdf = MagicMock()
+        # First call fails with graft-hocr-miss, second call succeeds.
+        fake_ocrmypdf.ocr = MagicMock(side_effect=[graft_err, None])
+
+        class _FakeExitCodeError(Exception):
+            exit_code = 0
+
+        fake_exceptions = MagicMock()
+        fake_exceptions.ExitCodeException = _FakeExitCodeError
+
+        import sys
+
+        with patch.dict(
+            sys.modules,
+            {
+                "ocrmypdf": fake_ocrmypdf,
+                "ocrmypdf.exceptions": fake_exceptions,
+            },
+        ):
+            run_ocrmypdf(options)  # must NOT raise
+
+        # Exactly two ocrmypdf.ocr calls: the original, then the retry.
+        assert fake_ocrmypdf.ocr.call_count == 2
+        first_call = fake_ocrmypdf.ocr.call_args_list[0]
+        retry_call = fake_ocrmypdf.ocr.call_args_list[1]
+
+        # First call used the user-configured timeout and (by default)
+        # use_threads=True.
+        assert first_call.kwargs["tesseract_timeout"] == 120
+        assert first_call.kwargs["use_threads"] is True
+
+        # Retry: timeout escalated to ≥ max(base*3, 600) = 600 and
+        # threading disabled to remove CPU contention as a variable.
+        assert retry_call.kwargs["tesseract_timeout"] >= 600
+        assert retry_call.kwargs["tesseract_timeout"] == 600, (
+            "escalation should be min(max(base*3, 600), 900); "
+            f"got {retry_call.kwargs['tesseract_timeout']}"
+        )
+        assert retry_call.kwargs["use_threads"] is False
+
+    def test_graft_hocr_miss_persists_through_retry_raises_clear_error(
+        self, tmp_path: Path
+    ) -> None:
+        """If the retry also fails, emit the user-facing Russian hint.
+
+        The user-facing message must name the knobs they can turn (DPI,
+        ``tesseract_timeout``) and must NOT leak the raw temp path that
+        OCRmyPDF's graft phase points at.
         """
         from src.application.ocrmypdf_integration import (
             OCRmyPDFError,
@@ -284,17 +357,17 @@ class TestRunOcrmypdfIntegration:
             tesseract_timeout=120,
         )
 
-        # Build a FileNotFoundError that matches what _graft raises —
-        # errno=2 with a ``*_ocr_hocr.hocr`` filename. The wrapper
-        # keys on the filename, not on any message string, so this is
-        # robust to locale changes in the underlying WinError text.
         graft_path = (
             r"C:\Users\USER~1.020\AppData\Local\Temp\ocrmypdf.io.abcd\000003_ocr_hocr.hocr"
         )
-        graft_err = FileNotFoundError(2, "No such file", graft_path)
-
         fake_ocrmypdf = MagicMock()
-        fake_ocrmypdf.ocr = MagicMock(side_effect=graft_err)
+        # Both calls fail with the same shape.
+        fake_ocrmypdf.ocr = MagicMock(
+            side_effect=[
+                FileNotFoundError(2, "No such file", graft_path),
+                FileNotFoundError(2, "No such file", graft_path),
+            ]
+        )
 
         class _FakeExitCodeError(Exception):
             exit_code = 0
@@ -314,17 +387,15 @@ class TestRunOcrmypdfIntegration:
             run_ocrmypdf(options)
 
         message = str(excinfo.value)
-        # Must name the knob the user can turn.
+        # Must mention retry happened + name the user-tunable knobs.
+        assert "повтор" in message.lower() or "автоматическ" in message.lower()
+        assert "DPI" in message, message
         assert "tesseract_timeout" in message, message
-        # Must include the configured value so the hint is concrete.
-        assert "120" in message, message
-        # Must NOT leak the raw temp path to the user (that's what the
-        # old error did).
+        # Must NOT leak the raw temp path.
         assert "000003_ocr_hocr" not in message
         assert "WinError" not in message
-        # Exception chain is preserved so debug logs still show the
-        # original cause.
-        assert excinfo.value.__cause__ is graft_err
+        # Both attempts ran.
+        assert fake_ocrmypdf.ocr.call_count == 2
 
     def test_unrelated_filenotfounderror_still_surfaces(
         self, tmp_path: Path
@@ -386,6 +457,11 @@ class TestRunOcrmypdfIntegration:
         # But the original file path does surface so the user knows
         # what's actually missing.
         assert "tesseract.exe" in message, message
+        # And CRITICALLY — no wasteful retry for this failure shape.
+        # Retrying with a longer timeout wouldn't help when the
+        # Tesseract binary itself is missing; it would just double
+        # the user's wait before giving up.
+        assert fake_ocrmypdf.ocr.call_count == 1
 
 
 # ---------------------------------------------------------------------------
