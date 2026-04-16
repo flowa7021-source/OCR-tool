@@ -142,6 +142,31 @@ def _is_graft_hocr_miss(exc: BaseException) -> bool:
     )
 
 
+def _output_pdf_has_any_text(pdf_path: str) -> bool:
+    """Return True if ANY page in ``pdf_path`` has non-whitespace text.
+
+    ``ocrmypdf.ocr`` returns COMPLETED even when Tesseract silently
+    skipped one or more pages for timing out — it writes an empty
+    hOCR file and grafts it, so the output PDF "has a text layer"
+    structurally but that layer contains zero recognised characters.
+    This helper is the check we use to decide whether to retry.
+    """
+    try:
+        import fitz
+
+        with fitz.open(pdf_path) as doc:
+            for page in doc:
+                if (page.get_text("text") or "").strip():
+                    return True
+    except Exception as exc:  # noqa: BLE001
+        # Can't open the output. Let the caller treat this as "no text"
+        # so a retry kicks in; if the retry also hits this path we'll
+        # log and bail.
+        logger.debug("_output_pdf_has_any_text: fitz failed: %s", exc)
+        return False
+    return False
+
+
 def _invoke_ocrmypdf_with_timeout_retry(
     ocrmypdf: Any,
     exit_code_exception: type[BaseException],
@@ -151,35 +176,49 @@ def _invoke_ocrmypdf_with_timeout_retry(
     *,
     base_timeout: int,
 ) -> None:
-    """Run ``ocrmypdf.ocr`` once, retrying once on graft-hocr-miss.
+    """Run ``ocrmypdf.ocr`` once, retrying once when Tesseract timed out.
 
-    Given a job that failed because Tesseract exceeded
-    ``tesseract_timeout`` on at least one page (the
-    ``*_ocr_hocr.hocr`` FileNotFoundError shape), this helper retries
-    the same call with::
+    Tesseract timeouts surface in TWO distinct shapes and both need to
+    be handled:
 
-      * ``tesseract_timeout = min(base * 3, _MAX_RETRY_TESSERACT_TIMEOUT_SEC)`` —
-        gives Tesseract roughly 3× more wall time to finish.
-      * ``use_threads = False`` — the first attempt ran 4 Tesseract
-        workers in parallel; on a machine where a single page already
-        took 2 minutes, the CPU contention was likely part of why the
-        page hit the timeout. Serialising the second attempt removes
-        that variable.
+      1. **Graft FileNotFoundError** — OCRmyPDF aborts mid-pipeline
+         because ``_parse_hocr_pages`` stats a ``*_ocr_hocr.hocr``
+         that doesn't exist on disk. The job status is FAILED.
 
-    Any other exception propagates unchanged to the caller for its
-    normal handling (``ExitCodeException`` / other FileNotFoundError /
-    generic).
+      2. **Empty-hOCR silent skip** — OCRmyPDF writes a valid but
+         empty hOCR for the timed-out page, grafts it, and returns
+         a COMPLETED output PDF with a text layer that contains no
+         recognised characters. The job looks successful; the user
+         sees empty text and can't tell it was a timeout.
+
+    Both shapes are fixed by the same escalation: retry with::
+
+      * ``tesseract_timeout = min(base * 3, _MAX_RETRY_TESSERACT_TIMEOUT_SEC)``
+      * ``use_threads = False`` — removes CPU contention between 4
+        parallel Tesseract workers which is often the root cause of
+        the timeout on mid-tier hardware.
+
+    Any other exception (``ExitCodeException``, non-graft
+    FileNotFoundError) propagates unchanged to the caller.
     """
+    retry_reason: str | None = None
     try:
         ocrmypdf.ocr(input_file, output_file, **kwargs)
-        return
     except exit_code_exception:
         raise
     except FileNotFoundError as exc:
         if not _is_graft_hocr_miss(exc):
             raise
+        retry_reason = f"graft-hocr-miss ({exc})"
+    else:
+        # First attempt "succeeded" structurally — but check the
+        # output actually has text. An all-empty output means
+        # Tesseract silently skipped every page it was asked to OCR.
+        if _output_pdf_has_any_text(output_file):
+            return
+        retry_reason = "all pages empty in output PDF (silent tesseract skip)"
 
-    # First attempt failed with graft-hocr-miss — escalate and retry.
+    # First attempt produced an unusable result — escalate and retry.
     retry_timeout = min(
         max(base_timeout * 3, 600),
         _MAX_RETRY_TESSERACT_TIMEOUT_SEC,
@@ -188,11 +227,11 @@ def _invoke_ocrmypdf_with_timeout_retry(
     retry_kwargs["tesseract_timeout"] = retry_timeout
     retry_kwargs["use_threads"] = False
     logger.warning(
-        "OCRmyPDF skipped a page at tesseract_timeout=%ds — retrying "
-        "once with tesseract_timeout=%ds and use_threads=False. "
+        "OCRmyPDF first attempt unusable (%s) at tesseract_timeout=%ds — "
+        "retrying once with tesseract_timeout=%ds and use_threads=False. "
         "If this retry also fails the user will need to lower DPI or "
         "raise tesseract_timeout in the profile.",
-        base_timeout, retry_timeout,
+        retry_reason, base_timeout, retry_timeout,
     )
     ocrmypdf.ocr(input_file, output_file, **retry_kwargs)
 

@@ -204,8 +204,22 @@ class TestRunOcrmypdfIntegration:
             tesseract_timeout=600,
         )
 
+        # Write a non-empty PDF as the "OCRmyPDF output" — otherwise
+        # the retry-on-empty-output path (added for silent-tesseract-
+        # timeout detection) would kick in and we'd see 2 calls.
+        def _write_non_empty_output(input_f, output_f, **kw):
+            import fitz
+
+            doc = fitz.open()
+            try:
+                page = doc.new_page(width=200, height=200)
+                page.insert_text((10, 50), "ok", fontsize=12)
+                doc.save(str(output_f))
+            finally:
+                doc.close()
+
         fake_ocrmypdf = MagicMock()
-        fake_ocrmypdf.ocr = MagicMock()
+        fake_ocrmypdf.ocr = MagicMock(side_effect=_write_non_empty_output)
 
         class _FakeExitCodeError(Exception):  # stand-in for ExitCodeException
             exit_code = 0
@@ -396,6 +410,176 @@ class TestRunOcrmypdfIntegration:
         assert "WinError" not in message
         # Both attempts ran.
         assert fake_ocrmypdf.ocr.call_count == 2
+
+    def test_empty_output_pdf_triggers_auto_retry_with_longer_timeout(
+        self, tmp_path: Path
+    ) -> None:
+        """First attempt returns COMPLETED but an empty-text PDF →
+        auto-retry with escalated timeout.
+
+        Regression: Tesseract silently times out on aggressive
+        preprocessing by writing an empty hOCR that OCRmyPDF grafts
+        without complaint. Result: JobStatus.COMPLETED with zero
+        recognised text, no FileNotFoundError, nothing for the
+        ``_is_graft_hocr_miss`` heuristic to catch. The user sees an
+        empty searchable PDF and can't tell what went wrong.
+
+        Fix: ``_invoke_ocrmypdf_with_timeout_retry`` now checks the
+        output PDF for any text after a "successful" attempt. Empty
+        → treat as silent timeout → retry with 600 s + single-threaded.
+        """
+        from src.application.ocrmypdf_integration import (
+            OCRmyPDFOptions,
+            run_ocrmypdf,
+        )
+
+        in_pdf = tmp_path / "in.pdf"
+        in_pdf.write_bytes(b"%PDF-1.7\n")
+        out_pdf = tmp_path / "out.pdf"
+
+        options = OCRmyPDFOptions(
+            input_file=in_pdf,
+            output_file=out_pdf,
+            language="rus+eng",
+            oem=1,
+            psm=3,
+            optimize=1,
+            skip_text=True,
+            tesseract_timeout=120,
+        )
+
+        # First call: "succeeds" — write an empty-text PDF on disk.
+        # Second call: "succeeds" — write a non-empty PDF.
+        import fitz
+
+        def write_empty_pdf(input_f, output_f, **kwargs):
+            doc = fitz.open()
+            try:
+                doc.new_page(width=100, height=100)  # blank page, no text
+                doc.save(str(output_f))
+            finally:
+                doc.close()
+
+        def write_pdf_with_text(input_f, output_f, **kwargs):
+            doc = fitz.open()
+            try:
+                page = doc.new_page(width=200, height=200)
+                page.insert_text((10, 50), "retry worked", fontsize=12)
+                doc.save(str(output_f))
+            finally:
+                doc.close()
+
+        fake_ocrmypdf = MagicMock()
+        fake_ocrmypdf.ocr = MagicMock(
+            side_effect=[write_empty_pdf(in_pdf, out_pdf), write_pdf_with_text(in_pdf, out_pdf)]
+        )
+        # MagicMock above already consumed the writes — reset to use
+        # side_effect functions instead so fake_ocrmypdf.ocr calls
+        # our callables when invoked.
+        fake_ocrmypdf.ocr = MagicMock(
+            side_effect=[write_empty_pdf, write_pdf_with_text]
+        )
+
+        # Wrap each side_effect fn with the ``(input, output, **kw)``
+        # calling convention the wrapper uses.
+        def _first(input_f, output_f, **kw):
+            write_empty_pdf(input_f, output_f, **kw)
+
+        def _second(input_f, output_f, **kw):
+            write_pdf_with_text(input_f, output_f, **kw)
+
+        fake_ocrmypdf.ocr = MagicMock(side_effect=[_first, _second])
+        # MagicMock side_effect as a list of callables: each call
+        # invokes the next callable with the same args. Wrap each
+        # callable so MagicMock's side_effect dispatch works.
+        fake_ocrmypdf.ocr = MagicMock(
+            side_effect=lambda input_f, output_f, **kw: (
+                _first(input_f, output_f, **kw) if fake_ocrmypdf.ocr.call_count == 1
+                else _second(input_f, output_f, **kw)
+            )
+        )
+
+        class _FakeExitCodeError(Exception):
+            exit_code = 0
+
+        fake_exceptions = MagicMock()
+        fake_exceptions.ExitCodeException = _FakeExitCodeError
+
+        import sys
+
+        with patch.dict(
+            sys.modules,
+            {
+                "ocrmypdf": fake_ocrmypdf,
+                "ocrmypdf.exceptions": fake_exceptions,
+            },
+        ):
+            run_ocrmypdf(options)  # must NOT raise
+
+        assert fake_ocrmypdf.ocr.call_count == 2, (
+            "Expected exactly 2 calls — first empty, then retry"
+        )
+        # Second call kwargs reflect the escalation.
+        retry_kwargs = fake_ocrmypdf.ocr.call_args_list[1].kwargs
+        assert retry_kwargs["tesseract_timeout"] >= 600
+        assert retry_kwargs["use_threads"] is False
+
+    def test_non_empty_output_skips_retry(self, tmp_path: Path) -> None:
+        """The happy path must not retry — that would double every
+        job's wall time."""
+        from src.application.ocrmypdf_integration import (
+            OCRmyPDFOptions,
+            run_ocrmypdf,
+        )
+
+        in_pdf = tmp_path / "in.pdf"
+        in_pdf.write_bytes(b"%PDF-1.7\n")
+        out_pdf = tmp_path / "out.pdf"
+
+        options = OCRmyPDFOptions(
+            input_file=in_pdf,
+            output_file=out_pdf,
+            language="eng",
+            oem=1,
+            psm=3,
+            optimize=1,
+            skip_text=True,
+            tesseract_timeout=60,
+        )
+
+        import fitz
+
+        def _first(input_f, output_f, **kw):
+            doc = fitz.open()
+            try:
+                page = doc.new_page(width=200, height=200)
+                page.insert_text((10, 50), "clean output", fontsize=12)
+                doc.save(str(output_f))
+            finally:
+                doc.close()
+
+        fake_ocrmypdf = MagicMock()
+        fake_ocrmypdf.ocr = MagicMock(side_effect=_first)
+
+        class _FakeExitCodeError(Exception):
+            exit_code = 0
+
+        fake_exceptions = MagicMock()
+        fake_exceptions.ExitCodeException = _FakeExitCodeError
+
+        import sys
+
+        with patch.dict(
+            sys.modules,
+            {
+                "ocrmypdf": fake_ocrmypdf,
+                "ocrmypdf.exceptions": fake_exceptions,
+            },
+        ):
+            run_ocrmypdf(options)
+
+        # Exactly ONE call — no wasteful retry on the happy path.
+        assert fake_ocrmypdf.ocr.call_count == 1
 
     def test_unrelated_filenotfounderror_still_surfaces(
         self, tmp_path: Path
