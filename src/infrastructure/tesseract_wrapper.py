@@ -41,7 +41,17 @@ else:
     _CREATE_NO_WINDOW = 0
 
 
-_VERSION_RE = re.compile(r"tesseract\s+([\d.]+)", re.IGNORECASE)
+# Accepts every documented Tesseract ``--version`` output variant we've
+# seen in the wild:
+#   * ``tesseract 5.3.4``            — Linux apt / macOS brew (no ``v``)
+#   * ``tesseract v5.5.0.20241111``  — UB Mannheim Windows build
+#   * ``tesseract 4.1.1-rc3``        — release-candidate tags from source
+# The UB Mannheim format bit us: the pre-fix regex only accepted
+# ``\s+[\d.]+`` so the ``v`` prefix made it bail out and every packaged
+# Windows install logged ``Tesseract version detected: <unknown>`` —
+# harmless but alarming in end-user logs. Making the ``v`` optional
+# and allowing an RC suffix handles all current variants.
+_VERSION_RE = re.compile(r"tesseract\s+v?(\d+(?:\.\d+)+)", re.IGNORECASE)
 
 
 class TesseractWrapper:
