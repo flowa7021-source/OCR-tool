@@ -223,11 +223,23 @@ def test_configure_pytesseract_prepends_bundle_dir_to_path(
     TesseractWrapper._binary_path = bin_path
     TesseractWrapper._tessdata_path = tessdata_dir
     monkeypatch.setenv("PATH", "/unrelated")
+    # ``configure_pytesseract`` writes ``os.environ["TESSDATA_PREFIX"]``
+    # to the chosen tessdata dir. If we don't undo that mutation,
+    # subsequent subprocess-worker tests (ParallelProcessor, fork mode)
+    # inherit the stale tmp path and ``find_tessdata_dir`` picks it up
+    # via the env-var fallback — ``verify()`` then reports
+    # "Отсутствуют языки: eng" because the tmp dir only has
+    # ``rus.traineddata``. Save + restore manually below.
+    original_tessdata_prefix = os.environ.pop("TESSDATA_PREFIX", None)
 
     try:
         TesseractWrapper().configure_pytesseract()
     finally:
         TesseractWrapper.reset()
+        if original_tessdata_prefix is not None:
+            os.environ["TESSDATA_PREFIX"] = original_tessdata_prefix
+        else:
+            os.environ.pop("TESSDATA_PREFIX", None)
 
     path_entries = os.environ["PATH"].split(os.pathsep)
     assert str(bin_dir) in path_entries, (
