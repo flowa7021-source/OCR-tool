@@ -8,6 +8,16 @@ import sys
 
 def main() -> int:
     """Start the Qt event loop and return its exit code."""
+    # Suppress the brief console windows Tesseract/Ghostscript would
+    # otherwise flash on Windows ``--windowed`` builds. No-op on
+    # POSIX. Must run before anything else imports ``subprocess``-
+    # using code so every Popen site inherits the patched default.
+    from src.infrastructure.subprocess_hygiene import (
+        install_windows_console_hide,
+    )
+
+    install_windows_console_hide()
+
     # Every launch FIRST consults the single-instance guard: if another
     # OCR Studio is already running, the current process forwards its
     # CLI args (a double-click on a PDF file → opens in the existing

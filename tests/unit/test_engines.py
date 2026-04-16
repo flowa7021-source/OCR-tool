@@ -244,6 +244,150 @@ class TestRunOcrmypdfIntegration:
         assert call.kwargs.get("language") == "eng"
 
 
+    def test_graft_hocr_miss_maps_to_tesseract_timeout_hint(
+        self, tmp_path: Path
+    ) -> None:
+        """A timed-out page triggers a clear error, not the raw WinError 2.
+
+        Regression: when Tesseract exceeds ``tesseract_timeout`` on a
+        page, OCRmyPDF logs ``took too long to OCR - skipping`` and
+        then crashes deep in the graft phase because it still tries
+        to stat the per-page HOCR that was never produced::
+
+            File "ocrmypdf/_graft.py", line 350, in _parse_hocr_pages
+              File "pathlib.py", line 1013, in stat
+            FileNotFoundError: [WinError 2] ... '000003_ocr_hocr.hocr'
+
+        End users saw ``OCRmyPDF failed: [WinError 2] ...`` pointing at
+        a temp path they cannot do anything about. The wrapper now
+        intercepts that specific FileNotFoundError shape and emits
+        Russian guidance naming ``tesseract_timeout`` and DPI.
+        """
+        from src.application.ocrmypdf_integration import (
+            OCRmyPDFError,
+            OCRmyPDFOptions,
+            run_ocrmypdf,
+        )
+
+        in_pdf = tmp_path / "in.pdf"
+        in_pdf.write_bytes(b"%PDF-1.7\n")
+        out_pdf = tmp_path / "out.pdf"
+
+        options = OCRmyPDFOptions(
+            input_file=in_pdf,
+            output_file=out_pdf,
+            language="rus+eng",
+            oem=1,
+            psm=3,
+            optimize=1,
+            skip_text=True,
+            tesseract_timeout=120,
+        )
+
+        # Build a FileNotFoundError that matches what _graft raises —
+        # errno=2 with a ``*_ocr_hocr.hocr`` filename. The wrapper
+        # keys on the filename, not on any message string, so this is
+        # robust to locale changes in the underlying WinError text.
+        graft_path = (
+            r"C:\Users\USER~1.020\AppData\Local\Temp\ocrmypdf.io.abcd\000003_ocr_hocr.hocr"
+        )
+        graft_err = FileNotFoundError(2, "No such file", graft_path)
+
+        fake_ocrmypdf = MagicMock()
+        fake_ocrmypdf.ocr = MagicMock(side_effect=graft_err)
+
+        class _FakeExitCodeError(Exception):
+            exit_code = 0
+
+        fake_exceptions = MagicMock()
+        fake_exceptions.ExitCodeException = _FakeExitCodeError
+
+        import sys
+
+        with patch.dict(
+            sys.modules,
+            {
+                "ocrmypdf": fake_ocrmypdf,
+                "ocrmypdf.exceptions": fake_exceptions,
+            },
+        ), pytest.raises(OCRmyPDFError) as excinfo:
+            run_ocrmypdf(options)
+
+        message = str(excinfo.value)
+        # Must name the knob the user can turn.
+        assert "tesseract_timeout" in message, message
+        # Must include the configured value so the hint is concrete.
+        assert "120" in message, message
+        # Must NOT leak the raw temp path to the user (that's what the
+        # old error did).
+        assert "000003_ocr_hocr" not in message
+        assert "WinError" not in message
+        # Exception chain is preserved so debug logs still show the
+        # original cause.
+        assert excinfo.value.__cause__ is graft_err
+
+    def test_unrelated_filenotfounderror_still_surfaces(
+        self, tmp_path: Path
+    ) -> None:
+        """A non-graft FileNotFoundError must NOT get the timeout hint.
+
+        If OCRmyPDF bails because its own dependency is missing
+        (e.g. ``tesseract.exe`` gone from PATH mid-run), we must not
+        mislead the user into tuning ``tesseract_timeout``.
+        """
+        from src.application.ocrmypdf_integration import (
+            OCRmyPDFError,
+            OCRmyPDFOptions,
+            run_ocrmypdf,
+        )
+
+        in_pdf = tmp_path / "in.pdf"
+        in_pdf.write_bytes(b"%PDF-1.7\n")
+        out_pdf = tmp_path / "out.pdf"
+
+        options = OCRmyPDFOptions(
+            input_file=in_pdf,
+            output_file=out_pdf,
+            language="eng",
+            oem=1,
+            psm=3,
+            optimize=1,
+            skip_text=True,
+            tesseract_timeout=60,
+        )
+
+        unrelated_err = FileNotFoundError(
+            2, "No such file", "C:/Program Files/tesseract.exe"
+        )
+
+        fake_ocrmypdf = MagicMock()
+        fake_ocrmypdf.ocr = MagicMock(side_effect=unrelated_err)
+
+        class _FakeExitCodeError(Exception):
+            exit_code = 0
+
+        fake_exceptions = MagicMock()
+        fake_exceptions.ExitCodeException = _FakeExitCodeError
+
+        import sys
+
+        with patch.dict(
+            sys.modules,
+            {
+                "ocrmypdf": fake_ocrmypdf,
+                "ocrmypdf.exceptions": fake_exceptions,
+            },
+        ), pytest.raises(OCRmyPDFError) as excinfo:
+            run_ocrmypdf(options)
+
+        message = str(excinfo.value)
+        # The generic wrapper kicks in — no misleading timeout hint.
+        assert "tesseract_timeout" not in message, message
+        # But the original file path does surface so the user knows
+        # what's actually missing.
+        assert "tesseract.exe" in message, message
+
+
 # ---------------------------------------------------------------------------
 # Custom engine for the abstraction itself
 # ---------------------------------------------------------------------------

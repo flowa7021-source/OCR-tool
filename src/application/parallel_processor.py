@@ -263,6 +263,18 @@ def _worker_run_job(
     worker_logger = _setup_worker_logging()
     _enable_worker_faulthandler(worker_logger)
 
+    # Silence the brief console windows Tesseract/Ghostscript flash
+    # on Windows. Must land before OCRmyPDF spawns its first child.
+    # No-op on POSIX and on already-patched processes.
+    try:
+        from src.infrastructure.subprocess_hygiene import (
+            install_windows_console_hide,
+        )
+
+        install_windows_console_hide()
+    except Exception as exc:  # noqa: BLE001 — hygiene is best-effort
+        worker_logger.debug("subprocess_hygiene unavailable: %s", exc)
+
     pid = os.getpid()
     input_path = job_dict.get("input_path", "?")
     output_path = job_dict.get("output_path", "?")

@@ -201,6 +201,40 @@ def run_ocrmypdf(options: OCRmyPDFOptions) -> None:
             f"OCRmyPDF failed (exit_code={exit_code}): {exc}",
             exit_code=exit_code,
         ) from exc
+    except FileNotFoundError as exc:
+        # OCRmyPDF's graft phase (``_graft._parse_hocr_pages``) stats a
+        # per-page ``NNNNNN_ocr_hocr.hocr`` in its scratch dir for every
+        # input page. If Tesseract exceeded ``tesseract_timeout`` on a
+        # page, OCRmyPDF logs ``took too long to OCR - skipping`` and
+        # quietly skips producing the hocr — then crashes here with an
+        # opaque ``WinError 2`` that points at a random temp file.
+        # Detect that specific shape and map it to a human-readable
+        # hint instead of leaking the temp path to the user.
+        filename = getattr(exc, "filename", "") or ""
+        is_graft_hocr_miss = (
+            filename.endswith("_hocr.hocr")
+            or filename.endswith("_ocr_hocr.hocr")
+            or "ocr_hocr" in filename
+        )
+        if is_graft_hocr_miss:
+            logger.error(
+                "OCRmyPDF graft failed: missing per-page HOCR at %r — "
+                "Tesseract likely skipped a page after exceeding "
+                "tesseract_timeout=%ds",
+                filename, options.tesseract_timeout,
+            )
+            raise OCRmyPDFError(
+                "Одна или несколько страниц не были распознаны за отведённое "
+                f"время (tesseract_timeout={options.tesseract_timeout} с). "
+                "Это типично для сложных сканов при высоком DPI. "
+                "Попробуйте уменьшить DPI в профиле (например, 600 → 400) "
+                "или увеличить tesseract_timeout в настройках OCR."
+            ) from exc
+        # Some other missing file (input PDF, Tesseract binary, …) —
+        # wrap it uniformly but preserve the original filename for
+        # diagnostics.
+        logger.exception("ocrmypdf raised FileNotFoundError (not graft-hocr)")
+        raise OCRmyPDFError(f"OCRmyPDF failed: {exc}") from exc
     except Exception as exc:  # noqa: BLE001 - wrap for consistent upstream handling
         logger.exception("ocrmypdf raised unexpected exception")
         raise OCRmyPDFError(f"OCRmyPDF failed: {exc}") from exc
