@@ -109,11 +109,13 @@ REGISTRY: tuple[ExternalTool, ...] = (
 def locate(tool: ExternalTool) -> Path | None:
     """Return the path to ``tool``'s bundled binary, or ``None`` if absent.
 
-    Looks under :attr:`ExternalTool.bundle_dir` (and one level of
-    subdirectories, to be tolerant of installers that nest under
-    ``bin/``) for any of :attr:`ExternalTool.candidate_names`.
-    Falls back to ``shutil.which(name)`` so the function also works
-    in development where the tool is only on the system PATH.
+    Search order:
+        1. ``tool.bundle_dir`` (PyInstaller bundle, including one level
+           of nesting for installers that put things under ``bin/``).
+        2. An already-installed OCR Studio on the same Windows machine —
+           lets a dev checkout reuse its bundled Ghostscript / Tesseract
+           without needing a separate system install.
+        3. ``shutil.which`` — system PATH.
     """
     bundle_dir = tool.bundle_dir
     if bundle_dir.is_dir():
@@ -126,6 +128,32 @@ def locate(tool: ExternalTool) -> Path | None:
                     nested = child / candidate
                     if nested.is_file():
                         return nested
+
+    # Installed-app fallback. Each tool in ``REGISTRY`` has a stable
+    # subdirectory name under ``resources/`` that matches our Inno
+    # Setup layout: ``tesseract/``, ``ghostscript/``, etc. We use
+    # ``tool.name`` as that directory name.
+    try:
+        from src.infrastructure.installed_app import (
+            find_installed_ocr_studio_resources,
+        )
+
+        installed = find_installed_ocr_studio_resources()
+    except Exception:  # noqa: BLE001
+        installed = None
+    if installed is not None:
+        tool_dir = installed / tool.name
+        if tool_dir.is_dir():
+            for candidate in tool.candidate_names:
+                direct = tool_dir / candidate
+                if direct.is_file():
+                    return direct
+                for child in tool_dir.iterdir():
+                    if child.is_dir():
+                        nested = child / candidate
+                        if nested.is_file():
+                            return nested
+
     # Dev mode fallback — maybe the user has it on their PATH.
     for candidate in tool.candidate_names:
         system = shutil.which(candidate)

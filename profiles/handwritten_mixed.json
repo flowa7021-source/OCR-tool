@@ -1,6 +1,7 @@
 {
   "name": "handwritten_mixed",
   "description": "GOT-OCR 2.0 для рукописного и печатного текста (требует отдельной модели)",
+  "schema_version": 1,
   "preprocess": {
     "deskew": {
       "enabled": true,

@@ -85,13 +85,31 @@ class TesseractWrapper:
 
         candidates: list[Path] = []
 
+        # 1. PyInstaller-bundled binary — takes precedence in a real
+        #    frozen build (``APP_ROOT`` points at ``_internal`` there).
         bundled = TESSERACT_BIN_DIR / TESSERACT_EXE_NAME
         candidates.append(bundled)
 
+        # 2. Explicit override from the environment.
         env_cmd = os.environ.get("TESSERACT_CMD", "").strip()
         if env_cmd:
             candidates.append(Path(env_cmd))
 
+        # 3. An already-installed OCR Studio on the same Windows machine.
+        #    Lets ``python -m src.cli`` in a source checkout "just work"
+        #    without the dev having to install Tesseract system-wide —
+        #    the user already has the bundled binary sitting inside the
+        #    installed app's ``_internal/resources/``.
+        from src.infrastructure.installed_app import (
+            find_installed_ocr_studio_resources,
+        )
+
+        installed = find_installed_ocr_studio_resources()
+        if installed is not None:
+            candidates.append(installed / "tesseract" / TESSERACT_EXE_NAME)
+
+        # 4. Whatever ``shutil.which`` finds on PATH — last resort for
+        #    Chocolatey / apt-installed Tesseracts.
         system = shutil.which("tesseract")
         if system:
             candidates.append(Path(system))
@@ -104,7 +122,13 @@ class TesseractWrapper:
 
         searched = ", ".join(str(c) for c in candidates) or "<none>"
         raise TesseractNotFoundError(
-            f"Tesseract executable not found. Searched: {searched}"
+            f"Tesseract executable not found. Searched: {searched}. "
+            "Варианты: 1) установить OCR Studio и запускать CLI из "
+            "dev-checkout — бандленный Tesseract подхватится "
+            "автоматически; 2) установить Tesseract в систему "
+            "(choco install tesseract на Windows, apt install "
+            "tesseract-ocr на Linux); 3) задать путь явно через "
+            "переменную окружения TESSERACT_CMD."
         )
 
     def find_tessdata_dir(self) -> Path:
@@ -132,6 +156,20 @@ class TesseractWrapper:
             candidates.append(env_path)
             # TESSDATA_PREFIX sometimes points to parent of tessdata/.
             candidates.append(env_path / "tessdata")
+
+        # Installed-app fallback — same rationale as in
+        # :meth:`find_tesseract_binary`: let a dev checkout reuse the
+        # tessdata shipped with an already-installed OCR Studio.
+        try:
+            from src.infrastructure.installed_app import (
+                find_installed_ocr_studio_resources,
+            )
+
+            installed = find_installed_ocr_studio_resources()
+            if installed is not None:
+                candidates.append(installed / "tessdata")
+        except Exception:  # noqa: BLE001 — fallback is best-effort
+            logger.debug("installed_app lookup raised", exc_info=True)
 
         try:
             binary = self.find_tesseract_binary()

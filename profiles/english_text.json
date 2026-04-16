@@ -1,6 +1,7 @@
 {
   "name": "english_text",
   "description": "English documents with clean layout (eng, OTSU, light CLAHE)",
+  "schema_version": 1,
   "preprocess": {
     "deskew": {
       "enabled": true,
