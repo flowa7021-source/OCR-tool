@@ -40,12 +40,32 @@ MODELS_DIR: Path = USER_DATA_DIR / "models"
 
 @dataclass
 class ModelFile:
-    """One file in a model package."""
+    """One file in a model package.
 
-    name: str  # filename within the model dir
-    url: str   # absolute download URL
-    size_bytes: int = 0  # 0 means "unknown, accept anything > 1 KB"
-    sha256: str = ""  # optional, empty disables hash check
+    Attributes:
+        name: Filename within the model dir.
+        url: Absolute download URL.
+        size_bytes: Expected exact size. ``0`` means "unknown" — in that
+            case only the ``min_size_bytes`` floor is enforced. A non-zero
+            value enables ±1% size validation.
+        min_size_bytes: Hard floor. A file smaller than this is treated
+            as corrupt regardless of ``size_bytes``. Defaults to ``1024``
+            (1 KB). Bump for small-but-still-non-trivial files like the
+            custom ``trust_remote_code`` Python modules, where a 200-byte
+            truncated download would pass the default ``size_bytes=0``
+            check but crash at load time. When ``size_bytes > 0`` the
+            floor is purely a lower bound (the ±1% tolerance still
+            gates the upper side).
+        sha256: Optional content hash. Empty string disables hash check;
+            we rely on HTTPS + size for integrity today because HF
+            minor upstream updates would break a hard-coded hash.
+    """
+
+    name: str
+    url: str
+    size_bytes: int = 0
+    min_size_bytes: int = 0
+    sha256: str = ""
 
 
 @dataclass
@@ -104,14 +124,34 @@ GOT_OCR2_SPEC = ModelSpec(
             size_bytes=560 * 1024 * 1024,
         ),
         ModelFile(name="qwen.tiktoken", url=f"{GOT_OCR2_HF}/qwen.tiktoken"),
-        # trust_remote_code Python modules.
+        # trust_remote_code Python modules. ``min_size_bytes`` floors
+        # are based on the current HuggingFace repo contents (Apr 2026)
+        # with ~40% headroom so minor upstream edits still validate,
+        # but an obviously truncated download (200-byte HTML error page,
+        # interrupted HTTP 206) fails fast. We deliberately leave
+        # ``size_bytes`` unset: upstream Stepfun tweaks these files
+        # occasionally and pinning an exact size would brick downloads
+        # for every user after a silent upstream rewrite.
         ModelFile(
             name="tokenization_qwen.py",
             url=f"{GOT_OCR2_HF}/tokenization_qwen.py",
+            min_size_bytes=5 * 1024,   # real ~9.5 KB
         ),
-        ModelFile(name="modeling_GOT.py", url=f"{GOT_OCR2_HF}/modeling_GOT.py"),
-        ModelFile(name="got_vision_b.py", url=f"{GOT_OCR2_HF}/got_vision_b.py"),
-        ModelFile(name="render_tools.py", url=f"{GOT_OCR2_HF}/render_tools.py"),
+        ModelFile(
+            name="modeling_GOT.py",
+            url=f"{GOT_OCR2_HF}/modeling_GOT.py",
+            min_size_bytes=20 * 1024,  # real ~34 KB
+        ),
+        ModelFile(
+            name="got_vision_b.py",
+            url=f"{GOT_OCR2_HF}/got_vision_b.py",
+            min_size_bytes=10 * 1024,  # real ~16 KB
+        ),
+        ModelFile(
+            name="render_tools.py",
+            url=f"{GOT_OCR2_HF}/render_tools.py",
+            min_size_bytes=512,         # real ~2 KB
+        ),
     ],
 )
 
@@ -375,14 +415,37 @@ class ModelManager:
 
     @staticmethod
     def _validate_file(path: Path, spec: ModelFile) -> bool:
-        """Return True when ``path`` matches the spec's size/hash constraints."""
+        """Return True when ``path`` matches the spec's size/hash constraints.
+
+        Three layers, cheapest first:
+
+          1. ``min_size_bytes`` floor — rejects obviously truncated
+             downloads (HTTP 206 that was interrupted, disk full, etc.)
+             even when ``size_bytes`` is zero. Default floor is 1 KB.
+          2. ``size_bytes`` ±1% tolerance — rejects size mismatches for
+             known-upstream files. Only runs when ``size_bytes > 0``.
+          3. ``sha256`` exact match — rejects content mismatches. Only
+             runs when a hash is pinned in the manifest.
+        """
         try:
             actual_size = path.stat().st_size
         except OSError:
             return False
+        # Layer 1: explicit min_size_bytes floor from the manifest.
+        # Runs independently of the exact-size check below so small
+        # auxiliary files (``trust_remote_code`` Python modules at
+        # ~2-34 KB) can enforce a truncation floor without pinning an
+        # exact size that upstream edits would invalidate.
+        if spec.min_size_bytes and actual_size < spec.min_size_bytes:
+            logger.warning(
+                "File %s is below configured min_size_bytes: "
+                "%d B < %d B (likely truncated download or error page)",
+                path, actual_size, spec.min_size_bytes,
+            )
+            return False
         if spec.size_bytes:
-            # Allow ±1% slack for real megabyte-scale weights, but enforce
-            # a 16-byte floor so trivial-size test specs catch corruption.
+            # Layer 2: ±1% slack for known-size files, with a 16-byte
+            # floor so trivial-size test specs still catch corruption.
             # 580 MB → 5.8 MB tolerance; 32 B → 16 B tolerance.
             tolerance = max(16, spec.size_bytes // 100)
             if abs(actual_size - spec.size_bytes) > tolerance:
@@ -392,8 +455,13 @@ class ModelManager:
                 )
                 return False
         else:
-            # No expected size: just refuse zero-byte / sub-1-KB files.
+            # Layer 2b: no exact size → default 1 KB floor so a
+            # completely corrupt ~0-byte download is caught. Scripts
+            # that want a larger floor override via ``min_size_bytes``.
             if actual_size < 1024:
+                logger.warning(
+                    "File %s below default 1 KB floor: %d B", path, actual_size
+                )
                 return False
         if spec.sha256:
             h = hashlib.sha256()

@@ -176,7 +176,16 @@ class OCRConfig:
 
 @dataclass
 class RegexRule:
-    """A single user-defined find/replace rule."""
+    """A single user-defined find/replace rule.
+
+    Validation is eager: an invalid regex is detected and the rule is
+    auto-disabled at construction time (on profile load) rather than
+    waiting until the first OCR run to log a ``re.error`` and silently
+    skip it. ``invalid_reason`` records the compile error so the UI can
+    surface ``Правило #N отключено: <причина>`` next to the rule row
+    instead of leaving the user wondering why their substitution has
+    no effect.
+    """
 
     pattern: str
     replacement: str
@@ -184,6 +193,34 @@ class RegexRule:
     description: str = ""
     is_regex: bool = True
     case_sensitive: bool = True
+    #: Populated with a non-empty string when ``__post_init__`` rejects
+    #: the pattern. A non-empty value always implies ``enabled=False``.
+    invalid_reason: str = ""
+
+    def __post_init__(self) -> None:
+        """Validate the pattern up front and auto-disable on compile error.
+
+        Only runs the validation when the rule is both marked as a
+        regex and currently ``enabled=True`` — a disabled rule with a
+        bad pattern is the user's business, not ours to flag. Literal
+        (non-regex) rules never go through ``re.compile`` at runtime,
+        so they always validate.
+        """
+        if not self.is_regex or not self.enabled:
+            return
+        import re as _re
+
+        try:
+            _re.compile(self.pattern)
+        except _re.error as exc:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "Правило %r отключено: неверный regex (%s)",
+                self.pattern, exc,
+            )
+            self.enabled = False
+            self.invalid_reason = f"{type(exc).__name__}: {exc}"
 
 
 @dataclass

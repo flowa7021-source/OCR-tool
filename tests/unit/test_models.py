@@ -128,6 +128,106 @@ def test_unknown_int_enum_value_also_falls_back() -> None:
     assert rebuilt.ocr.dpi == 300
 
 
+def test_regex_rule_auto_disables_on_invalid_pattern() -> None:
+    """Invalid regex at construction time → rule auto-disables, records reason.
+
+    The old behaviour was to leave the rule ``enabled=True`` and trust
+    the postprocessor's runtime ``re.error`` handler to skip it per
+    OCR job. That silently dropped the rule without any UI-visible
+    signal. Moving validation to ``__post_init__`` means the user's
+    profile dialog can show "Правило #N отключено: <причина>" next to
+    the row instead of the rule just appearing to do nothing.
+    """
+    from src.core.models import RegexRule
+
+    rule = RegexRule(
+        pattern="[unclosed",
+        replacement="x",
+        is_regex=True,
+        enabled=True,
+    )
+    assert rule.enabled is False, (
+        "Invalid regex should have flipped enabled to False"
+    )
+    assert rule.invalid_reason, "invalid_reason must be populated"
+    assert "error" in rule.invalid_reason.lower()
+
+
+def test_regex_rule_valid_pattern_stays_enabled() -> None:
+    """Valid regex stays enabled and has no invalid_reason."""
+    from src.core.models import RegexRule
+
+    rule = RegexRule(
+        pattern=r"\d+",
+        replacement="#",
+        is_regex=True,
+        enabled=True,
+    )
+    assert rule.enabled is True
+    assert rule.invalid_reason == ""
+
+
+def test_regex_rule_literal_pattern_skips_validation() -> None:
+    """Non-regex (literal) rules are not re.compile'd — pattern can be
+    anything at all, even strings that would be invalid regex."""
+    from src.core.models import RegexRule
+
+    rule = RegexRule(
+        pattern="[unclosed",  # invalid as regex, fine as literal
+        replacement="x",
+        is_regex=False,
+        enabled=True,
+    )
+    assert rule.enabled is True
+    assert rule.invalid_reason == ""
+
+
+def test_regex_rule_already_disabled_skips_validation() -> None:
+    """A user-disabled rule with a bad pattern isn't our problem."""
+    from src.core.models import RegexRule
+
+    rule = RegexRule(
+        pattern="[unclosed",
+        replacement="x",
+        is_regex=True,
+        enabled=False,
+    )
+    assert rule.enabled is False
+    # No invalid_reason populated because we short-circuited.
+    assert rule.invalid_reason == ""
+
+
+def test_regex_rule_survives_roundtrip_through_profile_json() -> None:
+    """Full profile load → dict → load round-trip preserves auto-disable."""
+    from src.core.models import (
+        PostprocessConfig,
+        ProfileData,
+        RegexRule,
+    )
+
+    profile = ProfileData(
+        name="with-bad-rule",
+        postprocess=PostprocessConfig(
+            custom_rules=[
+                RegexRule(
+                    pattern="[unclosed",
+                    replacement="x",
+                    is_regex=True,
+                    enabled=True,
+                )
+            ],
+        ),
+    )
+    # Post-init flipped enabled already.
+    assert profile.postprocess.custom_rules[0].enabled is False
+
+    rebuilt = ProfileData.from_dict(profile.to_dict())
+    # And the flip survives the round-trip — no "re-enabled by accident"
+    # after the JSON layer.
+    assert rebuilt.postprocess.custom_rules[0].enabled is False
+    assert rebuilt.postprocess.custom_rules[0].invalid_reason
+
+
 def test_valid_enum_value_still_loads_correctly() -> None:
     """Guard against the ValueError-catching fix accidentally eating
     legitimate enum members."""

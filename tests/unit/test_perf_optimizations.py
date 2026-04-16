@@ -114,6 +114,61 @@ class TestOCRCache:
 
         assert ocr_cache.cache_key(tmp_path / "does-not-exist.pdf", self._profile()) == ""
 
+    def test_prune_tolerates_entry_disappearing_mid_pass(
+        self, tmp_path: Path
+    ) -> None:
+        """Another process wipes a cache entry while _prune iterates.
+
+        Regression: the previous ``_prune`` called ``entry.stat().st_mtime``
+        directly in the sort comparator and ``_dir_size(entry)`` in the
+        eviction loop. Either could raise OSError if the entry vanished
+        between iterdir and stat (manual cleanup, second worker
+        finishing a store concurrently) — the whole prune pass
+        aborted and the cache was left over-budget.
+
+        The new implementation snapshots size+mtime once per entry
+        with a tolerant ``_entry_stats`` helper, so a missing entry is
+        transparently skipped.
+        """
+        import shutil
+        import time
+
+        from src.infrastructure import ocr_cache
+
+        cache_root = tmp_path / "cache"
+        cache_root.mkdir()
+
+        for name in ("a", "b", "c"):
+            d = cache_root / name
+            d.mkdir()
+            (d / "payload").write_bytes(b"x" * 100)
+            t = time.time() - {"a": 300, "b": 200, "c": 100}[name]
+            os.utime(d, (t, t))
+
+        # Simulate concurrent deletion by monkey-patching _entry_stats to
+        # side-effect-delete entry "b" the first time it's called.
+        real_entry_stats = ocr_cache._entry_stats
+        deleted: list[str] = []
+
+        def flaky(entry):
+            if entry.name == "b" and "b" not in deleted:
+                shutil.rmtree(entry, ignore_errors=True)
+                deleted.append("b")
+            return real_entry_stats(entry)
+
+        import unittest.mock
+
+        with unittest.mock.patch.object(ocr_cache, "_entry_stats", side_effect=flaky):
+            # Must not raise despite "b" vanishing mid-iteration.
+            ocr_cache._prune(cache_root, max_bytes=150)
+
+        remaining = {p.name for p in cache_root.iterdir() if p.is_dir()}
+        # "c" (newest) survives, "a" (oldest) evicted. "b" was deleted
+        # mid-pass by the test harness — not by prune — which is the
+        # race this test models.
+        assert "c" in remaining
+        assert "a" not in remaining
+
     def test_store_is_idempotent(self, tmp_path: Path) -> None:
         """Calling store twice for same key just overwrites, no error."""
         from src.core.models import JobResult
