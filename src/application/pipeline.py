@@ -151,6 +151,50 @@ class OCRPipeline:
             logger.info("Job %s stage=init: configuring Tesseract", job_id)
             self._ensure_tesseract_configured()
 
+            # 0. Pre-flight. Runs in ~1 second and fails fast if the
+            #    selected engine is not actually usable — missing
+            #    Tesseract binary, missing GOT-OCR 2.0 manifest file,
+            #    stale HTR weights directory. Without this check a
+            #    600 DPI / 4-page job used to spend ~30 seconds on
+            #    preprocessing BEFORE discovering the engine was
+            #    misconfigured. Now the user finds out immediately.
+            engine_kind = job.profile.ocr.engine
+            self._report(0, 1, "preflight")
+            try:
+                from src.application.engines import get_engine
+                from src.application.engines.base import EngineNotAvailableError
+
+                engine = get_engine(engine_kind)
+                ok, msg = engine.is_available()
+                if not ok:
+                    logger.error(
+                        "Job %s preflight FAILED: engine=%s not available: %s",
+                        job_id, engine_kind, msg,
+                    )
+                    result.status = JobStatus.FAILED
+                    result.error = msg
+                    result.total_time_sec = time.time() - started
+                    return result
+                logger.info(
+                    "Job %s preflight OK: engine=%s is_available", job_id, engine_kind
+                )
+            except (EngineNotAvailableError, KeyError) as exc:
+                logger.error(
+                    "Job %s preflight FAILED: %s", job_id, exc, exc_info=True
+                )
+                result.status = JobStatus.FAILED
+                result.error = str(exc)
+                result.total_time_sec = time.time() - started
+                return result
+
+            # Advisory: DPI × tesseract_timeout sanity. At 600 DPI a
+            # complex Russian-contract page legitimately takes 2-3 min;
+            # if the user pinned a sub-300s timeout they're almost
+            # certainly about to hit the auto-retry path. Log a
+            # WARNING so the field-support log makes the root cause
+            # visible before the failure happens.
+            self._check_dpi_timeout_sanity(job, job_id)
+
             workdir = create_temp_workdir(prefix="ocrjob_")
             logger.info("Job %s workdir: %s", job_id, workdir)
 
@@ -354,6 +398,33 @@ class OCRPipeline:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _check_dpi_timeout_sanity(self, job: OCRJobConfig, job_id: str) -> None:
+        """Warn when DPI is high AND tesseract_timeout is below the safe floor.
+
+        At 600 DPI, complex Russian-contract pages routinely take
+        2-3 minutes in Tesseract. The default timeout is now 300s
+        and the wrapper auto-retries once with 600s + single-threaded,
+        so sub-300 configurations very likely fall through to the
+        (user-visible) "не успели распознаться" error. Log a WARNING
+        so a technician looking at the log sees the root cause up
+        front rather than piecing it together from timestamps.
+        """
+        try:
+            dpi = int(getattr(job.profile.ocr, "dpi", 300) or 300)
+            timeout = int(
+                getattr(job.profile.ocr, "tesseract_timeout", 300) or 300
+            )
+        except (TypeError, ValueError):
+            return
+        if dpi >= 600 and timeout < 300:
+            logger.warning(
+                "Job %s: DPI=%d + tesseract_timeout=%ds is a known risky "
+                "combination. Expect to hit the auto-retry path. "
+                "Recommendation: use the 'quick_reliable' profile, or "
+                "raise tesseract_timeout to 300+ in the active profile.",
+                job_id, dpi, timeout,
+            )
 
     def _ensure_tesseract_configured(self) -> None:
         """Configure pytesseract if not already configured."""

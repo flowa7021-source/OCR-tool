@@ -212,7 +212,13 @@ def test_pipeline_failure_surface_as_job_result(tmp_path: Path) -> None:
 
 
 def test_pipeline_corrupt_pdf_surfaces_typed_error(tmp_path: Path) -> None:
-    """A corrupt input yields JobStatus.FAILED with CorruptPdfError text."""
+    """A corrupt input yields JobStatus.FAILED with CorruptPdfError text.
+
+    Stubs the engine so the NEW pre-flight stage doesn't reject the job
+    earlier on a CI runner without a system Tesseract install — the
+    test's purpose is to exercise the ``_analyze_pdf`` failure path, not
+    the engine-availability probe (which is covered in its own tests).
+    """
     bad = tmp_path / "broken.pdf"
     bad.write_bytes(b"this is not a PDF")
 
@@ -222,7 +228,8 @@ def test_pipeline_corrupt_pdf_surfaces_typed_error(tmp_path: Path) -> None:
         output_path=str(tmp_path / "out.pdf"),
         profile=_fast_profile(),
     )
-    result = pipeline.run(job)
+    with patch("src.application.engines.get_engine", return_value=_CopyEngine()):
+        result = pipeline.run(job)
     assert result.status is JobStatus.FAILED
     assert result.error is not None
     assert "повреждён" in result.error.lower() or "формат" in result.error.lower()

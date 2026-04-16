@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 BUILTIN_NAMES: tuple[str, ...] = (
     "universal_accurate",
     "default",
+    "quick_reliable",
     "low_quality_scan",
     "contracts_ru",
     "english_text",
@@ -147,6 +148,7 @@ class ProfileManager:
         builders = {
             "universal_accurate": self._build_universal_accurate,
             "default": self._build_default,
+            "quick_reliable": self._build_quick_reliable,
             "low_quality_scan": self._build_low_quality,
             "contracts_ru": self._build_contracts_ru,
             "english_text": self._build_english_text,
@@ -280,6 +282,80 @@ class ProfileManager:
         return ProfileData(
             name="default",
             description="Сбалансированные настройки по умолчанию (rus+eng, OTSU, CLAHE)",
+            preprocess=preprocess,
+            ocr=ocr,
+            postprocess=PostprocessConfig(),
+        )
+
+    def _build_quick_reliable(self) -> ProfileData:
+        """Low-risk fallback profile: gets OCR output even on hard cases.
+
+        Built for the user who just needs a *result* — not the highest
+        accuracy, not the fanciest engine, just a searchable PDF on
+        disk. Intentionally conservative on every axis where an
+        aggressive choice could fail or hang:
+
+          * **Tesseract**, never GOT-OCR 2.0 — the transformer path
+            depends on a ~580 MB optional model download; if any of its
+            ``trust_remote_code`` Python modules is missing the job
+            dies at load time.
+          * **300 DPI**, not 400 / 600 — at 600 DPI the ``universal_accurate``
+            profile hit ``tesseract_timeout`` on dense Russian contract
+            pages even with the auto-retry escalation.
+          * **OTSU** binarisation — single-threshold, deterministic,
+            fast; adaptive / Sauvola can produce artefacts that confuse
+            Tesseract's layout analysis (``pixClipBoxToForeground``
+            warnings in production logs).
+          * **Denoise OFF** — one less step that can fail. Text from
+            a modern scanner is already clean enough for Tesseract;
+            denoise mostly helps on photographed documents, which are
+            a different profile's job.
+          * **Dewarp / background removal OFF** — expensive and
+            optional; their payoff is on phone-camera pages, not flat
+            scans.
+          * **CLAHE contrast ON** — cheap, never hurts, helps on
+            uneven illumination.
+          * **tesseract_timeout=300** (matches the new default)
+            plus the auto-retry inside ``run_ocrmypdf`` gives two
+            chances per page, so even a slow page lands within the
+            same job.
+          * **Post-processing: everything enabled** — Russian +
+            English autocorrect, NFC, hyphen merge, artifact strip.
+            These are pure-Python and cannot fail the job.
+
+        Marketed as "use this when anything else breaks" — documented
+        explicitly in the profile description so UI users see it.
+        """
+        preprocess = PreprocessConfig(
+            deskew=DeskewConfig(enabled=True, auto_detect=True, max_angle=45.0),
+            dewarp=DewarpConfig(enabled=False),
+            binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
+            denoise=DenoiseConfig(enabled=False, steps=[]),
+            contrast=ContrastConfig(clahe_enabled=True, clahe_clip=2.0),
+            background=BackgroundConfig(enabled=False),
+        )
+        ocr = OCRConfig(
+            engine=OCREngineKind.TESSERACT,
+            languages=["rus", "eng"],
+            primary_language="rus",
+            psm=PSM.AUTO,
+            oem=OEM.LSTM_ONLY,
+            dpi=300,
+            confidence_threshold=50.0,
+            # Explicit 300s even though the constant default is already
+            # 300 — spelling it out future-proofs the profile against
+            # another default-constant tweak.
+            tesseract_timeout=300,
+            optimize_level=OptimizeLevel.LOSSLESS,
+            skip_text=True,
+        )
+        return ProfileData(
+            name="quick_reliable",
+            description=(
+                "Быстрый и надёжный. Рекомендуется, если другие профили "
+                "падают с ошибкой (таймаут, не хватает памяти). 300 DPI, "
+                "Tesseract, минимум шагов."
+            ),
             preprocess=preprocess,
             ocr=ocr,
             postprocess=PostprocessConfig(),

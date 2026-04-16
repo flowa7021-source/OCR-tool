@@ -486,8 +486,8 @@ def test_remove_artifacts_flag_drops_pure_punctuation_lines(tmp_path: Path) -> N
     "profile_name",
     # Skip universal_accurate (only built in code, no JSON in repo) and
     # handwritten_mixed (GOT-OCR2 engine — covered by the engine-dispatch
-    # test in test_e2e.py). The four below ship as JSON in /profiles/.
-    ["default", "low_quality_scan", "contracts_ru", "english_text"],
+    # test in test_e2e.py). The five below ship as JSON in /profiles/.
+    ["default", "quick_reliable", "low_quality_scan", "contracts_ru", "english_text"],
 )
 def test_bundled_builtin_profile_loads_and_runs_through_pipeline(
     profile_name: str, tmp_path: Path
@@ -534,3 +534,173 @@ def test_bundled_builtin_profile_loads_and_runs_through_pipeline(
     assert output_pdf.exists()
     assert result.page_count == 1
     assert stub.run_called == 1
+
+
+# ---------------------------------------------------------------------------
+# 4. quick_reliable profile contract
+# ---------------------------------------------------------------------------
+
+
+class TestQuickReliableProfile:
+    """The low-risk fallback profile must stay genuinely low-risk.
+
+    ``quick_reliable`` is the profile users are told to switch to when
+    ``universal_accurate`` fails. It MUST avoid every config choice that
+    was in any of the production failure logs:
+
+      * Tesseract engine (not GOT-OCR 2.0 — optional model, separate
+        install failure mode);
+      * DPI strictly below 600 (the DPI that produced the timeout-
+        then-graft-crash chain);
+      * tesseract_timeout at least 300s (matches the new default and
+        leaves headroom for the auto-retry);
+      * No dewarp / no background removal (heaviest optional steps).
+    """
+
+    def test_profile_loads_from_bundled_json(self, tmp_path: Path) -> None:
+        """The new profile ships as a JSON under /profiles/ so existing
+        user installs see it after upgrade without needing any code
+        migration."""
+        storage = ProfileStorage(profiles_dir=tmp_path / "user-profiles")
+        profile = storage.load("quick_reliable")
+        assert profile.name == "quick_reliable"
+        assert profile.builtin is True
+
+    def test_profile_uses_tesseract_not_got_ocr2(self, tmp_path: Path) -> None:
+        storage = ProfileStorage(profiles_dir=tmp_path / "user-profiles")
+        profile = storage.load("quick_reliable")
+        assert profile.ocr.engine is OCREngineKind.TESSERACT, (
+            "quick_reliable must use Tesseract — GOT-OCR 2.0 depends on "
+            "a separately-downloaded model, which is exactly the failure "
+            "mode this profile exists to route around."
+        )
+
+    def test_profile_uses_moderate_dpi_and_generous_timeout(
+        self, tmp_path: Path
+    ) -> None:
+        storage = ProfileStorage(profiles_dir=tmp_path / "user-profiles")
+        profile = storage.load("quick_reliable")
+        assert profile.ocr.dpi < 600, (
+            f"quick_reliable at DPI={profile.ocr.dpi} recreates the "
+            "600 DPI timeout failure mode it's meant to avoid."
+        )
+        assert profile.ocr.tesseract_timeout >= 300, (
+            f"quick_reliable at tesseract_timeout="
+            f"{profile.ocr.tesseract_timeout}s is tighter than the new "
+            "global default and leaves no room for the auto-retry."
+        )
+
+    def test_profile_disables_heavy_optional_steps(
+        self, tmp_path: Path
+    ) -> None:
+        """Dewarp + background removal are the slowest optional steps;
+        for a fallback profile we keep them off."""
+        storage = ProfileStorage(profiles_dir=tmp_path / "user-profiles")
+        profile = storage.load("quick_reliable")
+        assert profile.preprocess.dewarp.enabled is False
+        assert profile.preprocess.background.enabled is False
+
+
+# ---------------------------------------------------------------------------
+# 5. Pipeline preflight: fail fast when the engine is broken
+# ---------------------------------------------------------------------------
+
+
+class TestPipelinePreflight:
+    """The pipeline must refuse obviously-broken configurations BEFORE
+    doing any expensive work.
+
+    In a pre-fix build, a user with a stale GOT-OCR 2.0 model spent
+    ~25 seconds rasterising + preprocessing 4 pages before the engine
+    load finally crashed with ``OSError``. Preflight now calls
+    ``engine.is_available()`` up front — when False, the job returns
+    FAILED within roughly a second, so the user can fix the config
+    and re-run without waiting.
+    """
+
+    def _make_stub_unavailable_engine(self) -> OCREngine:
+        class _Unavailable(OCREngine):
+            kind = OCREngineKind.TESSERACT
+
+            @property
+            def name(self) -> str:
+                return "unavailable-stub"
+
+            @property
+            def description(self) -> str:
+                return "stub"
+
+            def is_available(self) -> tuple[bool, str]:
+                return False, (
+                    "Файлы модели GOT-OCR 2.0 устарели — "
+                    "откройте Настройки → Скачать модель."
+                )
+
+            def run(self, *a, **kw):  # pragma: no cover — preflight skips run
+                raise AssertionError(
+                    "run() must not be called when is_available() is False"
+                )
+
+        return _Unavailable()
+
+    def test_preflight_rejects_unavailable_engine_before_preprocess(
+        self, tmp_path: Path
+    ) -> None:
+        """FAILED + engine's is_available message surfaces verbatim, AND
+        ``engine.run()`` is never reached."""
+        input_pdf = _build_test_pdf(tmp_path / "input.pdf", page_count=2)
+        output_pdf = tmp_path / "out.pdf"
+
+        stub = self._make_stub_unavailable_engine()
+        with patch("src.application.engines.get_engine", return_value=stub):
+            result = _make_pipeline().run(
+                OCRJobConfig(
+                    input_path=str(input_pdf),
+                    output_path=str(output_pdf),
+                    profile=_profile(),
+                )
+            )
+
+        assert result.status is JobStatus.FAILED
+        assert result.error is not None
+        assert "Скачать модель" in result.error, (
+            f"engine.is_available() message should be preserved verbatim; "
+            f"got {result.error!r}"
+        )
+        # No output PDF produced — preflight stopped the job before the
+        # assemble stage.
+        assert not output_pdf.exists()
+
+    def test_preflight_progress_event_fires(self, tmp_path: Path) -> None:
+        """Before the first slow step, a ``preflight`` progress event
+        must arrive so the UI can move the bar off 0%."""
+        input_pdf = _build_test_pdf(tmp_path / "input.pdf", page_count=1)
+        output_pdf = tmp_path / "out.pdf"
+
+        events: list[tuple[int, int, str]] = []
+        stub = _CapturingEngine()
+        pipeline = OCRPipeline(
+            preprocessor=ImagePreprocessor(),
+            postprocessor=TextPostprocessor(),
+            tesseract=TesseractWrapper(),
+            progress_callback=lambda c, t, s: events.append((c, t, s)),
+            compute_confidence=False,
+        )
+        with patch("src.application.engines.get_engine", return_value=stub):
+            pipeline.run(
+                OCRJobConfig(
+                    input_path=str(input_pdf),
+                    output_path=str(output_pdf),
+                    profile=_profile(),
+                )
+            )
+
+        stages = [s for _, _, s in events]
+        assert "preflight" in stages, (
+            f"preflight must emit a progress event; saw stages={stages}"
+        )
+        # And it must be the FIRST stage so the UI shows responsiveness
+        # before the expensive analyze/preprocess stages run.
+        assert stages[0] == "preflight", (
+            f"preflight must be first stage; saw {stages}"
+        )

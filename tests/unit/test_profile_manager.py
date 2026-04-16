@@ -20,7 +20,12 @@ def test_initialize_builtins_creates_all(manager: ProfileManager) -> None:
     names = {p.name for p in manager.list_profiles()}
     for expected in BUILTIN_NAMES:
         assert expected in names
-    assert len(BUILTIN_NAMES) == 6
+    # Bumped from 6 → 7 when ``quick_reliable`` was added as the
+    # low-risk fallback profile. Each bump requires care: a profile
+    # that doesn't work everywhere (e.g. GOT-OCR 2.0 based) should NOT
+    # live in BUILTIN_NAMES because then initialize_builtins writes it
+    # to disk on every fresh install.
+    assert len(BUILTIN_NAMES) == 7
 
 
 def test_builtins_marked_builtin(manager: ProfileManager) -> None:
