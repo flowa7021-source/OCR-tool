@@ -86,9 +86,11 @@ class DewarpHandler:
             # Unicode-safe write — ``cv2.imwrite`` routes through fopen
             # and fails on non-ASCII Windows paths (e.g. cyrillic user
             # names). Encode with cv2 then write via Python's IO layer.
+            # NOTE: do NOT add a local ``import numpy as np`` in this
+            # block — Python would then treat ``np`` as function-local
+            # throughout, shadowing the module-level import used in the
+            # type-guard above and raising UnboundLocalError.
             try:
-                import numpy as np
-
                 ok, buf = cv2.imencode(".png", image)
                 if not ok or buf is None:
                     logger.warning(
@@ -108,10 +110,9 @@ class DewarpHandler:
                 logger.warning("page-dewarp не создал выходной файл — возвращаем оригинал")
                 return image
 
-            # Same Unicode concern for the read.
+            # Same Unicode concern for the read — use the module-level
+            # np import (see note above).
             try:
-                import numpy as np  # noqa: F811
-
                 raw = np.frombuffer(result_path.read_bytes(), dtype=np.uint8)
                 result = (
                     cv2.imdecode(raw, cv2.IMREAD_UNCHANGED) if raw.size else None
