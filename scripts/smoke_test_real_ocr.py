@@ -79,18 +79,39 @@ def _check_external_tools() -> tuple[bool, str]:
     except Exception as exc:  # noqa: BLE001
         return False, f"tessdata не найдена: {exc}"
 
-    if not (tessdata / "rus.traineddata").is_file():
+    # Smoke test only needs English (Latin) since we deliberately
+    # render an English phrase — see ``_render_sample_pdf``. We log a
+    # soft warning about missing rus.traineddata so the user knows
+    # real Russian contracts would need it, but don't fail the smoke.
+    if not (tessdata / "eng.traineddata").is_file():
         return False, (
-            f"tessdata найдена в {tessdata}, но нет rus.traineddata. "
-            "Скачайте rus.traineddata из "
+            f"tessdata найдена в {tessdata}, но нет eng.traineddata. "
+            "Скачайте eng.traineddata из "
             "https://github.com/tesseract-ocr/tessdata/ и положите в "
             "эту папку."
+        )
+    if not (tessdata / "rus.traineddata").is_file():
+        print(
+            "  ⚠ rus.traineddata отсутствует — smoke-test прогоняется "
+            "на английском. Для прогона CLI на реальном русском "
+            "договоре докачайте rus.traineddata."
         )
     return True, ""
 
 
-def _render_russian_sample_pdf(path: Path) -> None:
-    """Render a one-page image-only PDF with a known Cyrillic word.
+def _render_sample_pdf(path: Path) -> None:
+    """Render a one-page image-only PDF with a known English phrase.
+
+    We deliberately render **English**, not Russian: PyMuPDF's built-in
+    ``helv`` font is Latin-only and produces garbled glyphs for
+    Cyrillic — the test would fail for a reason unrelated to the OCR
+    pipeline we're actually validating. Real users' documents are
+    scanned image PDFs (raster text already in pixels), not rendered
+    text, so the font-coverage limitation doesn't apply there. This
+    smoke script stays with English to keep the test-harness simple
+    and cross-platform; Russian end-to-end is validated separately in
+    ``tests/integration/test_e2e_real_ocr.py`` when rus.traineddata
+    is installed.
 
     Uses the same two-step render-then-rasterise trick as
     ``tests/integration/test_e2e_real_ocr.py::_render_text_pdf``:
@@ -104,7 +125,8 @@ def _render_russian_sample_pdf(path: Path) -> None:
     try:
         page = txt_doc.new_page(width=612, height=792)
         page.insert_text(
-            (72, 200), "ПРИВЕТ\nOCR СТУДИЯ", fontsize=40, fontname="helv"
+            (72, 200), "HELLO WORLD OCR\nSMOKE TEST 2026",
+            fontsize=40, fontname="helv",
         )
         raw = txt_doc.tobytes()
     finally:
@@ -178,7 +200,7 @@ def _run_pipeline(
         return False, "COMPLETED но result.pages пуст", elapsed
 
     recognised = result.pages[0].text.upper()
-    expected_trigrams = ("ПРИ", "ИВЕ", "ВЕТ", "СТУ", "ДИЯ", "OCR")
+    expected_trigrams = ("HEL", "WOR", "OCR", "SMO", "TES", "202")
     if not any(tri in recognised for tri in expected_trigrams):
         return (
             False,
@@ -230,7 +252,7 @@ def main() -> int:
     output_pdf = work / "sample_ocr.pdf"
     try:
         print(f"\n[2/3] Генерация тестового PDF ({input_pdf.name})…")
-        _render_russian_sample_pdf(input_pdf)
+        _render_sample_pdf(input_pdf)
         print(f"  ✅ {input_pdf.stat().st_size} байт")
 
         # Stage 3: pipeline.

@@ -177,6 +177,28 @@ class TesseractWrapper:
         except TesseractNotFoundError:
             logger.debug("Binary missing while searching tessdata; continuing")
 
+        # Standard POSIX install locations. ``apt install tesseract-ocr``
+        # puts tessdata at ``/usr/share/tesseract-ocr/<ver>/tessdata``;
+        # Homebrew uses ``/opt/homebrew/share/tessdata`` (arm64) or
+        # ``/usr/local/share/tessdata`` (x86_64). Adding these means a
+        # dev checkout against a system Tesseract install works without
+        # manually exporting ``TESSDATA_PREFIX``. The directory layouts
+        # are stable across releases of each distro.
+        if sys.platform != "win32":
+            posix_roots = [
+                Path("/usr/share/tessdata"),
+                Path("/usr/local/share/tessdata"),
+                Path("/opt/homebrew/share/tessdata"),
+            ]
+            # /usr/share/tesseract-ocr/<major>/tessdata — Debian / Ubuntu.
+            # We probe a few likely major versions rather than globbing
+            # so this stays importable without touching the filesystem.
+            for major in ("5", "4.00", "4"):
+                posix_roots.append(
+                    Path(f"/usr/share/tesseract-ocr/{major}/tessdata")
+                )
+            candidates.extend(posix_roots)
+
         for candidate in candidates:
             if (
                 candidate.exists()

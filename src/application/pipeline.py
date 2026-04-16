@@ -249,7 +249,11 @@ class OCRPipeline:
                 job_id, preprocessed_pdf.name, len(png_paths),
             )
             t_stage = time.time()
-            self._assemble_pdf(png_paths, preprocessed_pdf)
+            self._assemble_pdf(
+                png_paths,
+                preprocessed_pdf,
+                dpi=int(getattr(job.profile.ocr, "dpi", 300) or 300),
+            )
             logger.info(
                 "Job %s stage=assemble done in %.2fs (preprocessed.pdf = %d bytes)",
                 job_id, time.time() - t_stage,
@@ -572,6 +576,17 @@ class OCRPipeline:
         caching outright (for users on tight disk budgets); any other
         value caps the total cache size at that many megabytes with
         LRU eviction.
+
+        We **refuse to cache a result where every page came back with
+        zero recognised characters** — that's almost always a broken
+        configuration (wrong DPI reporting, missing tessdata, a
+        corrupted preprocessed image) rather than a genuinely empty
+        document, and caching it poisons every subsequent attempt on
+        the same input: the cache short-circuits before we can fix
+        the root cause, the user re-runs and gets the same "empty"
+        output forever. Letting the empty result skip the cache means
+        a fix to the underlying problem immediately takes effect on
+        the next run.
         """
         try:
             from src.infrastructure import ocr_cache
@@ -584,6 +599,22 @@ class OCRPipeline:
             if cap_mb <= 0:
                 logger.debug("OCR cache disabled (max_mb=0) — skipping store")
                 return
+
+            # Refuse to cache a "recognized nothing" result. Every page
+            # with no text AND no confidence indicates a pipeline
+            # failure rather than a legitimately blank document.
+            if result.pages and all(
+                not (p.text or "").strip() and p.mean_confidence <= 0
+                for p in result.pages
+            ):
+                logger.warning(
+                    "Cache SKIPPED: every page is empty with zero "
+                    "confidence — treating as a broken run rather than "
+                    "a legitimate blank document. Not poisoning the "
+                    "cache for subsequent attempts on the same input."
+                )
+                return
+
             ocr_cache.store(
                 input_path,
                 profile,
@@ -736,14 +767,32 @@ class OCRPipeline:
             raise RuntimeError(f"Не удалось закодировать PNG: {path}")
         path.write_bytes(buf.tobytes())
 
-    def _assemble_pdf(self, png_paths: list[Path], output_pdf: Path) -> None:
+    def _assemble_pdf(
+        self, png_paths: list[Path], output_pdf: Path, *, dpi: int = 300
+    ) -> None:
         """Assemble a PDF from a list of PNGs (one page per image).
+
+        PDF page dimensions are stored in **points** (1/72 inch), not
+        pixels. A 300 DPI scan of an A4 page is ~2480x3508 pixels but
+        the page must be 595x842 points (A4 in points) so downstream
+        tooling — most importantly OCRmyPDF's rasterisation-for-Tesseract
+        step — infers the correct DPI. If we use the pixel dimensions
+        directly as points, the page claims to be 34×48 inches at
+        72 DPI, and Tesseract's layout analysis decides the text is
+        sub-glyph-size and silently recognises nothing.
+
+        Convert from pixels to points using the DPI that was used to
+        rasterise from the original PDF (``profile.ocr.dpi``).
 
         Args:
             png_paths: Ordered list of PNG files.
             output_pdf: Output PDF path.
+            dpi: Rasterisation DPI used in :meth:`_rasterize_page` —
+                determines the pixels→points conversion.
         """
         import fitz
+
+        dpi_factor = 72.0 / float(dpi)
 
         doc = fitz.open()
         try:
@@ -751,12 +800,23 @@ class OCRPipeline:
                 # Probe image dimensions via a temporary pixmap.
                 pix = fitz.Pixmap(str(png_path))
                 try:
-                    width = float(pix.width)
-                    height = float(pix.height)
+                    pixel_width = int(pix.width)
+                    pixel_height = int(pix.height)
                 finally:
                     pix = None  # noqa: F841 - release native resource
 
-                page = doc.new_page(width=width, height=height)
+                # Convert pixels → points so the embedded image is
+                # reported at the correct DPI. OCRmyPDF uses page
+                # dimensions + image dimensions to pick the DPI for
+                # Tesseract, and ~72 DPI was producing empty hOCR on
+                # synthetic English/Russian text because layout
+                # analysis ignored the glyphs.
+                page_width_points = pixel_width * dpi_factor
+                page_height_points = pixel_height * dpi_factor
+
+                page = doc.new_page(
+                    width=page_width_points, height=page_height_points
+                )
                 rect = page.rect
                 page.insert_image(rect, filename=str(png_path))
             output_pdf.parent.mkdir(parents=True, exist_ok=True)

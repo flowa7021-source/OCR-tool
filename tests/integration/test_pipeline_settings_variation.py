@@ -671,6 +671,153 @@ class TestPipelinePreflight:
         # assemble stage.
         assert not output_pdf.exists()
 
+    def test_assembled_pdf_has_correct_dpi_metadata(
+        self, tmp_path: Path
+    ) -> None:
+        """The intermediate ``preprocessed.pdf`` must declare its page
+        size in **points** derived from the rasterisation DPI, not in
+        pixels.
+
+        Regression: ``_assemble_pdf`` used to set
+        ``page = doc.new_page(width=pixel_width, height=pixel_height)``,
+        treating a 2550x3300 pixel image as a 2550x3300 *point* page
+        = 35×45 inches at 72 DPI. When OCRmyPDF rasterised that page
+        back for Tesseract it inferred 72 DPI from the page metadata
+        and Tesseract's layout analysis decided the glyphs were
+        sub-pixel-sized; the hOCR came back empty and the job
+        "completed" with zero text. This bug was invisible to every
+        mocked test in the suite and cost a full CI + installer
+        cycle to find. Guard the metadata shape directly so a
+        regression is caught in seconds.
+
+        Invariant: the preprocessed page dimensions in points must
+        approximately match the source PDF page dimensions (within
+        ~1%, allowing for rounding when rasterising + converting
+        pixels back to points).
+        """
+        input_pdf = _build_test_pdf(tmp_path / "input.pdf", page_count=1)
+        output_pdf = tmp_path / "out.pdf"
+
+        # Read the source page dimensions so the assertion is
+        # independent of what ``_build_test_pdf`` picks.
+        import fitz
+
+        with fitz.open(str(input_pdf)) as src:
+            src_rect = src.load_page(0).rect
+        expected_w = float(src_rect.width)
+        expected_h = float(src_rect.height)
+
+        captured_preprocessed_pdf: dict[str, bytes] = {}
+
+        class _CapturingEngineRecordsAssembled(_CapturingEngine):
+            def run(self, preprocessed_pdf, output_pdf, config, progress_callback=None):
+                captured_preprocessed_pdf["bytes"] = Path(preprocessed_pdf).read_bytes()
+                return super().run(preprocessed_pdf, output_pdf, config, progress_callback)
+
+        stub = _CapturingEngineRecordsAssembled()
+        profile = _profile()
+        profile.ocr.dpi = 300  # explicit so the pixels→points math is pinned
+        with patch("src.application.engines.get_engine", return_value=stub):
+            _make_pipeline().run(
+                OCRJobConfig(
+                    input_path=str(input_pdf),
+                    output_path=str(output_pdf),
+                    profile=profile,
+                )
+            )
+
+        with fitz.open(
+            stream=captured_preprocessed_pdf["bytes"], filetype="pdf"
+        ) as doc:
+            page = doc.load_page(0)
+            got_rect = page.rect
+            # Points-vs-points, not pixels-vs-pixels. 1% tolerance.
+            assert abs(got_rect.width - expected_w) < expected_w * 0.01, (
+                f"preprocessed page width {got_rect.width} pt drifted "
+                f"from source {expected_w} pt — _assemble_pdf is "
+                "mixing up pixels and points again"
+            )
+            assert abs(got_rect.height - expected_h) < expected_h * 0.01, (
+                f"preprocessed page height {got_rect.height} pt "
+                f"drifted from source {expected_h} pt"
+            )
+            # Sanity: the embedded image should still be present at
+            # pixel_dim = points * dpi / 72.
+            expected_px_w = int(expected_w * profile.ocr.dpi / 72)
+            images = page.get_images()
+            assert images, "preprocessed page has no embedded image"
+            xref = images[0][0]
+            img_info = doc.extract_image(xref)
+            # Tolerate ±10% on the pixel count (preprocessing may crop
+            # margins during deskew or autocontrast).
+            assert abs(img_info["width"] - expected_px_w) < expected_px_w * 0.1, (
+                f"embedded image width {img_info['width']} px is off "
+                f"from expected {expected_px_w} px (DPI={profile.ocr.dpi})"
+            )
+
+    def test_empty_text_result_is_not_cached(self, tmp_path: Path) -> None:
+        """A COMPLETED job where every page has zero text + zero
+        confidence must NOT be stored in the OCR cache. Otherwise a
+        transient pipeline breakage (wrong DPI, missing tessdata)
+        poisons every subsequent run on the same input with the same
+        empty output — fixing the root cause has no visible effect
+        because the cache keeps serving the broken result.
+        """
+        from src.application.engines.base import OCREngine, PageOCRResult
+
+        class _EmptyEngine(OCREngine):
+            kind = OCREngineKind.TESSERACT
+
+            @property
+            def name(self) -> str:
+                return "empty-stub"
+
+            @property
+            def description(self) -> str:
+                return "returns empty text, simulates broken OCR"
+
+            def is_available(self) -> tuple[bool, str]:
+                return True, ""
+
+            def run(self, preprocessed_pdf, output_pdf, config, progress_callback=None):
+                import shutil
+
+                output_pdf.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(preprocessed_pdf, output_pdf)
+                return [PageOCRResult(page_number=1, text="", mean_confidence=0.0)]
+
+        input_pdf = _build_test_pdf(tmp_path / "input.pdf", page_count=1)
+        output_pdf = tmp_path / "out.pdf"
+
+        # Spy on ocr_cache.store to confirm it was never invoked for
+        # an all-empty result.
+        store_calls: list[object] = []
+        from src.infrastructure import ocr_cache
+
+        real_store = ocr_cache.store
+
+        def spy_store(*a, **kw):
+            store_calls.append((a, kw))
+            return real_store(*a, **kw)
+
+        with patch.object(ocr_cache, "store", side_effect=spy_store), \
+             patch("src.application.engines.get_engine", return_value=_EmptyEngine()):
+            result = _make_pipeline().run(
+                OCRJobConfig(
+                    input_path=str(input_pdf),
+                    output_path=str(output_pdf),
+                    profile=_profile(),
+                )
+            )
+
+        assert result.status is JobStatus.COMPLETED  # didn't error
+        # But also: cache was NOT written.
+        assert store_calls == [], (
+            f"ocr_cache.store was invoked {len(store_calls)} time(s) "
+            "for an all-empty result — broken pipeline output would "
+            "poison the cache"
+        )
+
     def test_preflight_progress_event_fires(self, tmp_path: Path) -> None:
         """Before the first slow step, a ``preflight`` progress event
         must arrive so the UI can move the bar off 0%."""

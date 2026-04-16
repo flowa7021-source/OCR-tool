@@ -62,6 +62,31 @@ pytestmark = [
 ]
 
 
+_CYRILLIC_CAPABLE_FONTS: tuple[str, ...] = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",   # Ubuntu / Debian
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",               # Arch
+    "/Library/Fonts/Arial Unicode.ttf",                  # macOS
+    "C:/Windows/Fonts/arial.ttf",                        # Windows
+    "C:/Windows/Fonts/segoeui.ttf",                      # Windows fallback
+)
+
+
+def _find_cyrillic_font() -> Path | None:
+    """Return a system TTF path that supports Cyrillic, or None.
+
+    PyMuPDF's built-in ``helv`` is Latin-only — rendering ``ПРИВЕТ``
+    through it produces unreadable glyphs that Tesseract can't OCR,
+    masquerading as a pipeline bug. Tests that render Cyrillic text
+    should look up a system Cyrillic-capable TTF via this helper and
+    skip gracefully when none is available.
+    """
+    for candidate in _CYRILLIC_CAPABLE_FONTS:
+        p = Path(candidate)
+        if p.is_file():
+            return p
+    return None
+
+
 def _render_text_pdf(path: Path, text: str, page_count: int = 1) -> Path:
     """Render ``text`` into a rasterised PDF that Tesseract can OCR.
 
@@ -72,8 +97,23 @@ def _render_text_pdf(path: Path, text: str, page_count: int = 1) -> Path:
     image so there's no existing selectable text layer for OCRmyPDF
     to short-circuit on. This mimics what a user scanning a printed
     document would actually feed in.
+
+    When ``text`` contains non-ASCII characters (e.g. Cyrillic), the
+    built-in ``helv`` font produces unreadable glyphs. Auto-upgrade
+    to a system Cyrillic-capable TTF in that case. Pure-ASCII text
+    keeps the original ``helv`` path so the test works on minimal
+    systems without DejaVu etc.
     """
     import fitz
+
+    needs_unicode_font = any(ord(c) > 127 for c in text)
+    font_file = _find_cyrillic_font() if needs_unicode_font else None
+    if needs_unicode_font and font_file is None:
+        raise RuntimeError(
+            "Cyrillic/unicode text requested but no system Cyrillic font "
+            "found. Install fonts-dejavu-core (Linux) or use ASCII-only "
+            "text in the test."
+        )
 
     # Step 1: write a plain text PDF.
     txt_doc = fitz.open()
@@ -81,11 +121,18 @@ def _render_text_pdf(path: Path, text: str, page_count: int = 1) -> Path:
         for i in range(page_count):
             page = txt_doc.new_page(width=612, height=792)  # US Letter
             # Big font so 150 DPI rasterisation captures sharp glyphs.
+            kwargs: dict[str, object] = {
+                "fontsize": 40,
+            }
+            if font_file is not None:
+                kwargs["fontfile"] = str(font_file)
+                kwargs["fontname"] = "UserUnicode"
+            else:
+                kwargs["fontname"] = "helv"
             page.insert_text(
                 (72, 200),
                 f"{text}\nPage {i + 1}",
-                fontsize=40,
-                fontname="helv",
+                **kwargs,
             )
         raw = txt_doc.tobytes()
     finally:
@@ -502,6 +549,16 @@ class TestRealOCRWithRussianAutocorrect:
         tessdata = _tesseract_tessdata_dir()
         if tessdata is None or not (tessdata / "rus.traineddata").is_file():
             pytest.skip("rus.traineddata not found — install tesseract-ocr-rus")
+
+        # Same story for a Cyrillic-capable system font: without one,
+        # ``_render_text_pdf`` would draw garbled glyphs through the
+        # Latin-only ``helv``, not a pipeline bug. Skip cleanly on
+        # minimal CI images that don't carry DejaVu / Arial Unicode.
+        if _find_cyrillic_font() is None:
+            pytest.skip(
+                "No Cyrillic-capable system font found — install "
+                "fonts-dejavu-core or equivalent"
+            )
 
         reset_cache()
 
