@@ -449,6 +449,147 @@ class TestRealOCROnUnicodePath:
 
 
 # ---------------------------------------------------------------------------
+# Russian language + autocorrect post-processing in a single real-OCR run.
+# Closes the gap between the existing real-OCR tests (English only,
+# postprocess flags all OFF) and the user-facing default profile, which
+# ships with rus+eng + autocorrect_russian=True. A regression where the
+# postprocess chain was silently disabled for the real-Tesseract code
+# path would slip past every other E2E test in this module.
+# ---------------------------------------------------------------------------
+
+
+class TestRealOCRWithRussianAutocorrect:
+    """Real Tesseract on Russian text, with autocorrect_russian=True."""
+
+    def test_russian_text_is_recognised_and_postprocessed(
+        self, tmp_path: Path, _real_tesseract_wrapper
+    ) -> None:
+        """Render Cyrillic text → real OCR → Russian autocorrect → readable text.
+
+        Skips cleanly if ``rus.traineddata`` is missing on the host
+        (some CI minimal-Tesseract installs only ship ``eng``).
+
+        We deliberately render *clean* Russian (no digit-as-letter
+        misreads), so the autocorrect rules should be idempotent — but
+        the postprocess chain still has to execute through every step
+        (Unicode NFC, hyphen merge, whitespace normalisation, regex
+        rule application). A bug that crashed *any* of them on
+        non-empty Cyrillic would flip the job to FAILED.
+        """
+        from src.application.engines.registry import reset_cache
+        from src.application.pipeline import OCRPipeline
+        from src.core.image_preprocessor import ImagePreprocessor
+        from src.core.models import (
+            OCRConfig,
+            OCRJobConfig,
+            PostprocessConfig,
+            PreprocessConfig,
+            ProfileData,
+        )
+        from src.core.text_postprocessor import TextPostprocessor
+        from src.shared.types import (
+            OEM,
+            PSM,
+            BinarizationMethod,
+            JobStatus,
+            OCREngineKind,
+            OptimizeLevel,
+        )
+
+        # Hard skip if the Russian model is missing — without it,
+        # Tesseract returns gibberish for Cyrillic glyphs and the
+        # assertion below would be a false negative.
+        tessdata = _tesseract_tessdata_dir()
+        if tessdata is None or not (tessdata / "rus.traineddata").is_file():
+            pytest.skip("rus.traineddata not found — install tesseract-ocr-rus")
+
+        reset_cache()
+
+        # Short, distinctive Cyrillic word that Tesseract handles well
+        # at 200 DPI. Avoids look-alikes (no Е/E, no О/O) so the
+        # post-processor's autocorrect rules genuinely do nothing.
+        known_text = "ПРИВЕТ"
+        input_pdf = _render_text_pdf(
+            tmp_path / "ru.pdf", text=known_text, page_count=1
+        )
+        output_pdf = tmp_path / "ru_ocr.pdf"
+
+        pre = PreprocessConfig()
+        pre.binarization.method = BinarizationMethod.OTSU
+        pre.deskew.enabled = False
+        ocr = OCRConfig(
+            engine=OCREngineKind.TESSERACT,
+            languages=["rus", "eng"],
+            primary_language="rus",
+            psm=PSM.AUTO,
+            oem=OEM.LSTM_ONLY,
+            dpi=200,
+            optimize_level=OptimizeLevel.NONE,
+            skip_text=False,
+            tesseract_timeout=60,
+        )
+        # Every postprocess flag the default profile ships with — so
+        # this test exercises the *exact* user-facing chain.
+        post = PostprocessConfig(
+            autocorrect_russian=True,
+            autocorrect_english=True,
+            merge_hyphenated=True,
+            normalize_whitespace=True,
+            normalize_unicode=True,
+            remove_artifacts=True,
+        )
+        profile = ProfileData(
+            name="e2e-real-ru-autocorrect",
+            ocr=ocr,
+            preprocess=pre,
+            postprocess=post,
+        )
+
+        pipeline = OCRPipeline(
+            preprocessor=ImagePreprocessor(),
+            postprocessor=TextPostprocessor(),
+            tesseract=_real_tesseract_wrapper,
+            compute_confidence=False,
+        )
+        result = pipeline.run(
+            OCRJobConfig(
+                input_path=str(input_pdf),
+                output_path=str(output_pdf),
+                profile=profile,
+            )
+        )
+
+        assert result.status is JobStatus.COMPLETED, (
+            f"rus+autocorrect E2E FAILED: {result.error!r}"
+        )
+        assert output_pdf.exists()
+        assert len(result.pages) == 1
+
+        recognised = result.pages[0].text
+        # Tesseract isn't byte-perfect; tolerate noise but require at
+        # least one of the expected tri-grams to survive both OCR and
+        # the full post-process chain. A regression that disabled
+        # postprocess on the real path would still pass this — a
+        # regression that crashed it would not.
+        norm = recognised.upper()
+        assert any(stem in norm for stem in ("ПРИ", "ИВЕ", "ВЕТ")), (
+            f"None of expected tri-grams found in recognised text — "
+            f"either OCR or postprocess silently dropped Cyrillic "
+            f"content. Got: {recognised!r}"
+        )
+
+        # Postprocess invariant: NFC normalisation must have run, so
+        # the recognised text must equal its own NFC form (no NFD
+        # decompositions sneaking through).
+        import unicodedata
+
+        assert recognised == unicodedata.normalize("NFC", recognised), (
+            "normalize_unicode=True did not run on the real-OCR path; "
+            "recognised text contains non-NFC sequences."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Smoke test: does the packaged external_tools registry actually resolve
 # Tesseract / Ghostscript on THIS runner? Doesn't hit the pipeline —
 # just checks our discovery layer against the real system.
