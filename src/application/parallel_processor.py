@@ -602,13 +602,41 @@ class ParallelProcessor:
         q = self._progress_queue
         if q is None:
             return
+        # Counter for transient OSErrors (e.g., Windows Defender briefly
+        # locking the manager pipe). We keep draining across a handful
+        # of these — exiting the drain thread for good would silently
+        # freeze the progress bar for the rest of the session, since
+        # ``_start_progress_bridge`` only re-spawns the thread when the
+        # executor is rebuilt. True pipe death (``EOFError``) is still
+        # terminal because retry there just spins.
+        transient_os_errors = 0
         while not self._progress_stop.is_set():
             try:
                 event = q.get(timeout=0.25)
             except queue_mod.Empty:
+                transient_os_errors = 0
                 continue
-            except (EOFError, OSError):
+            except EOFError:
+                # Manager pipe closed — the Manager subprocess died or
+                # was shut down. No point retrying.
+                logger.info("progress bridge: queue EOF — drain thread exiting")
                 break
+            except OSError as exc:
+                transient_os_errors += 1
+                if transient_os_errors >= 10:
+                    logger.warning(
+                        "progress bridge: too many transient OSError "
+                        "from queue.get (%d); giving up: %s",
+                        transient_os_errors, exc,
+                    )
+                    break
+                logger.debug(
+                    "progress bridge: transient OSError (#%d), "
+                    "continuing: %s",
+                    transient_os_errors, exc,
+                )
+                continue
+            transient_os_errors = 0
             if not event:
                 continue
             try:
@@ -696,6 +724,11 @@ class ParallelProcessor:
         # up a fresh pool the second time around.
         from concurrent.futures.process import BrokenProcessPool
 
+        def _drop_listener() -> None:
+            """Remove the listener we pre-registered on line above."""
+            with self._progress_lock:
+                self._progress_listeners.pop(tracking_id, None)
+
         try:
             future = executor.submit(
                 _worker_run_job, job_to_dict(job), self._progress_queue, tracking_id
@@ -710,10 +743,29 @@ class ParallelProcessor:
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("Broken-pool shutdown raised: %s", exc)
                 self._executor = None
-            executor = self._ensure_executor()
-            future = executor.submit(
-                _worker_run_job, job_to_dict(job), self._progress_queue, tracking_id
-            )
+            try:
+                executor = self._ensure_executor()
+                future = executor.submit(
+                    _worker_run_job,
+                    job_to_dict(job),
+                    self._progress_queue,
+                    tracking_id,
+                )
+            except BaseException:
+                # Retry also failed (broken pool on fresh rebuild, or an
+                # unrelated exception). Drop the listener we registered
+                # above before propagating — otherwise it leaks in the
+                # ``_progress_listeners`` dict forever, since no
+                # ``_done`` callback will ever fire to clean it up.
+                _drop_listener()
+                raise
+        except BaseException:
+            # Non-BrokenProcessPool submit failure (e.g. pickling error
+            # for an OCRJobConfig with an exotic field). Same leak
+            # hazard — drop the pre-registered listener before the
+            # exception propagates to the caller.
+            _drop_listener()
+            raise
 
         with self._progress_lock:
             self._futures[exposed_id] = future

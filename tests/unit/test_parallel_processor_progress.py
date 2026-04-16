@@ -268,3 +268,149 @@ def _patch_method(instance, name, value):
         yield
     finally:
         setattr(instance, name, original)
+
+
+# ---------------------------------------------------------------------------
+# Regression: drain thread must survive transient OSErrors
+# ---------------------------------------------------------------------------
+
+
+def test_drain_thread_survives_transient_oserror() -> None:
+    """Windows Defender briefly locks the Manager pipe → OSError from
+    ``queue.get``. The previous code broke out of the drain loop on the
+    first such error, silently freezing the progress bar for the rest
+    of the session because the loop only gets re-spawned when the
+    executor is rebuilt. Confirm that a one-off OSError is tolerated
+    and events after it are still dispatched.
+    """
+    pp = ParallelProcessor(max_workers=1)
+    pp._start_progress_bridge()  # type: ignore[attr-defined]
+    assert pp._progress_queue is not None
+
+    events: list[tuple[int, int, str]] = []
+
+    with pp._progress_lock:  # type: ignore[attr-defined]
+        pp._progress_listeners["tid"] = (  # type: ignore[attr-defined]
+            lambda jid, c, t, s: events.append((c, t, s)),
+            "jid",
+        )
+
+    # Monkey-patch the queue's ``get`` to throw one OSError, then
+    # behave normally. We leave the OSError as the FIRST result and
+    # ensure subsequent calls return the real events.
+    original_get = pp._progress_queue.get  # type: ignore[attr-defined]
+    injected: list[bool] = [False]
+
+    def flaky_get(*args, **kwargs):
+        if not injected[0]:
+            injected[0] = True
+            raise OSError("simulated antivirus transient lock on pipe")
+        return original_get(*args, **kwargs)
+
+    pp._progress_queue.get = flaky_get  # type: ignore[attr-defined,assignment]
+
+    pp._progress_queue.put(("tid", 1, 1, "ocr"))
+
+    deadline = time.time() + 3.0
+    while not events and time.time() < deadline:
+        time.sleep(0.05)
+
+    pp.shutdown(wait=False)
+
+    assert injected[0], "flaky_get was never invoked — test is defective"
+    assert events == [(1, 1, "ocr")], (
+        f"Event lost after transient OSError — drain thread died "
+        f"prematurely. Got: {events!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Regression: listener dict must not leak when submit fails
+# ---------------------------------------------------------------------------
+
+
+def test_listener_dropped_when_broken_pool_retry_also_fails() -> None:
+    """If the first submit raises BrokenProcessPool AND the retry
+    submit also raises (say, another BrokenProcessPool on the fresh
+    pool, or a pickling error), the listener we pre-registered must
+    be cleaned up. Otherwise it accumulates in ``_progress_listeners``
+    for every failed submit, a slow memory leak over long sessions.
+    """
+    from concurrent.futures.process import BrokenProcessPool
+    from unittest.mock import MagicMock
+
+    from src.core.models import OCRJobConfig, ProfileData
+
+    pp = ParallelProcessor(max_workers=1)
+
+    class _AlwaysBrokenExecutor:
+        def submit(self, *_a, **_kw):
+            raise BrokenProcessPool("worker died")
+
+        def shutdown(self, *_a, **_kw):
+            pass
+
+    def _fake_ensure():
+        pp._executor = _AlwaysBrokenExecutor()  # type: ignore[attr-defined]
+        return pp._executor  # type: ignore[attr-defined]
+
+    pp._ensure_executor = _fake_ensure  # type: ignore[assignment]
+    pp._start_progress_bridge = lambda: None  # type: ignore[assignment]
+
+    job = OCRJobConfig(
+        input_path="x.pdf",
+        output_path="y.pdf",
+        profile=ProfileData(name="test"),
+    )
+
+    import pytest
+
+    # Both attempts raise → exception propagates.
+    with pytest.raises(BrokenProcessPool):
+        pp.submit(job, on_progress=MagicMock(), on_complete=MagicMock())
+
+    # Listener must NOT still be dangling in the dict.
+    with pp._progress_lock:  # type: ignore[attr-defined]
+        dangling = dict(pp._progress_listeners)  # type: ignore[attr-defined]
+    assert dangling == {}, (
+        f"listener leaked after double-failed submit: {dangling!r}"
+    )
+
+
+def test_listener_dropped_when_initial_submit_raises_unrelated_error() -> None:
+    """Non-BrokenProcessPool failures (e.g., pickle error on a weird
+    job argument) also must not leak the listener."""
+    from unittest.mock import MagicMock
+
+    from src.core.models import OCRJobConfig, ProfileData
+
+    pp = ParallelProcessor(max_workers=1)
+
+    class _PickleFailingExecutor:
+        def submit(self, *_a, **_kw):
+            raise RuntimeError("cannot pickle custom object")
+
+        def shutdown(self, *_a, **_kw):
+            pass
+
+    def _fake_ensure():
+        pp._executor = _PickleFailingExecutor()  # type: ignore[attr-defined]
+        return pp._executor  # type: ignore[attr-defined]
+
+    pp._ensure_executor = _fake_ensure  # type: ignore[assignment]
+    pp._start_progress_bridge = lambda: None  # type: ignore[assignment]
+
+    job = OCRJobConfig(
+        input_path="x.pdf",
+        output_path="y.pdf",
+        profile=ProfileData(name="test"),
+    )
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="cannot pickle"):
+        pp.submit(job, on_progress=MagicMock(), on_complete=MagicMock())
+
+    with pp._progress_lock:  # type: ignore[attr-defined]
+        dangling = dict(pp._progress_listeners)  # type: ignore[attr-defined]
+    assert dangling == {}

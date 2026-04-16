@@ -383,6 +383,16 @@ def _coerce_enums(value: Any) -> Any:
     return value
 
 
+# Sentinel returned by ``_convert_value`` when the raw JSON value was
+# present but could not be interpreted as the target type (unknown enum
+# member, legacy shape, etc.). The caller drops the key from ``kwargs``
+# so the dataclass field keeps its own default — equivalent to the JSON
+# never having mentioned the field. Using an object() instead of None
+# matters because ``None`` is a legitimate value for ``Optional`` fields
+# and conflating the two would silently reset unrelated data.
+_USE_DATACLASS_DEFAULT: Any = object()
+
+
 def _dict_to_dataclass(cls: type, data: dict[str, Any]) -> Any:
     """Reconstruct a dataclass (possibly nested) from a dict.
 
@@ -403,7 +413,14 @@ def _dict_to_dataclass(cls: type, data: dict[str, Any]) -> Any:
             continue
         raw_value = data[name]
         field_type = type_hints.get(name, f.type)
-        kwargs[name] = _convert_value(raw_value, field_type)
+        converted = _convert_value(raw_value, field_type)
+        if converted is _USE_DATACLASS_DEFAULT:
+            # The stored value was uninterpretable (e.g. enum member
+            # removed in a schema change). Skip the kwarg so the
+            # dataclass falls back to its default value instead of
+            # blowing up on construction.
+            continue
+        kwargs[name] = converted
     return cls(**kwargs)
 
 
@@ -411,6 +428,7 @@ def _convert_value(value: Any, target_type: Any) -> Any:
     """Convert a raw JSON value to the target type (dataclass, Enum, or primitive)."""
     import dataclasses
     import enum
+    import logging as _logging
     import typing
 
     if value is None:
@@ -431,12 +449,28 @@ def _convert_value(value: Any, target_type: Any) -> Any:
             return _convert_value(value, non_none[0])
         return value
 
-    # Enum
-    try:
-        if isinstance(target_type, type) and issubclass(target_type, enum.Enum):
+    # Enum. Catch BOTH TypeError (passed a non-hashable) and ValueError
+    # (value is hashable but not a member of the enum). A stored profile
+    # that references an enum member the current build no longer knows —
+    # for example, a downgraded binary or a hand-edited JSON with
+    # ``"engine": "got_ocr3"`` — would otherwise raise and leave the
+    # entire profile unloadable, dragging every user-saved config with
+    # it. Falling back to ``None`` lets the surrounding
+    # :class:`dataclasses` default kick in (e.g. ``OCRConfig.engine``
+    # reverts to ``OCREngineKind.TESSERACT``), which is the behaviour a
+    # user expects from "my one odd field got reset" rather than "my
+    # whole profile is gone".
+    if isinstance(target_type, type) and issubclass(target_type, enum.Enum):
+        try:
             return target_type(value)
-    except TypeError:
-        pass
+        except (TypeError, ValueError):
+            _logging.getLogger(__name__).warning(
+                "Unknown %s value %r in profile JSON; falling back to "
+                "dataclass default",
+                getattr(target_type, "__name__", target_type),
+                value,
+            )
+            return _USE_DATACLASS_DEFAULT
 
     # Nested dataclass
     if dataclasses.is_dataclass(target_type) and isinstance(value, dict):
