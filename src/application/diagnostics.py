@@ -188,6 +188,17 @@ def build_diagnostics_zip(
             if blob is not None:
                 zf.writestr(f"logs/{candidate.name}", blob)
 
+        # Per-worker diagnostic logs (detailed pipeline trace written by
+        # each ProcessPoolExecutor worker) + native-crash dumps produced
+        # by faulthandler. These are the single most useful artefact when
+        # diagnosing "OCR didn't produce any output" because the host's
+        # ocr-studio.log can't see inside the worker processes.
+        for pattern in ("worker-*.log", "worker-crash-*.log"):
+            for candidate in sorted(log_file.parent.glob(pattern)):
+                blob = _safe_read(candidate)
+                if blob is not None:
+                    zf.writestr(f"logs/{candidate.name}", blob)
+
         # A short README so recipients know what's in here and what
         # deliberately isn't (user PDFs + profiles).
         readme = io.BytesIO()
@@ -200,7 +211,9 @@ def build_diagnostics_zip(
                 "  environment.json   — Python / OS / package versions,\n"
                 "                        Tesseract + GOT-OCR 2.0 availability\n"
                 "  settings.json      — application preferences\n"
-                "  logs/*.log*        — rotating application log + backups\n\n"
+                "  logs/*.log*        — rotating application log + backups\n"
+                "  logs/worker-*.log  — per-worker pipeline trace (PID-keyed)\n"
+                "  logs/worker-crash* — native-crash dumps (faulthandler)\n\n"
                 "NOT included (for privacy):\n"
                 "  * Input PDFs and OCR results\n"
                 "  * User profiles (custom regex rules may be sensitive)\n"

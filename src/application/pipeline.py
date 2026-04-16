@@ -148,24 +148,19 @@ class OCRPipeline:
 
         workdir: Path | None = None
         try:
+            logger.info("Job %s stage=init: configuring Tesseract", job_id)
             self._ensure_tesseract_configured()
 
             workdir = create_temp_workdir(prefix="ocrjob_")
-            logger.debug("Workdir for job %s: %s", job_id, workdir)
+            logger.info("Job %s workdir: %s", job_id, workdir)
 
             # 1. Analyze
+            logger.info("Job %s stage=analyze: opening PDF", job_id)
+            t_stage = time.time()
             page_infos = self._analyze_pdf(input_path)
             full_page_count = len(page_infos)
-            # Preview mode: truncate to the first N pages when the
-            # user asked for it, so running a trial profile on a huge
-            # PDF is measured in seconds rather than hours.
             max_pages = int(getattr(job.profile.ocr, "max_pages", 0) or 0)
             if max_pages > 0 and full_page_count > max_pages:
-                # WARNING, not INFO: this is the only signal CLI users get
-                # that a 500-page scan is being silently truncated to
-                # `max_pages`. The GUI also shows a preflight QMessageBox,
-                # but the CLI defaults to logging.WARNING and silent data
-                # loss is worse than a little extra noise.
                 logger.warning(
                     "Job %s: preview mode — processing first %d of %d pages "
                     "(profile has max_pages=%d). Set max_pages=0 in the "
@@ -175,25 +170,29 @@ class OCRPipeline:
                 page_infos = page_infos[:max_pages]
             total_pages = len(page_infos)
             logger.info(
-                "Job %s: %d page(s) to process (document has %d)",
-                job_id, total_pages, full_page_count,
+                "Job %s stage=analyze done in %.2fs: %d page(s) to process "
+                "(document has %d total)",
+                job_id, time.time() - t_stage, total_pages, full_page_count,
             )
             self._report(0, total_pages, "analyze")
 
             # 2. Preprocess pages -> PNGs (parallel across pages).
-            # PyMuPDF releases the GIL during `get_pixmap`, and our
-            # preprocessor is stateless — so threading the per-page work
-            # gives a ~3-4× speedup on multicore hardware for the
-            # otherwise-sequential rasterise+preprocess bottleneck.
-            #
-            # Each worker opens its own `fitz.Document` (see
-            # ``_rasterize_page``), so there's no shared mutable state.
-            # Results go into pre-allocated slots to preserve page order.
+            logger.info(
+                "Job %s stage=preprocess: rasterising + cleaning %d page(s) "
+                "at %d DPI",
+                job_id, total_pages,
+                int(getattr(job.profile.ocr, "dpi", 300)),
+            )
+            t_stage = time.time()
             page_results, png_paths = self._preprocess_pages_parallel(
                 input_path=input_path,
                 workdir=workdir,
                 page_count=total_pages,
                 profile=job.profile,
+            )
+            logger.info(
+                "Job %s stage=preprocess done in %.2fs: %d/%d page(s) ready",
+                job_id, time.time() - t_stage, len(png_paths), total_pages,
             )
 
             if not png_paths:
@@ -201,7 +200,17 @@ class OCRPipeline:
 
             # 3. Assemble preprocessed PDF
             preprocessed_pdf = workdir / "preprocessed.pdf"
+            logger.info(
+                "Job %s stage=assemble: building %s from %d PNG(s)",
+                job_id, preprocessed_pdf.name, len(png_paths),
+            )
+            t_stage = time.time()
             self._assemble_pdf(png_paths, preprocessed_pdf)
+            logger.info(
+                "Job %s stage=assemble done in %.2fs (preprocessed.pdf = %d bytes)",
+                job_id, time.time() - t_stage,
+                preprocessed_pdf.stat().st_size if preprocessed_pdf.exists() else -1,
+            )
             self._report(total_pages, total_pages, "assemble")
 
             # 4. OCR — dispatch to the engine selected by profile.ocr.engine.
@@ -209,14 +218,23 @@ class OCRPipeline:
             from src.application.engines.base import EngineNotAvailableError
 
             output_path.parent.mkdir(parents=True, exist_ok=True)
+            engine_kind = job.profile.ocr.engine
+            logger.info(
+                "Job %s stage=ocr: engine=%s lang=%s psm=%s oem=%s optimize=%s",
+                job_id, engine_kind,
+                job.profile.ocr.tesseract_language_string,
+                job.profile.ocr.psm,
+                job.profile.ocr.oem,
+                job.profile.ocr.optimize_level,
+            )
+            t_stage = time.time()
             try:
-                engine = get_engine(job.profile.ocr.engine)
+                engine = get_engine(engine_kind)
                 engine_results = engine.run(
                     preprocessed_pdf=preprocessed_pdf,
                     output_pdf=output_path,
                     config=job.profile.ocr,
                     progress_callback=lambda c, t, s: self._report(
-                        # Keep page-level progress monotonic across stages.
                         total_pages * c // max(1, t), total_pages, s
                     ),
                 )
@@ -225,12 +243,17 @@ class OCRPipeline:
                 result.error = str(exc)
                 result.pages = page_results
                 result.total_time_sec = time.time() - started
-                logger.error("Job %s failed during OCR engine: %s", job_id, exc)
+                logger.error(
+                    "Job %s stage=ocr FAILED after %.2fs: %s",
+                    job_id, time.time() - t_stage, exc, exc_info=True,
+                )
                 return result
+            logger.info(
+                "Job %s stage=ocr done in %.2fs; output %s (%d bytes)",
+                job_id, time.time() - t_stage, output_path.name,
+                output_path.stat().st_size if output_path.exists() else -1,
+            )
 
-            # Engines may pre-populate text/word_boxes (e.g. GOT-OCR2);
-            # for Tesseract these stubs stay empty and step 5 fills them
-            # by reading the produced searchable PDF.
             if engine_results:
                 for stub, page_result in zip(
                     engine_results, page_results, strict=False
@@ -242,8 +265,18 @@ class OCRPipeline:
             self._report(total_pages, total_pages, "ocr")
 
             # 5. Extract per-page text, postprocess
+            logger.info(
+                "Job %s stage=postprocess: extracting text + applying "
+                "post-filters to %d page(s)",
+                job_id, len(page_results),
+            )
+            t_stage = time.time()
             self._extract_and_postprocess(
                 output_path, page_results, job, png_paths
+            )
+            logger.info(
+                "Job %s stage=postprocess done in %.2fs",
+                job_id, time.time() - t_stage,
             )
             self._report(total_pages, total_pages, "postprocess")
 
@@ -251,24 +284,26 @@ class OCRPipeline:
             result.status = JobStatus.COMPLETED
             result.total_time_sec = time.time() - started
             logger.info(
-                "Job %s completed in %.2fs (avg conf=%.1f)",
+                "Job %s COMPLETED in %.2fs (avg conf=%.1f, pages=%d, out=%s)",
                 job_id,
                 result.total_time_sec,
                 result.average_confidence,
+                len(result.pages),
+                output_path,
             )
-            # Persist the successful run so a re-invocation with the
-            # same input+profile skips the whole pipeline.
             self._try_cache_store(input_path, job.profile, output_path, result)
             return result
 
         except (CorruptPdfError, EncryptedPdfError, EmptyPdfError) as exc:
-            logger.warning("Job %s aborted: %s", job_id, exc)
+            logger.warning(
+                "Job %s aborted (typed PDF error): %s", job_id, exc
+            )
             result.status = JobStatus.FAILED
             result.error = str(exc)
             result.total_time_sec = time.time() - started
             return result
         except Exception as exc:  # noqa: BLE001 - top-level failure
-            logger.exception("Job %s failed", job_id)
+            logger.exception("Job %s FAILED with unexpected error", job_id)
             result.status = JobStatus.FAILED
             result.error = str(exc)
             result.total_time_sec = time.time() - started

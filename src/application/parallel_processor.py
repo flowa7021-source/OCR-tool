@@ -131,6 +131,112 @@ def _prewarm_worker() -> str:
     return "ready"
 
 
+def _resolve_logs_dir() -> str | None:
+    """Return the path where worker log files should land.
+
+    Matches ``src/shared/constants.LOGS_DIR`` without importing it — that
+    module pulls in constants which pull in enum / dataclass machinery,
+    making the early-worker setup heavier than necessary. If neither
+    ``OCRSTUDIO_LOGS_DIR`` nor ``LOCALAPPDATA`` / ``APPDATA`` are set
+    (very unusual), returns None and the caller silently skips file
+    logging.
+    """
+    import os
+
+    explicit = os.environ.get("OCRSTUDIO_LOGS_DIR")
+    if explicit:
+        return explicit
+    appdata = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+    if appdata:
+        return os.path.join(appdata, "OCRStudio", "logs")
+    return None
+
+
+def _setup_worker_logging() -> logging.Logger:
+    """Configure per-worker logging to a file inside the app's logs dir.
+
+    PyInstaller ``--windowed`` builds redirect stderr to ``NUL`` on
+    Windows, so the default ``StreamHandler`` attached by the previous
+    version of this function wrote into a black hole. That left us
+    with no trace of what the worker actually did — every failure
+    surfaced to the host as a bare ``BrokenProcessPool``.
+
+    File logging is the only channel that survives a ``--windowed``
+    build. We write one file per worker process (``worker-<pid>.log``)
+    alongside the host's ``ocr-studio.log``, keyed by PID so parallel
+    workers don't step on each other.
+
+    Level is controlled by ``OCRSTUDIO_LOG_LEVEL`` (default INFO). Set
+    to ``DEBUG`` when diagnosing an issue to capture per-page timings.
+    """
+    import os
+
+    level_name = os.environ.get("OCRSTUDIO_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    root = logging.getLogger()
+    # Fresh subprocess should have no handlers; clear defensively so repeated
+    # fork/spawn inside tests doesn't stack them.
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    root.setLevel(level)
+
+    fmt = logging.Formatter(
+        "%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d | %(message)s"
+    )
+
+    # Keep the stream handler as a fallback — useful when running under
+    # `python -m` where stderr is live. Harmless under --windowed.
+    try:
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        root.addHandler(sh)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # File handler — primary diagnostic channel.
+    logs_dir = _resolve_logs_dir()
+    if logs_dir:
+        try:
+            os.makedirs(logs_dir, exist_ok=True)
+            log_path = os.path.join(logs_dir, f"worker-{os.getpid()}.log")
+            fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+            fh.setFormatter(fmt)
+            root.addHandler(fh)
+        except Exception as exc:  # noqa: BLE001
+            # Can't log the failure to file (we just failed to open it),
+            # but stderr may still work in dev builds.
+            logging.getLogger(__name__).warning(
+                "Could not open worker log file: %s", exc
+            )
+
+    return logging.getLogger(__name__ + ".worker")
+
+
+def _enable_worker_faulthandler(worker_logger: logging.Logger) -> None:
+    """Install ``faulthandler`` so native crashes leave a readable trace.
+
+    Without this a segfault inside OCRmyPDF / PyMuPDF / Tesseract kills
+    the worker process with no Python traceback at all. ``faulthandler``
+    registers a signal handler that dumps all thread stacks when a
+    fatal signal fires (SIGSEGV, SIGFPE, SIGABRT, SIGILL on Windows).
+    """
+    try:
+        import faulthandler
+        import os
+
+        logs_dir = _resolve_logs_dir()
+        if not logs_dir:
+            return
+        os.makedirs(logs_dir, exist_ok=True)
+        crash_path = os.path.join(logs_dir, f"worker-crash-{os.getpid()}.log")
+        crash_file = open(crash_path, "w", encoding="utf-8")  # noqa: SIM115
+        faulthandler.enable(crash_file)
+        worker_logger.debug("faulthandler enabled, crash log at %s", crash_path)
+    except Exception as exc:  # noqa: BLE001
+        worker_logger.debug("Could not enable faulthandler: %s", exc)
+
+
 def _worker_run_job(
     job_dict: dict[str, Any],
     progress_queue: multiprocessing.Queue | None = None,
@@ -151,82 +257,89 @@ def _worker_run_job(
     Returns:
         Dict produced by :func:`job_result_to_dict`.
     """
-    # Set up logging inside the worker — root logger has no handlers in fresh
-    # processes. We keep this minimal; the host app can reconfigure as needed.
-    root = logging.getLogger()
-    if not root.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-        )
-        root.addHandler(handler)
-        root.setLevel(logging.INFO)
+    import os
+    import time
 
-    # Dump native-level tracebacks on access violation / segfault. Without
-    # this, a crash inside OCRmyPDF / PyMuPDF / Tesseract surfaces to the
-    # host as a bare ``BrokenProcessPool`` with no indication which C
-    # library died. ``faulthandler`` writes to a per-process log file in
-    # the user's AppData/logs so the traceback survives the crash. The
-    # host-side logger is a different process, so we can't share a
-    # handler — a file is the only robust channel.
-    try:
-        import faulthandler as _fh
-        import os as _os
+    worker_logger = _setup_worker_logging()
+    _enable_worker_faulthandler(worker_logger)
 
-        logs_dir = _os.environ.get("OCRSTUDIO_LOGS_DIR")
-        if not logs_dir:
-            # Windows AppData fallback — matches src/shared/constants.LOGS_DIR
-            # without importing it (avoids a circular import at worker start).
-            appdata = _os.environ.get("LOCALAPPDATA") or _os.environ.get("APPDATA")
-            if appdata:
-                logs_dir = _os.path.join(appdata, "OCRStudio", "logs")
-        if logs_dir:
-            _os.makedirs(logs_dir, exist_ok=True)
-            crash_path = _os.path.join(
-                logs_dir, f"worker-crash-{_os.getpid()}.log"
-            )
-            _fh_file = open(crash_path, "w", encoding="utf-8")  # noqa: SIM115
-            _fh.enable(_fh_file)
-    except Exception:  # noqa: BLE001
-        # faulthandler is best-effort diagnostics; never block the job.
-        pass
+    pid = os.getpid()
+    input_path = job_dict.get("input_path", "?")
+    output_path = job_dict.get("output_path", "?")
 
-    worker_logger = logging.getLogger(__name__ + ".worker")
+    worker_logger.info("=" * 72)
+    worker_logger.info(
+        "Worker PID=%d picked up job: input=%s  output=%s",
+        pid, input_path, output_path,
+    )
+    worker_logger.info("tracking_id=%s", tracking_id)
+
+    # Track the current stage so a mid-pipeline exception can name it.
+    current_stage = "startup"
 
     try:
-        # Local imports keep top-level module lightweight for pickling.
+        current_stage = "imports"
+        worker_logger.info("[1/6] Importing pipeline modules…")
+        t_imports = time.time()
         from src.application.pipeline import OCRPipeline
         from src.core.image_preprocessor import ImagePreprocessor
         from src.core.text_postprocessor import TextPostprocessor
         from src.infrastructure.tesseract_wrapper import TesseractWrapper
 
-        job = job_from_dict(job_dict)
-        worker_logger.info("Worker picked up job for %s", job.input_path)
+        worker_logger.info(
+            "[1/6] Imports OK in %.2fs", time.time() - t_imports
+        )
 
+        current_stage = "deserialize_job"
+        job = job_from_dict(job_dict)
+        worker_logger.info(
+            "[2/6] Job deserialized: profile=%s engine=%s dpi=%s langs=%s",
+            job.profile.name,
+            getattr(job.profile.ocr, "engine", "?"),
+            getattr(job.profile.ocr, "dpi", "?"),
+            getattr(job.profile.ocr, "tesseract_language_string", "?"),
+        )
+
+        current_stage = "configure_tesseract"
+        worker_logger.info("[3/6] Configuring Tesseract…")
         tess = TesseractWrapper()
         try:
             tess.configure_pytesseract()
+            worker_logger.info(
+                "[3/6] Tesseract OK: bin=%s tessdata=%s",
+                getattr(tess, "_binary_path", "?"),
+                getattr(tess, "_tessdata_path", "?"),
+            )
         except Exception as exc:  # noqa: BLE001
-            worker_logger.warning("configure_pytesseract failed: %s", exc)
+            worker_logger.warning(
+                "[3/6] configure_pytesseract failed: %s", exc, exc_info=True
+            )
 
+        current_stage = "build_pipeline"
+        worker_logger.info("[4/6] Building pipeline (preprocess + postprocess)…")
         preprocessor = ImagePreprocessor()
         postprocessor = TextPostprocessor()
 
         def _progress(current: int, total: int, stage: str) -> None:
+            # Fan out to the host bridge AND log locally so we have a
+            # per-stage timeline even if the host never receives the event.
+            worker_logger.info(
+                "progress: stage=%s  %d / %d", stage, current, total
+            )
             if progress_queue is None:
                 return
-            # Queue full or closed — don't let progress reporting crash the job
             with contextlib.suppress(Exception):
-                progress_queue.put_nowait((tracking_id, int(current), int(total), str(stage)))
+                progress_queue.put_nowait(
+                    (tracking_id, int(current), int(total), str(stage))
+                )
 
-        # Read autosave setting (best-effort; defaults to 0 if unavailable).
         autosave_interval = 0
         try:
             from src.infrastructure.config_storage import SettingsStorage
 
             autosave_interval = int(SettingsStorage().load().autosave_interval_pages)
-        except Exception:  # noqa: BLE001
-            autosave_interval = 0
+        except Exception as exc:  # noqa: BLE001
+            worker_logger.debug("Could not load autosave_interval: %s", exc)
 
         pipeline = OCRPipeline(
             preprocessor=preprocessor,
@@ -236,18 +349,43 @@ def _worker_run_job(
             autosave_interval_pages=autosave_interval,
         )
 
+        current_stage = "pipeline.run"
+        worker_logger.info(
+            "[5/6] Starting pipeline.run(job) — this performs analyze → "
+            "preprocess → assemble → OCR → postprocess"
+        )
+        t_run = time.time()
         result = pipeline.run(job)
-        return job_result_to_dict(result)
+        worker_logger.info(
+            "[5/6] pipeline.run finished in %.2fs  status=%s  pages=%d  "
+            "avg_conf=%.1f  error=%s",
+            time.time() - t_run,
+            result.status.value,
+            len(result.pages),
+            result.average_confidence,
+            result.error or "<none>",
+        )
+
+        current_stage = "serialize_result"
+        worker_logger.info("[6/6] Serializing result for host handoff…")
+        result_dict = job_result_to_dict(result)
+        worker_logger.info(
+            "[6/6] Done. Returning to host. Output file: %s", output_path
+        )
+        return result_dict
+
     except Exception as exc:  # noqa: BLE001 - always return a dict
-        worker_logger.exception("Worker crashed")
+        worker_logger.exception(
+            "Worker crashed at stage=%s: %s", current_stage, exc
+        )
         return {
             "job_id": "",
             "status": JobStatus.FAILED.value,
-            "input_path": str(job_dict.get("input_path", "")),
-            "output_path": str(job_dict.get("output_path", "")),
+            "input_path": str(input_path),
+            "output_path": str(output_path),
             "pages": [],
             "total_time_sec": 0.0,
-            "error": f"worker: {exc}",
+            "error": f"worker@{current_stage}: {exc}",
         }
 
 

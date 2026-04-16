@@ -71,6 +71,48 @@ def test_shutdown_is_idempotent() -> None:
     pp.shutdown()  # second call must not raise
 
 
+def test_setup_worker_logging_writes_file(tmp_path, monkeypatch) -> None:
+    """Worker setup must create a per-PID log file in OCRSTUDIO_LOGS_DIR.
+
+    Regression guard for the ``--windowed`` diagnostic gap: PyInstaller
+    windowed builds close stderr, so the previous ``StreamHandler``-only
+    setup silently dropped every worker log line. Without a file
+    handler we had no way to tell where a job died.
+    """
+    import logging
+    import os
+
+    from src.application.parallel_processor import _setup_worker_logging
+
+    monkeypatch.setenv("OCRSTUDIO_LOGS_DIR", str(tmp_path))
+
+    worker_logger = _setup_worker_logging()
+    worker_logger.info("hello from worker %d", os.getpid())
+
+    # Flush + close so the file is readable on Windows.
+    for h in list(logging.getLogger().handlers):
+        try:
+            h.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+    log_path = tmp_path / f"worker-{os.getpid()}.log"
+    assert log_path.exists(), f"worker log file not created at {log_path}"
+    content = log_path.read_text(encoding="utf-8")
+    assert "hello from worker" in content, (
+        "worker log file exists but doesn't contain the test message"
+    )
+
+    # Clean up handlers so the file can be unlinked on Windows and the
+    # next test starts from a clean root logger.
+    for h in list(logging.getLogger().handlers):
+        logging.getLogger().removeHandler(h)
+        try:
+            h.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def test_listener_exception_does_not_crash_drain_thread() -> None:
     pp = ParallelProcessor(max_workers=1)
     pp._start_progress_bridge()  # type: ignore[attr-defined]
