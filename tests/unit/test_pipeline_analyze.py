@@ -115,9 +115,35 @@ def test_encrypted_pdf_with_empty_password_succeeds(tmp_path: Path) -> None:
 
 
 def test_run_top_level_catches_typed_errors(tmp_path: Path) -> None:
-    """A corrupt PDF goes through run() and produces JobStatus.FAILED."""
+    """A corrupt PDF goes through run() and produces JobStatus.FAILED.
+
+    Stubs the engine so the pre-flight stage (which calls
+    ``engine.is_available()``) doesn't short-circuit on a CI runner
+    without a system Tesseract install — the assertion target here is
+    the ``_analyze_pdf`` → ``CorruptPdfError`` branch, not the engine
+    availability probe (which has its own dedicated tests in
+    ``test_pipeline_settings_variation.TestPipelinePreflight``).
+    """
+    from src.application.engines.base import OCREngine, PageOCRResult
     from src.core.models import OCRJobConfig, ProfileData
-    from src.shared.types import JobStatus
+    from src.shared.types import JobStatus, OCREngineKind
+
+    class _OkEngine(OCREngine):
+        kind = OCREngineKind.TESSERACT
+
+        @property
+        def name(self) -> str:
+            return "ok-stub"
+
+        @property
+        def description(self) -> str:
+            return "stub"
+
+        def is_available(self) -> tuple[bool, str]:
+            return True, ""
+
+        def run(self, *a, **kw):  # pragma: no cover — corrupt PDF aborts earlier
+            return [PageOCRResult(page_number=1, text="")]
 
     bad = tmp_path / "bad.pdf"
     bad.write_bytes(b"not a real pdf file at all")
@@ -136,6 +162,7 @@ def test_run_top_level_catches_typed_errors(tmp_path: Path) -> None:
         profile=ProfileData(name="default"),
     )
 
-    result = pipeline.run(job)
+    with patch("src.application.engines.get_engine", return_value=_OkEngine()):
+        result = pipeline.run(job)
     assert result.status is JobStatus.FAILED
     assert "повреждён" in (result.error or "") or "повреж" in (result.error or "")
