@@ -25,6 +25,7 @@ pipeline.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -66,7 +67,20 @@ class GOTOCREngine(OCREngine):
 
     # ----------------------------------------------------------- probes
     def is_available(self) -> tuple[bool, str]:
-        """Verify both Python deps and on-disk weights are present."""
+        """Verify Python deps, on-disk weights, AND transitive imports.
+
+        We've seen two footguns in production:
+
+        * A bundled ``torch`` that silently missed one of its DLLs
+          (``VCOMP140.DLL`` on older Windows) — ``import torch``
+          succeeded but the first ``torch.zeros(1)`` blew up. The
+          smoke test below catches that.
+        * GOT-OCR 2.0's ``trust_remote_code`` scripts pull in niche
+          packages like ``einops`` / ``accelerate`` that aren't part
+          of a minimal ``transformers`` install. Importing them here
+          lets us return a clear error instead of a cryptic
+          ``ModuleNotFoundError`` at inference time.
+        """
         try:
             import torch  # noqa: F401
             import transformers  # noqa: F401
@@ -76,6 +90,29 @@ class GOTOCREngine(OCREngine):
                 "`pip install ocr-studio[htr]` или скачайте torch + "
                 f"transformers вручную. Ошибка: {exc.name}"
             )
+        # torch + transformers ran the import hook — now exercise them
+        # once to catch DLL / shared-object load failures that only
+        # surface on first use.
+        try:
+            import torch
+
+            _ = torch.zeros(1)
+        except Exception as exc:  # noqa: BLE001
+            return False, (
+                "torch установлен, но базовая операция "
+                f"(torch.zeros) падает: {exc}. Скорее всего "
+                "отсутствует рантайм VC++ или CUDA DLL."
+            )
+        # Transitive deps GOT-OCR 2.0's trust_remote_code scripts need.
+        for dep in ("einops", "accelerate"):
+            try:
+                __import__(dep)
+            except ImportError:
+                return False, (
+                    f"Для GOT-OCR 2.0 требуется пакет '{dep}'. "
+                    f"Установите его (pip install {dep}) или "
+                    "обратитесь к сборщику сборки."
+                )
         if not self._model_manager.is_available(GOT_OCR2_SPEC.model_id):
             return False, (
                 f"Модель {GOT_OCR2_SPEC.label} не скачана. Откройте "
@@ -84,6 +121,58 @@ class GOTOCREngine(OCREngine):
         return True, ""
 
     # ----------------------------------------------------------- loading
+    @staticmethod
+    def _safe_model_path(path: Path) -> str:
+        """Return a path safe to hand to HuggingFace loaders.
+
+        Some HuggingFace plumbing (safetensors' mmap path, older
+        tokenizers builds) uses C++/Rust I/O that has historically
+        choked on non-ASCII Windows paths — exactly the scenario a
+        Cyrillic user profile ("``C:\\Users\\Т.Н. 020\\...``") lands
+        us in. On Windows we attempt to resolve the path to its
+        8.3 short form via ``GetShortPathNameW``, which is always
+        pure ASCII. If the short form isn't available (e.g. 8.3 names
+        disabled on NTFS, which is the default on Win10+) we fall
+        back to the original path — Python-level HF code still works
+        with Unicode, and the failure mode here would only be a
+        diagnostic warning rather than a hard crash.
+        """
+        p_str = str(path)
+        if os.name != "nt":
+            return p_str
+        # Only bother if the path contains characters above ASCII.
+        if p_str.isascii():
+            return p_str
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            get_short = ctypes.windll.kernel32.GetShortPathNameW  # type: ignore[attr-defined]
+            get_short.argtypes = [
+                wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD,
+            ]
+            get_short.restype = wintypes.DWORD
+
+            buf = ctypes.create_unicode_buffer(1024)
+            needed = get_short(p_str, buf, len(buf))
+            if needed == 0:
+                return p_str  # API failed (permission / not a real path)
+            if needed > len(buf):
+                buf = ctypes.create_unicode_buffer(needed)
+                if get_short(p_str, buf, needed) == 0:
+                    return p_str
+            short = buf.value
+            if short and short != p_str:
+                logger.info(
+                    "Using short path for HuggingFace loader: %s -> %s",
+                    p_str, short,
+                )
+                return short
+            return p_str
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("GetShortPathNameW fallback failed: %s", exc)
+            return p_str
+
     def _load_model(self) -> None:
         """Lazily load weights into memory; idempotent."""
         if self._model is not None:
@@ -92,10 +181,13 @@ class GOTOCREngine(OCREngine):
         from transformers import AutoModel, AutoTokenizer  # type: ignore[import-not-found]
 
         model_dir = self._model_manager.model_dir(GOT_OCR2_SPEC.model_id)
-        logger.info("Loading GOT-OCR2 weights from %s", model_dir)
+        hf_path = self._safe_model_path(model_dir)
+        logger.info(
+            "Loading GOT-OCR2 weights from %s (hf_path=%s)", model_dir, hf_path
+        )
         t0 = time.time()
         self._tokenizer = AutoTokenizer.from_pretrained(
-            str(model_dir), trust_remote_code=True
+            hf_path, trust_remote_code=True
         )
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         # fp16 on CUDA halves VRAM and gives a 2-3× inference speedup on
@@ -104,7 +196,7 @@ class GOTOCREngine(OCREngine):
         # CPU is slower than fp32 in PyTorch without explicit AMP.
         torch_dtype = torch.float16 if self._device == "cuda" else torch.float32
         self._model = AutoModel.from_pretrained(
-            str(model_dir),
+            hf_path,
             trust_remote_code=True,
             low_cpu_mem_usage=True,
             device_map=self._device,

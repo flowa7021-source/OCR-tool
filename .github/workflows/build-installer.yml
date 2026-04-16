@@ -157,13 +157,17 @@ jobs:
           pip install --prefer-binary -r requirements.txt
           pip install --prefer-binary "pyinstaller>=6.6,<7" pytest pytest-mock pytest-qt Pillow cairosvg
           if ("${{ steps.htr_flag.outputs.with_htr }}" -eq "true") {
-            Write-Host "Installing [htr] extras (torch, transformers, tiktoken)…"
+            Write-Host "Installing [htr] extras (torch, transformers, tiktoken, einops, accelerate)…"
             # CPU-only torch wheel keeps the bundle ~1 GB smaller than the
             # CUDA build. Users who want GPU acceleration can replace torch
             # in the deployed env, but the CPU build runs everywhere.
+            # einops + accelerate are transitive deps of GOT-OCR 2.0's
+            # trust_remote_code scripts — without them from_pretrained
+            # fails at inference time with a bare ModuleNotFoundError.
             pip install --prefer-binary --extra-index-url https://download.pytorch.org/whl/cpu `
-                "torch>=2.1,<3" "transformers>=4.40" "tiktoken>=0.5"
-            python -c "import torch, transformers; print('torch', torch.__version__, '/ transformers', transformers.__version__)"
+                "torch>=2.1,<3" "transformers>=4.40" "tiktoken>=0.5" `
+                "einops>=0.7" "accelerate>=0.30"
+            python -c "import torch, transformers, einops, accelerate; print('torch', torch.__version__, '/ transformers', transformers.__version__, '/ einops', einops.__version__, '/ accelerate', accelerate.__version__)"
           }
 
       - name: Resolve installer version + release metadata

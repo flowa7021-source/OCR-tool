@@ -42,9 +42,18 @@ def _seed_manifest(manager: ModelManager) -> None:
 
 
 def _stub_torch_transformers(monkeypatch) -> None:
-    """Inject minimal torch + transformers modules so import succeeds."""
+    """Inject minimal torch + transformers modules so import succeeds.
+
+    Also stubs ``einops`` and ``accelerate`` — these are transitive
+    deps of GOT-OCR 2.0's ``trust_remote_code`` scripts that the
+    engine's ``is_available`` probes for. And stubs ``torch.zeros``
+    so the DLL-load smoke test (``torch.zeros(1)``) in ``is_available``
+    doesn't fail on the mock.
+    """
     fake_torch = types.SimpleNamespace(
         cuda=types.SimpleNamespace(is_available=lambda: False),
+        # Smoke test calls torch.zeros(1) to catch bundled-DLL failures.
+        zeros=lambda *a, **kw: object(),
     )
     fake_torch.__name__ = "torch"
     fake_transformers = types.SimpleNamespace(
@@ -52,8 +61,14 @@ def _stub_torch_transformers(monkeypatch) -> None:
         AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda *a, **kw: MagicMock()),
     )
     fake_transformers.__name__ = "transformers"
+    fake_einops = types.SimpleNamespace()
+    fake_einops.__name__ = "einops"
+    fake_accelerate = types.SimpleNamespace()
+    fake_accelerate.__name__ = "accelerate"
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setitem(sys.modules, "einops", fake_einops)
+    monkeypatch.setitem(sys.modules, "accelerate", fake_accelerate)
 
 
 # ---------------------------------------------------------------------------

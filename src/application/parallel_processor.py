@@ -300,6 +300,21 @@ def _worker_run_job(
             getattr(job.profile.ocr, "tesseract_language_string", "?"),
         )
 
+        current_stage = "configure_hf_runtime"
+        try:
+            from src.infrastructure.hf_runtime import configure_huggingface_runtime
+
+            configure_huggingface_runtime()
+            worker_logger.info(
+                "[3/6] HF runtime configured: HF_HOME=%s offline=%s",
+                os.environ.get("HF_HOME", "<default>"),
+                os.environ.get("HF_HUB_OFFLINE", "0"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            worker_logger.warning(
+                "configure_huggingface_runtime failed (continuing): %s", exc
+            )
+
         current_stage = "register_external_tools"
         worker_logger.info(
             "[3a/6] Registering bundled external binaries on PATH…"
