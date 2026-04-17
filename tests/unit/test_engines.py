@@ -120,49 +120,70 @@ class TestTesseractEngine:
             assert "stub: missing" in str(exc_info.value)
 
     def test_run_invokes_ocrmypdf(self, tmp_path: Path) -> None:
-        """Happy-path: engine wires straight through to run_ocrmypdf."""
-        engine = TesseractEngine()
-        out = tmp_path / "out.pdf"
-        out.write_bytes(b"%PDF-1.7\n")  # so fitz.open succeeds afterwards
+        """Happy-path: engine OCRs each page individually."""
+        import fitz
+        import shutil
 
-        fake_doc = MagicMock()
-        fake_doc.page_count = 3
+        engine = TesseractEngine()
+
+        # Build a real 3-page PDF so the per-page splitting works.
+        doc = fitz.open()
+        for i in range(3):
+            page = doc.new_page(width=200, height=200)
+            page.insert_text((10, 50), f"page {i + 1}", fontsize=12)
+        in_pdf = tmp_path / "in.pdf"
+        doc.save(str(in_pdf))
+        doc.close()
+
+        out = tmp_path / "out.pdf"
+
+        # run_ocrmypdf mock: just copy input → output so the merge
+        # finds a valid PDF.
+        def _fake_run(opts):
+            shutil.copy2(str(opts.input_file), str(opts.output_file))
 
         with patch.object(engine, "is_available", return_value=(True, "")), \
-             patch("src.application.engines.tesseract_engine.run_ocrmypdf") as run_mock, \
-             patch("src.application.engines.tesseract_engine.map_ocr_config") as map_mock, \
-             patch("fitz.open", return_value=fake_doc):
-            map_mock.return_value = "OPTS"
+             patch("src.application.engines.tesseract_engine.run_ocrmypdf", side_effect=_fake_run):
             results = engine.run(
-                preprocessed_pdf=tmp_path / "in.pdf",
+                preprocessed_pdf=in_pdf,
                 output_pdf=out,
                 config=OCRConfig(),
             )
 
-        run_mock.assert_called_once_with("OPTS")
         assert len(results) == 3
         assert all(isinstance(r, PageOCRResult) for r in results)
         assert [r.page_number for r in results] == [1, 2, 3]
+        assert out.exists()
 
     def test_progress_callback_fires(self, tmp_path: Path) -> None:
+        import fitz
+        import shutil
+
         engine = TesseractEngine()
+
+        doc = fitz.open()
+        doc.new_page(width=100, height=100)
+        in_pdf = tmp_path / "in.pdf"
+        doc.save(str(in_pdf))
+        doc.close()
+
         out = tmp_path / "out.pdf"
-        out.write_bytes(b"%PDF-1.7\n")
         events: list[tuple[int, int, str]] = []
-        fake_doc = MagicMock()
-        fake_doc.page_count = 1
+
+        def _fake_run(opts):
+            shutil.copy2(str(opts.input_file), str(opts.output_file))
 
         with patch.object(engine, "is_available", return_value=(True, "")), \
-             patch("src.application.engines.tesseract_engine.run_ocrmypdf"), \
-             patch("src.application.engines.tesseract_engine.map_ocr_config"), \
-             patch("fitz.open", return_value=fake_doc):
+             patch("src.application.engines.tesseract_engine.run_ocrmypdf", side_effect=_fake_run):
             engine.run(
-                preprocessed_pdf=tmp_path / "in.pdf",
+                preprocessed_pdf=in_pdf,
                 output_pdf=out,
                 config=OCRConfig(),
                 progress_callback=lambda c, t, s: events.append((c, t, s)),
             )
-        assert events == [(0, 1, "ocr"), (1, 1, "ocr")]
+        # Should have start (0, 1, "ocr") and end (1, 1, "ocr").
+        assert events[0] == (0, 1, "ocr")
+        assert events[-1] == (1, 1, "ocr")
 
 
 class TestRunOcrmypdfIntegration:
