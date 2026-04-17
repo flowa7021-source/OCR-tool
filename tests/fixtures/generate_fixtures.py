@@ -272,8 +272,8 @@ def generate_skewed_noisy() -> None:
 
     # Rotate 3°
     h, w = arr.shape[:2]
-    M = cv2.getRotationMatrix2D((w / 2, h / 2), 3.0, 1.0)
-    arr = cv2.warpAffine(arr, M, (w, h), borderValue=(255, 255, 255))
+    rot_matrix = cv2.getRotationMatrix2D((w / 2, h / 2), 3.0, 1.0)
+    arr = cv2.warpAffine(arr, rot_matrix, (w, h), borderValue=(255, 255, 255))
 
     # Salt-pepper 2%
     rng = np.random.default_rng(42)
