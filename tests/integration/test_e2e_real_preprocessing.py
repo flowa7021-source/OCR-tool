@@ -27,7 +27,6 @@ import pytest
 from tests.integration._real_ocr_helpers import (
     assert_ocr_recognised,
     make_realistic_profile,
-    real_tesseract_wrapper,  # noqa: F401 — pytest fixture
     render_clean_text_pdf,
     render_low_contrast_text_pdf,
     render_noisy_text_pdf,
@@ -120,7 +119,7 @@ class TestDeskewRealOCR:
         # Detected angle is non-zero — we actually ran the deskew pass,
         # not just lucked into Tesseract's internal tolerance.
         assert result.pages[0].skew_angle != 0.0, (
-            f"deskew reported angle=0.0 on a 5°-rotated input — either "
+            "deskew reported angle=0.0 on a 5°-rotated input — either "
             "deskew is silently disabled or the detector failed to find "
             "the skew"
         )

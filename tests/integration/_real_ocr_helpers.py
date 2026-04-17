@@ -26,7 +26,6 @@ from typing import Any
 import numpy as np
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Environment probes (tesseract, ghostscript, tessdata, fonts)
 # ---------------------------------------------------------------------------

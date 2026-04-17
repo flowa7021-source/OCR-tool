@@ -30,7 +30,6 @@ otherwise.
 
 from __future__ import annotations
 
-import shutil
 import sys
 import types
 from pathlib import Path
@@ -38,7 +37,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.application.engines.base import PageOCRResult
 from src.application.engines.got_ocr_engine import GOTOCREngine
 from src.application.pipeline import OCRPipeline
 from src.core.image_preprocessor import ImagePreprocessor
@@ -47,11 +45,9 @@ from src.core.text_postprocessor import TextPostprocessor
 from src.infrastructure.model_manager import GOT_OCR2_SPEC, ModelManager
 from src.infrastructure.tesseract_wrapper import TesseractWrapper
 from src.shared.types import JobStatus, OCREngineKind
-
 from tests.integration._real_ocr_helpers import (
     render_clean_text_pdf,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures: fake torch + transformers, fake model manager with weights seeded

@@ -30,7 +30,6 @@ from pathlib import Path
 
 import pytest
 
-
 pyside = pytest.importorskip("PySide6")
 pytest.importorskip("pytestqt")
 
