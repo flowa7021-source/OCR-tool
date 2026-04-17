@@ -121,8 +121,9 @@ class TestTesseractEngine:
 
     def test_run_invokes_ocrmypdf(self, tmp_path: Path) -> None:
         """Happy-path: engine OCRs each page individually."""
-        import fitz
         import shutil
+
+        import fitz
 
         engine = TesseractEngine()
 
@@ -156,8 +157,9 @@ class TestTesseractEngine:
         assert out.exists()
 
     def test_progress_callback_fires(self, tmp_path: Path) -> None:
-        import fitz
         import shutil
+
+        import fitz
 
         engine = TesseractEngine()
 
@@ -197,8 +199,9 @@ class TestTesseractEngine:
         PSM=SINGLE_BLOCK; those settings rescue the layout-crash
         cases that the primary run can't handle.
         """
-        import fitz
         import shutil
+
+        import fitz
 
         from src.shared.types import PSM
 
@@ -237,10 +240,8 @@ class TestTesseractEngine:
         assert len(results) == 3
         assert out.exists()
 
-        # Primary attempts for every page.
-        primaries = [entry for entry in call_log if entry[0].endswith(".pdf") and "simpler" not in entry[0] and "retry" not in entry[0] and "lastresort" not in entry[0]]
-        # Allow the per-page names that also exist in work dir; just
-        # check that a simplified-settings retry was issued for page 2.
+        # A simplified-settings retry must have been issued for the
+        # failing page (the entry we created collides only on name).
         retry_entries = [entry for entry in call_log if "simpler" in entry[0]]
         assert retry_entries, (
             "Expected a simplified-settings retry for the failing "
@@ -264,8 +265,9 @@ class TestTesseractEngine:
         mode Tesseract offers; it almost never crashes on weird
         layouts (stamps, rotated tables, mixed handwriting).
         """
-        import fitz
         import shutil
+
+        import fitz
 
         from src.shared.types import PSM
 

@@ -252,9 +252,8 @@ class ProfileManager:
         return ProfileData(
             name="universal_accurate",
             description=(
-                "Универсальный «максимум точности»: 600 DPI, adaptive "
-                "Gaussian + CLAHE + удаление фона + deskew, вся "
-                "постобработка"
+                "Универсальный «максимум точности»: 400 DPI, adaptive "
+                "Gaussian + CLAHE + deskew, вся постобработка"
             ),
             preprocess=preprocess,
             ocr=ocr,

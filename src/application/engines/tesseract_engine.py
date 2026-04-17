@@ -36,7 +36,7 @@ from src.application.ocrmypdf_integration import (
     run_ocrmypdf,
 )
 from src.core.models import OCRConfig
-from src.shared.types import OCREngineKind, OptimizeLevel, PSM
+from src.shared.types import PSM, OCREngineKind, OptimizeLevel
 
 logger = logging.getLogger(__name__)
 
