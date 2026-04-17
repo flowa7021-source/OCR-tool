@@ -8,7 +8,7 @@ from pathlib import Path
 
 # --- Application identity ---
 APP_NAME: str = "OCR Studio"
-APP_VERSION: str = "1.0.0"
+APP_VERSION: str = "1.1.0"
 APP_ORGANIZATION: str = "OCRStudio"
 APP_ID: str = "com.ocrstudio.app"
 

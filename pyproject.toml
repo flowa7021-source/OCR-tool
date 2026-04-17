@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ocr-studio"
-version = "1.0.0"
+version = "1.1.0"
 description = "Professional OCR desktop application for Windows with advanced preprocessing and searchable PDF generation"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,9 +43,13 @@ dev = [
 # Pillow is already a base dependency so we don't list it again.
 htr = [
     "torch>=2.1",
+    "torchvision>=0.16",
     "transformers>=4.40",
     "tiktoken>=0.5",
     "safetensors>=0.4",
+    "einops>=0.7",
+    "accelerate>=0.25",
+    "verovio>=4.0",
 ]
 
 [project.scripts]

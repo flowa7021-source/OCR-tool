@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -260,7 +260,7 @@ class ProfileData:
     postprocess: PostprocessConfig = field(default_factory=PostprocessConfig)
     builtin: bool = False
     created_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(UTC).isoformat()
     )
 
     def to_dict(self) -> dict[str, Any]:

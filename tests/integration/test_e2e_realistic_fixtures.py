@@ -21,13 +21,13 @@ from pathlib import Path
 
 import pytest
 
+from src.shared.types import JobStatus
 from tests.integration._real_ocr_helpers import (
     make_realistic_profile,
     requires_real_ocr,
     requires_real_russian_ocr,
     run_pipeline,
 )
-from src.shared.types import JobStatus
 
 pytestmark = [requires_real_ocr, pytest.mark.exercise_preflight]
 
@@ -47,10 +47,10 @@ def fixtures_dir(tmp_path_factory) -> Path:
         sys.path.insert(0, str(repo))
 
     from tests.fixtures.generate_fixtures import (
+        FIXTURES_DIR,
         generate_contract_ru_4page,
         generate_faded_scan,
         generate_skewed_noisy,
-        FIXTURES_DIR,
     )
 
     # Generate into the repo's fixtures dir (gitignored).
