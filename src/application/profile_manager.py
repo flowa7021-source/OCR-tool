@@ -226,13 +226,16 @@ class ProfileManager:
             primary_language="rus",
             psm=PSM.AUTO,
             oem=OEM.LSTM_ONLY,
-            # 600 DPI is the sweet spot for max-accuracy scanning: gives
-            # Tesseract's LSTM enough pixel information for tight
-            # kerning and small point sizes, while keeping rasterisation
-            # / OCR wall-clock roughly 4× compared to 300 DPI. Anything
-            # above 600 gives diminishing returns and significantly
-            # larger temp PNGs.
-            dpi=600,
+            # 400 DPI is the practical max for Tesseract on complex
+            # Russian contracts. 600 DPI was the original choice but
+            # production logs showed page 4 of a real contract timing
+            # out at BOTH 300s and 900s — Tesseract's layout analysis
+            # on a 600 DPI A4 page produces an image so large (~5000×
+            # 7000 pixels) that even the LSTM engine can't finish one
+            # page within any reasonable timeout. 400 DPI gives the
+            # same recognition accuracy on typical 10-12pt text while
+            # keeping per-page processing under 2 minutes.
+            dpi=400,
             optimize_level=OptimizeLevel.LOSSLESS,
             confidence_threshold=60.0,
             skip_text=True,
