@@ -139,6 +139,49 @@ class TestProfileSchemaMigration:
         restored = ProfileData.from_dict(d)
         assert restored.schema_version == PROFILE_SCHEMA_VERSION
 
+    def test_v1_profile_gets_timeout_bumped_to_300(self) -> None:
+        """Existing user profiles saved with schema_version=1 had
+        tesseract_timeout=120 (the old default). Migration v1→v2 must
+        bump it to 300 so the user doesn't hit the timeout crash on
+        their first job after upgrading."""
+        from src.core.models import PROFILE_SCHEMA_VERSION, ProfileData
+
+        v1_data = {
+            "name": "old_user_profile",
+            "schema_version": 1,
+            "ocr": {
+                "engine": "tesseract",
+                "tesseract_timeout": 120,
+                "dpi": 300,
+            },
+        }
+        profile = ProfileData.from_dict(v1_data)
+        assert profile.schema_version == PROFILE_SCHEMA_VERSION
+        assert profile.ocr.tesseract_timeout == 300, (
+            f"migration v1→v2 should have bumped timeout 120→300, "
+            f"got {profile.ocr.tesseract_timeout}"
+        )
+        # max_pages should be set to 0 (default) if absent.
+        assert profile.ocr.max_pages == 0
+
+    def test_v1_profile_with_custom_high_timeout_preserved(self) -> None:
+        """A user who manually set tesseract_timeout=600 should NOT
+        have it lowered to 300 by the migration."""
+        from src.core.models import ProfileData
+
+        v1_data = {
+            "name": "power_user",
+            "schema_version": 1,
+            "ocr": {
+                "engine": "tesseract",
+                "tesseract_timeout": 600,
+            },
+        }
+        profile = ProfileData.from_dict(v1_data)
+        assert profile.ocr.tesseract_timeout == 600, (
+            "migration should NOT lower a user's custom high timeout"
+        )
+
     def test_future_version_logs_and_loads_best_effort(self, caplog) -> None:
         import logging
 

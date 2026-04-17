@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -259,7 +259,9 @@ class ProfileData:
     ocr: OCRConfig = field(default_factory=OCRConfig)
     postprocess: PostprocessConfig = field(default_factory=PostprocessConfig)
     builtin: bool = False
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dict."""

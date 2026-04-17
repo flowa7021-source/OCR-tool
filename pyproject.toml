@@ -81,4 +81,17 @@ python_files = "test_*.py"
 addopts = "-v --tb=short"
 markers = [
     "benchmark: explicit performance benchmark (run via tests/benchmarks)",
+    "exercise_preflight: test wants real external-tools check, not the autouse mock",
+]
+filterwarnings = [
+    # Python 3.12+ warns about fork() in multithreaded processes.
+    # Our progress-bridge tests create multiprocessing.Manager() inside
+    # a pytest session that already has threads from PySide6/Qt. The
+    # production code uses spawn on Windows (where it matters); on
+    # Linux the fork is safe in practice because the forked child
+    # immediately execs. Suppress the noise so CI stays clean.
+    "ignore::DeprecationWarning:multiprocessing",
+    # datetime.utcnow() — we've fixed our own code but some deps
+    # (ocrmypdf, transformers) may still emit this.
+    "ignore:datetime.datetime.utcnow:DeprecationWarning",
 ]
