@@ -185,6 +185,171 @@ class TestTesseractEngine:
         assert events[0] == (0, 1, "ocr")
         assert events[-1] == (1, 1, "ocr")
 
+    def test_failing_page_is_retried_with_simpler_settings(
+        self, tmp_path: Path
+    ) -> None:
+        """When a page crashes on primary settings, the engine MUST
+        retry that page with simpler settings before giving up.
+
+        User requirement: every page must end up with a text layer —
+        no silent "kept as raster" for pages the user expects to
+        search. The retry uses a lower DPI, grayscale raster, and
+        PSM=SINGLE_BLOCK; those settings rescue the layout-crash
+        cases that the primary run can't handle.
+        """
+        import fitz
+        import shutil
+
+        from src.shared.types import PSM
+
+        engine = TesseractEngine()
+
+        doc = fitz.open()
+        for i in range(3):
+            page = doc.new_page(width=200, height=200)
+            page.insert_text((10, 50), f"page {i + 1}", fontsize=12)
+        in_pdf = tmp_path / "in.pdf"
+        doc.save(str(in_pdf))
+        doc.close()
+
+        out = tmp_path / "out.pdf"
+        call_log: list[tuple[str, int]] = []
+
+        def _fake_run(opts):
+            """Fail on page 2 primary attempt; succeed everywhere else."""
+            name = opts.input_file.name
+            call_log.append((name, opts.psm))
+            # page_0002.pdf is the original split for page 2 — crash it.
+            # page_0002_simpler.pdf is the retry; let it succeed.
+            if name == "page_0002.pdf":
+                raise RuntimeError("simulated Tesseract layout crash")
+            shutil.copy2(str(opts.input_file), str(opts.output_file))
+
+        with patch.object(engine, "is_available", return_value=(True, "")), \
+             patch("src.application.engines.tesseract_engine.run_ocrmypdf", side_effect=_fake_run):
+            results = engine.run(
+                preprocessed_pdf=in_pdf,
+                output_pdf=out,
+                config=OCRConfig(),
+            )
+
+        # All 3 pages reported back.
+        assert len(results) == 3
+        assert out.exists()
+
+        # Primary attempts for every page.
+        primaries = [entry for entry in call_log if entry[0].endswith(".pdf") and "simpler" not in entry[0] and "retry" not in entry[0] and "lastresort" not in entry[0]]
+        # Allow the per-page names that also exist in work dir; just
+        # check that a simplified-settings retry was issued for page 2.
+        retry_entries = [entry for entry in call_log if "simpler" in entry[0]]
+        assert retry_entries, (
+            "Expected a simplified-settings retry for the failing "
+            f"page, but call log was {call_log!r}"
+        )
+        # Retry must use PSM=SINGLE_BLOCK (the simpler layout).
+        retry_entry = retry_entries[0]
+        assert retry_entry[1] == int(PSM.SINGLE_BLOCK), (
+            f"Retry should use PSM=SINGLE_BLOCK, got psm={retry_entry[1]}"
+        )
+
+    def test_failing_page_retry_escalates_to_last_resort_tier(
+        self, tmp_path: Path
+    ) -> None:
+        """If both primary and simplified retry fail, the engine must
+        try one final last-resort tier (PSM=SPARSE_TEXT, 150 DPI)
+        before falling back to raster-only.
+
+        User requirement: "все страницы всегда распознаны" — every
+        page gets a text layer. Sparse-text PSM is the most tolerant
+        mode Tesseract offers; it almost never crashes on weird
+        layouts (stamps, rotated tables, mixed handwriting).
+        """
+        import fitz
+        import shutil
+
+        from src.shared.types import PSM
+
+        engine = TesseractEngine()
+
+        doc = fitz.open()
+        page = doc.new_page(width=200, height=200)
+        page.insert_text((10, 50), "one page", fontsize=12)
+        in_pdf = tmp_path / "in.pdf"
+        doc.save(str(in_pdf))
+        doc.close()
+
+        out = tmp_path / "out.pdf"
+        call_log: list[tuple[str, int]] = []
+
+        def _fake_run(opts):
+            name = opts.input_file.name
+            call_log.append((name, opts.psm))
+            # Primary and simplified both crash; last-resort succeeds.
+            if "lastresort" in name:
+                shutil.copy2(str(opts.input_file), str(opts.output_file))
+                return
+            raise RuntimeError("simulated layout crash")
+
+        with patch.object(engine, "is_available", return_value=(True, "")), \
+             patch("src.application.engines.tesseract_engine.run_ocrmypdf", side_effect=_fake_run):
+            engine.run(
+                preprocessed_pdf=in_pdf,
+                output_pdf=out,
+                config=OCRConfig(),
+            )
+
+        # Last-resort tier must have run with PSM=SPARSE_TEXT.
+        last_resort = [entry for entry in call_log if "lastresort" in entry[0]]
+        assert last_resort, (
+            f"Expected last-resort retry, but call log was {call_log!r}"
+        )
+        assert last_resort[0][1] == int(PSM.SPARSE_TEXT), (
+            f"Last-resort tier should use PSM=SPARSE_TEXT, got "
+            f"psm={last_resort[0][1]}"
+        )
+        assert out.exists()
+
+    def test_all_tiers_fail_raises_only_when_every_page_failed(
+        self, tmp_path: Path
+    ) -> None:
+        """0/N error fires ONLY when every tier failed on every page.
+
+        Mixed results (some pages recovered via retry, some raster)
+        still produce a usable PDF and must not raise — the user
+        gets a searchable PDF for the pages Tesseract could handle.
+        """
+        import fitz
+
+        from src.application.ocrmypdf_integration import OCRmyPDFError
+
+        engine = TesseractEngine()
+
+        doc = fitz.open()
+        for _ in range(2):
+            doc.new_page(width=200, height=200)
+        in_pdf = tmp_path / "in.pdf"
+        doc.save(str(in_pdf))
+        doc.close()
+
+        out = tmp_path / "out.pdf"
+
+        def _always_fail(opts):
+            raise RuntimeError("every attempt crashes")
+
+        with patch.object(engine, "is_available", return_value=(True, "")), \
+             patch("src.application.engines.tesseract_engine.run_ocrmypdf", side_effect=_always_fail), \
+             pytest.raises(OCRmyPDFError) as excinfo:
+            engine.run(
+                preprocessed_pdf=in_pdf,
+                output_pdf=out,
+                config=OCRConfig(),
+            )
+
+        message = str(excinfo.value)
+        # The refreshed message must mention that even the retry
+        # with simplified settings couldn't recover the doc.
+        assert "автоматическ" in message.lower() or "упрощ" in message.lower()
+
 
 class TestRunOcrmypdfIntegration:
     """Guards around ``run_ocrmypdf`` — the OCRmyPDF wrapper.
