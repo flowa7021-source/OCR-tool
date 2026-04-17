@@ -104,7 +104,15 @@ class GOTOCREngine(OCREngine):
                 "отсутствует рантайм VC++ или CUDA DLL."
             )
         # Transitive deps GOT-OCR 2.0's trust_remote_code scripts need.
-        for dep in ("einops", "accelerate"):
+        # The list grew over time as upstream Stepfun added imports:
+        #   - ``einops`` / ``accelerate``: used by the model architecture
+        #   - ``torchvision``: used by the vision encoder (got_vision_b.py)
+        #   - ``verovio``: used by render_tools.py for music/math OCR mode
+        # Missing any of these lets ``is_available`` return True but then
+        # ``_load_model`` crashes with an ImportError from HF's
+        # ``check_imports`` — the user sees a raw traceback instead of a
+        # clean "install X" hint.
+        for dep in ("einops", "accelerate", "torchvision", "verovio"):
             try:
                 __import__(dep)
             except ImportError:
@@ -190,16 +198,17 @@ class GOTOCREngine(OCREngine):
             self._tokenizer = AutoTokenizer.from_pretrained(
                 hf_path, trust_remote_code=True
             )
-        except OSError as exc:
-            # HuggingFace raises OSError when ``trust_remote_code``
-            # cannot find one of the custom ``.py`` modules
-            # (``tokenization_qwen.py`` / ``modeling_GOT.py`` / …). Its
-            # built-in message interpolates our local path as if it were
-            # a HF repo id, producing the surreal ``Checkout
-            # 'https://huggingface.co/C:\Users\...\got_ocr2/tree/main'``
-            # that end users saw. Re-wrap so the diagnosis points at
-            # the real remediation: our model manifest grew a new file,
-            # the existing local download is stale, re-download it.
+        except (OSError, ImportError) as exc:
+            # OSError: HuggingFace can't find a custom ``.py`` module
+            #   on disk (``tokenization_qwen.py`` etc.). Its message
+            #   interpolates our local path into a fake HF URL.
+            # ImportError: HF's ``check_imports`` found that the custom
+            #   module references packages not installed in the env
+            #   (``torchvision``, ``verovio``). The ``is_available``
+            #   probe SHOULD have caught this, but if the user's env
+            #   changed between the probe and the actual load (or the
+            #   dep list in ``is_available`` wasn't exhaustive) this is
+            #   the backstop.
             self._raise_stale_model_error(model_dir, exc)
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         # fp16 on CUDA halves VRAM and gives a 2-3× inference speedup on
@@ -215,11 +224,9 @@ class GOTOCREngine(OCREngine):
                 device_map=self._device,
                 torch_dtype=torch_dtype,
             )
-        except OSError as exc:
-            # Same failure mode but surfacing from the model class rather
-            # than the tokenizer (``modeling_GOT.py`` / ``got_vision_b.py``
-            # missing). Treat identically — the user has a stale
-            # download.
+        except (OSError, ImportError) as exc:
+            # Same failure mode but surfacing from the model class
+            # rather than the tokenizer. Treat identically.
             self._raise_stale_model_error(model_dir, exc)
         self._model.eval()
         logger.info(
@@ -230,23 +237,40 @@ class GOTOCREngine(OCREngine):
         )
 
     def _raise_stale_model_error(self, model_dir: Path, cause: BaseException) -> None:
-        """Translate HF ``OSError`` into a clear, actionable message.
+        """Translate HF ``OSError`` / ``ImportError`` into actionable text.
 
         Invalidates the ``ModelManager`` availability cache first so
         the next ``is_available()`` call re-checks the filesystem
         against the current manifest — that way the UI's "Скачать
         модель" button is enabled again without the user having to
         restart the app.
+
+        Two distinct cause types reach here:
+
+        * ``OSError`` — a ``.py`` module listed in ``trust_remote_code``
+          is physically missing from the model directory.
+        * ``ImportError`` — the ``.py`` module IS present but its own
+          ``import`` statement references a package not installed in
+          the current environment (e.g. ``torchvision``, ``verovio``).
+          The ``is_available`` probe is supposed to catch these, but
+          if the dep list drifts or the user's env changes between
+          probe and load, this is the backstop.
         """
         try:
             self._model_manager.invalidate_availability(GOT_OCR2_SPEC.model_id)
         except Exception:  # noqa: BLE001 — diagnostic only
             logger.debug("invalidate_availability raised", exc_info=True)
         logger.error(
-            "GOT-OCR2 model directory %s is missing a file required by "
-            "trust_remote_code: %s",
-            model_dir, cause,
+            "GOT-OCR2 model load failed (model_dir=%s): %s: %s",
+            model_dir, type(cause).__name__, cause,
         )
+        if isinstance(cause, ImportError):
+            raise EngineNotAvailableError(
+                f"GOT-OCR 2.0 требует дополнительные пакеты: {cause}. "
+                "Установите недостающие зависимости через "
+                "pip install torchvision verovio или переустановите "
+                "OCR Studio с расширением [htr]."
+            ) from cause
         raise EngineNotAvailableError(
             "Файлы модели GOT-OCR 2.0 устарели или неполные — отсутствует "
             "один из Python-модулей trust_remote_code "

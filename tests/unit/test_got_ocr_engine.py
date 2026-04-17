@@ -61,14 +61,13 @@ def _stub_torch_transformers(monkeypatch) -> None:
         AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda *a, **kw: MagicMock()),
     )
     fake_transformers.__name__ = "transformers"
-    fake_einops = types.SimpleNamespace()
-    fake_einops.__name__ = "einops"
-    fake_accelerate = types.SimpleNamespace()
-    fake_accelerate.__name__ = "accelerate"
+    # Stub every transitive dep that is_available probes for.
+    for dep_name in ("einops", "accelerate", "torchvision", "verovio"):
+        fake = types.SimpleNamespace()
+        fake.__name__ = dep_name
+        monkeypatch.setitem(sys.modules, dep_name, fake)
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
-    monkeypatch.setitem(sys.modules, "einops", fake_einops)
-    monkeypatch.setitem(sys.modules, "accelerate", fake_accelerate)
 
 
 # ---------------------------------------------------------------------------
@@ -303,3 +302,50 @@ class TestStaleModelDirectory:
         message = str(excinfo.value)
         assert "Скачать модель" in message
         assert excinfo.value.__cause__ is hf_error
+
+    def test_importerror_from_check_imports_becomes_engine_not_available(
+        self, manager: ModelManager, monkeypatch, tmp_path: Path
+    ) -> None:
+        """HF ``check_imports`` raises ImportError when the model's .py
+        files reference packages not installed (torchvision, verovio).
+
+        Regression: the user's log showed this exact traceback —
+        ``is_available`` returned True (missing deps not in its list),
+        then ``_load_model`` crashed with an uncaught ImportError."""
+        _stub_torch_transformers(monkeypatch)
+        _seed_manifest(manager)
+
+        fake_torch = sys.modules["torch"]
+        fake_torch.float16 = object()  # type: ignore[attr-defined]
+        fake_torch.float32 = object()  # type: ignore[attr-defined]
+
+        import_err = ImportError(
+            "This modeling file requires the following packages that "
+            "were not found in your environment: torchvision, verovio. "
+            "Run `pip install torchvision verovio`"
+        )
+
+        def _failing_tokenizer(*_a, **_kw):
+            raise import_err
+
+        fake_transformers = types.SimpleNamespace(
+            AutoModel=types.SimpleNamespace(
+                from_pretrained=lambda *a, **kw: MagicMock()
+            ),
+            AutoTokenizer=types.SimpleNamespace(
+                from_pretrained=_failing_tokenizer
+            ),
+        )
+        fake_transformers.__name__ = "transformers"
+        monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+        engine = GOTOCREngine(model_manager=manager)
+
+        with pytest.raises(EngineNotAvailableError) as excinfo:
+            engine._load_model()
+
+        message = str(excinfo.value)
+        # Must mention the missing packages so the user knows what
+        # to install — not just "Скачать модель".
+        assert "torchvision" in message or "pip install" in message
+        assert excinfo.value.__cause__ is import_err
