@@ -192,10 +192,26 @@ class TestExportDispatcher:
         assert target.exists()
 
     def test_clipboard_without_qapp_raises(self, tmp_path: Path) -> None:
-        # No QApplication running; clipboard should refuse clearly
+        """Clipboard export requires a QApplication. When no QApp is
+        running, it must raise RuntimeError. When a QApp IS running
+        (e.g. pytest-qt already created one for GUI tests earlier in
+        this session), the export must succeed instead — verify both
+        shapes so the test works in any CI matrix."""
+        from PySide6.QtWidgets import QApplication
+
         result = _sample_result(tmp_path / "out.pdf")
-        with pytest.raises(RuntimeError):
-            ExportManager().export(result, tmp_path / "dummy", ExportFormat.CLIPBOARD)
+
+        if QApplication.instance() is not None:
+            # QApp is alive (pytest-qt session) — clipboard should work.
+            ExportManager().export(
+                result, tmp_path / "dummy", ExportFormat.CLIPBOARD
+            )
+        else:
+            # No QApp — must raise.
+            with pytest.raises(RuntimeError):
+                ExportManager().export(
+                    result, tmp_path / "dummy", ExportFormat.CLIPBOARD
+                )
 
 
 class TestConcatenateText:
