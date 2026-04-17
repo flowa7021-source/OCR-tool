@@ -84,7 +84,12 @@ BUNDLED_PROFILES_DIR: Path = APP_ROOT / "profiles"
 BUNDLED_MODELS_DIR: Path = RESOURCES_DIR / "models"
 
 # --- Tesseract ---
-TESSERACT_VERSION: str = "5.5.0"
+# Accept any Tesseract 5.x — the app works with 5.3, 5.4, and 5.5.
+# The version check in ``TesseractWrapper.verify`` compares major.minor;
+# keeping this at "5.3.0" means we log a WARNING only for truly
+# incompatible versions (4.x, 6.x), not for every user who has the
+# Ubuntu-packaged 5.3.4 or the UB Mannheim 5.4.0.
+TESSERACT_VERSION: str = "5.3.0"
 TESSERACT_EXE_NAME: str = "tesseract.exe" if sys.platform == "win32" else "tesseract"
 
 # --- OCR defaults ---

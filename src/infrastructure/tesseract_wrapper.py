@@ -290,14 +290,18 @@ class TesseractWrapper:
             f"Версия: {version or '<не определено>'}",
         ]
 
-        # Major.minor comparison only; patch differences are tolerated.
+        # Major-version comparison: any 5.x.y is fine. Only warn if
+        # the major version differs (e.g. 4.x or 6.x), which would
+        # indicate a genuinely different Tesseract generation.
         if version:
-            expected_parts = TESSERACT_VERSION.split(".")[:2]
-            actual_parts = version.split(".")[:2]
-            if expected_parts != actual_parts:
+            expected_major = TESSERACT_VERSION.split(".")[0]
+            actual_major = version.split(".")[0]
+            if expected_major != actual_major:
                 warn = (
-                    f"Версия Tesseract {version} отличается от ожидаемой "
-                    f"{TESSERACT_VERSION} (major.minor)"
+                    f"Версия Tesseract {version}: мажорная версия "
+                    f"({actual_major}) отличается от ожидаемой "
+                    f"({expected_major}). Работоспособность не "
+                    "гарантирована."
                 )
                 logger.warning(warn)
                 messages.append(f"Предупреждение: {warn}")

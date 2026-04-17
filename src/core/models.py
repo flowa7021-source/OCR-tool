@@ -245,7 +245,7 @@ class PostprocessConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 1
+PROFILE_SCHEMA_VERSION: int = 2
 
 
 @dataclass
@@ -304,7 +304,24 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         version = 1
         log.info("Migrated profile '%s' to schema v1", data.get("name", "?"))
 
-    # Future migrations go here: `if version < 2: ...`
+    # v1 → v2: bump tesseract_timeout from 120 → 300. The old default
+    # was too low for 600 DPI on complex pages — users hit timeout
+    # crashes (FileNotFoundError in OCRmyPDF's graft phase) on every
+    # dense Russian contract. Also add ``max_pages: 0`` if absent.
+    if version < 2:
+        ocr = data.setdefault("ocr", {})
+        old_timeout = ocr.get("tesseract_timeout", 0)
+        if old_timeout and old_timeout < 300:
+            ocr["tesseract_timeout"] = 300
+            log.info(
+                "Migrated profile '%s' tesseract_timeout %d → 300",
+                data.get("name", "?"), old_timeout,
+            )
+        ocr.setdefault("max_pages", 0)
+        data["schema_version"] = 2
+        version = 2
+
+    # Future migrations go here: `if version < 3: ...`
 
     return data
 

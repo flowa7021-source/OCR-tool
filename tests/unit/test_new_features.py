@@ -125,16 +125,19 @@ class TestProfileSchemaMigration:
         from src.shared.types import OCREngineKind
 
         assert profile.ocr.engine is OCREngineKind.TESSERACT
-        assert profile.schema_version == 1
+        # v0 → v1 adds engine; v1 → v2 bumps tesseract_timeout.
+        from src.core.models import PROFILE_SCHEMA_VERSION
+
+        assert profile.schema_version == PROFILE_SCHEMA_VERSION
 
     def test_current_version_passes_through(self) -> None:
-        from src.core.models import ProfileData
+        from src.core.models import PROFILE_SCHEMA_VERSION, ProfileData
 
         original = ProfileData(name="x")
         d = original.to_dict()
-        assert d["schema_version"] == 1
+        assert d["schema_version"] == PROFILE_SCHEMA_VERSION
         restored = ProfileData.from_dict(d)
-        assert restored.schema_version == 1
+        assert restored.schema_version == PROFILE_SCHEMA_VERSION
 
     def test_future_version_logs_and_loads_best_effort(self, caplog) -> None:
         import logging

@@ -370,6 +370,28 @@ class OCRPipeline:
             result.pages = page_results
             result.status = JobStatus.COMPLETED
             result.total_time_sec = time.time() - started
+
+            # Detect "COMPLETED but nothing recognised" — surface a
+            # clear warning so the user isn't left staring at an empty
+            # searchable PDF wondering if the app is broken.
+            all_empty = all(
+                not (p.text or "").strip() for p in result.pages
+            ) if result.pages else True
+            if all_empty:
+                logger.warning(
+                    "Job %s COMPLETED but NO text was recognised on any "
+                    "page. Likely causes: wrong DPI for this scan, "
+                    "Tesseract timed out silently, or preprocessing "
+                    "destroyed the glyphs. Try the 'quick_reliable' "
+                    "profile or lower DPI.",
+                    job_id,
+                )
+                result.error = (
+                    "Документ обработан, но текст не был распознан "
+                    "ни на одной странице. Попробуйте профиль "
+                    "«quick_reliable» или уменьшите DPI."
+                )
+
             logger.info(
                 "Job %s COMPLETED in %.2fs (avg conf=%.1f, pages=%d, out=%s)",
                 job_id,
