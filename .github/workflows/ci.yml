@@ -66,11 +66,27 @@ jobs:
           choco install tesseract --no-progress -y
           choco install ghostscript --no-progress -y
 
+      # Chocolatey puts tessdata in a non-standard location; point
+      # the env var so TesseractWrapper.find_tessdata_dir picks it up.
+      - name: Set TESSDATA_PREFIX for Windows
+        if: runner.os == 'Windows'
+        run: |
+          $tess = Get-Command tesseract -ErrorAction SilentlyContinue
+          if ($tess) {
+            $tessdir = Split-Path $tess.Source
+            $tessdata = Join-Path $tessdir "tessdata"
+            if (Test-Path $tessdata) {
+              echo "TESSDATA_PREFIX=$tessdata" >> $env:GITHUB_ENV
+              Write-Host "TESSDATA_PREFIX=$tessdata"
+            }
+          }
+        shell: pwsh
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install PySide6 numpy opencv-python-headless scikit-image Pillow
-          pip install python-docx PyMuPDF psutil deskew
+          pip install python-docx PyMuPDF psutil deskew cffi
           pip install ocrmypdf pytesseract
           pip install pytest pytest-mock pytest-cov pytest-qt pytest-benchmark
 

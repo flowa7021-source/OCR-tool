@@ -218,6 +218,26 @@ class OCRPipeline:
                 "(document has %d total)",
                 job_id, time.time() - t_stage, total_pages, full_page_count,
             )
+
+            # Advisory: if skip_text=True and EVERY page already has text,
+            # OCRmyPDF will skip every page and produce a PDF with no new
+            # text layer — the user gets back their own file unchanged.
+            # This isn't a bug but it's deeply confusing; warn up front.
+            skip_text = getattr(job.profile.ocr, "skip_text", True)
+            if skip_text and page_infos:
+                pages_with_text = sum(
+                    1 for p in page_infos if p.get("has_text", False)
+                )
+                if pages_with_text == total_pages:
+                    logger.warning(
+                        "Job %s: все %d страниц уже содержат текстовый "
+                        "слой, а skip_text=True в профиле. OCRmyPDF "
+                        "пропустит все страницы и вернёт исходный PDF. "
+                        "Если нужно перераспознать — установите "
+                        "skip_text=False в настройках профиля.",
+                        job_id, total_pages,
+                    )
+
             self._report(0, total_pages, "analyze")
 
             # 2. Preprocess pages -> PNGs (parallel across pages).

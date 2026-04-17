@@ -210,7 +210,20 @@ def process_single(
     )
 
     t0 = time.time()
-    logger.info("Обработка: %s → %s (профиль: %s)", input_path, output_path, profile.name)
+    logger.info(
+        "Обработка: %s → %s\n"
+        "  Профиль: %s | Движок: %s | DPI: %s | Языки: %s\n"
+        "  Бинаризация: %s | Deskew: %s | CLAHE: %s | Timeout: %s с",
+        input_path, output_path,
+        profile.name,
+        profile.ocr.engine.value,
+        profile.ocr.dpi,
+        profile.ocr.tesseract_language_string,
+        profile.preprocess.binarization.method.value,
+        "вкл" if profile.preprocess.deskew.enabled else "выкл",
+        "вкл" if profile.preprocess.contrast.clahe_enabled else "выкл",
+        profile.ocr.tesseract_timeout,
+    )
     result = pipeline.run(job)
     elapsed = time.time() - t0
 
@@ -222,6 +235,11 @@ def process_single(
         "✅ Готово за %.1f с (страниц: %d, средний confidence: %.1f%%)",
         elapsed, result.page_count, result.average_confidence,
     )
+
+    # Surface the "completed but empty" advisory so the CLI user
+    # sees the same hint the GUI user would see in the status bar.
+    if result.error:
+        logger.warning("⚠ %s", result.error)
 
     exporter = ExportManager()
     try:
