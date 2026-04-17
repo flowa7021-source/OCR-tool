@@ -53,9 +53,10 @@
     "char_whitelist": "",
     "char_blacklist": "",
     "confidence_threshold": 60.0,
-    "tesseract_timeout": 120,
+    "tesseract_timeout": 300,
     "optimize_level": 1,
-    "skip_text": true
+    "skip_text": true,
+    "max_pages": 0
   },
   "postprocess": {
     "autocorrect_russian": true,

@@ -186,7 +186,19 @@ class TestAllBundledProfilesRealOCR:
 
     @pytest.mark.parametrize(
         "profile_name",
-        ["default", "quick_reliable", "contracts_ru", "low_quality_scan"],
+        [
+            "default",
+            "quick_reliable",
+            "contracts_ru",
+            "low_quality_scan",
+            # ``english_text`` uses eng-only — tested below in a
+            # separate English-text parametrisation.
+            # ``universal_accurate`` uses 600 DPI — too slow for CI
+            # as a parametrised test; dedicated test below caps DPI.
+            # ``handwritten_mixed`` uses GOT-OCR 2.0 — needs the
+            # ~580 MB model; covered by test_e2e_got_ocr2.py with
+            # a stubbed engine.
+        ],
     )
     def test_profile_produces_russian_text(
         self,
@@ -197,8 +209,6 @@ class TestAllBundledProfilesRealOCR:
         from src.application.profile_manager import ProfileManager
         from src.infrastructure.config_storage import ProfileStorage
 
-        # Seed profiles into a clean dir so the installed-system copy
-        # doesn't interfere with the test.
         storage = ProfileStorage(profiles_dir=tmp_path / "profiles")
         manager = ProfileManager(storage)
         manager.initialize_builtins()
@@ -215,6 +225,71 @@ class TestAllBundledProfilesRealOCR:
             input_pdf, output_pdf, profile, real_tesseract_wrapper
         )
         assert_ocr_recognised(result, ["ДОГ", "ОГО", "ВОР"])
+
+
+@requires_real_ocr
+class TestEnglishTextProfile:
+    """``english_text`` profile is eng-only — verify it OCRs English."""
+
+    def test_english_text_profile_produces_text(
+        self,
+        tmp_path: Path,
+        real_tesseract_wrapper,
+    ) -> None:
+        from src.application.profile_manager import ProfileManager
+        from src.infrastructure.config_storage import ProfileStorage
+
+        storage = ProfileStorage(profiles_dir=tmp_path / "profiles")
+        manager = ProfileManager(storage)
+        manager.initialize_builtins()
+        profile = manager.load("english_text")
+
+        input_pdf = render_clean_text_pdf(
+            tmp_path / "en.pdf", text="CONTRACT AGREEMENT"
+        )
+        output_pdf = tmp_path / "en_ocr.pdf"
+
+        result = run_pipeline(
+            input_pdf, output_pdf, profile, real_tesseract_wrapper
+        )
+        assert_ocr_recognised(result, ["CONTRACT", "AGREEMENT"])
+
+
+@requires_real_ocr
+class TestUniversalAccurateProfile:
+    """``universal_accurate`` uses 600 DPI — too slow for a
+    parametrised CI test. We cap DPI at 300 for this test to
+    verify the rest of the profile (adaptive_gaussian + CLAHE +
+    deskew + denoise chain + all postprocess flags) doesn't crash.
+
+    The 600 DPI + real Tesseract path is exercised by the smoke
+    test script which the user runs before push.
+    """
+
+    def test_universal_accurate_runs_at_capped_dpi(
+        self,
+        tmp_path: Path,
+        real_tesseract_wrapper,
+    ) -> None:
+        from src.application.profile_manager import ProfileManager
+        from src.infrastructure.config_storage import ProfileStorage
+
+        storage = ProfileStorage(profiles_dir=tmp_path / "profiles")
+        manager = ProfileManager(storage)
+        manager.initialize_builtins()
+        profile = manager.load("universal_accurate")
+        # Cap DPI so the test finishes in CI (<30 s instead of 2+ min).
+        profile.ocr.dpi = 300
+
+        input_pdf = render_clean_text_pdf(
+            tmp_path / "ua.pdf", text="UNIVERSAL TEST"
+        )
+        output_pdf = tmp_path / "ua_ocr.pdf"
+
+        result = run_pipeline(
+            input_pdf, output_pdf, profile, real_tesseract_wrapper
+        )
+        assert_ocr_recognised(result, ["UNIVERSAL", "TEST"])
 
 
 # ---------------------------------------------------------------------------

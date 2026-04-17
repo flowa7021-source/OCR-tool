@@ -149,7 +149,11 @@ def _render_sample_pdf(path: Path) -> None:
 
 
 def _run_pipeline(
-    input_pdf: Path, output_pdf: Path, profile_name: str
+    input_pdf: Path,
+    output_pdf: Path,
+    profile_name: str,
+    *,
+    dpi_override: int | None = None,
 ) -> tuple[bool, str, float]:
     """Run the pipeline with ``profile_name``.
 
@@ -171,6 +175,9 @@ def _run_pipeline(
         profile = manager.load(profile_name)
     except FileNotFoundError:
         return False, f"Профиль {profile_name!r} не найден", 0.0
+
+    if dpi_override is not None:
+        profile.ocr.dpi = dpi_override
 
     pipeline = OCRPipeline(
         preprocessor=ImagePreprocessor(),
@@ -213,17 +220,34 @@ def _run_pipeline(
     return True, f"OCR прошёл. Распознанный текст: {recognised!r}", elapsed
 
 
+# All Tesseract-engine profiles that must produce recognised text.
+# ``handwritten_mixed`` is GOT-OCR 2.0 → needs the model download → skipped.
+# ``universal_accurate`` uses 600 DPI → capped at 300 for speed.
+_ALL_TESSERACT_PROFILES: list[str] = [
+    "quick_reliable",
+    "default",
+    "contracts_ru",
+    "low_quality_scan",
+    "english_text",
+    "universal_accurate",
+]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Быстрый smoke-test: прогоняет синтетический русский PDF "
-            "через полный пайплайн с реальным Tesseract."
+            "Быстрый smoke-test: прогоняет синтетический PDF через "
+            "полный пайплайн с реальным Tesseract. По умолчанию "
+            "проверяет ВСЕ Tesseract-профили."
         )
     )
     parser.add_argument(
         "--profile",
-        default="quick_reliable",
-        help="Имя профиля (по умолчанию: quick_reliable)",
+        default=None,
+        help=(
+            "Имя одного конкретного профиля. Если не задан — "
+            "прогоняются все 6 Tesseract-профилей."
+        ),
     )
     parser.add_argument(
         "--keep-artifacts",
@@ -232,8 +256,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    profiles = [args.profile] if args.profile else _ALL_TESSERACT_PROFILES
+
     print("=" * 60)
     print("OCR Studio — real-OCR smoke test")
+    print(f"Профили: {', '.join(profiles)}")
     print("=" * 60)
 
     # Stage 1: external tools.
@@ -249,20 +276,45 @@ def main() -> int:
 
     work = Path(tempfile.mkdtemp(prefix="ocr-smoke-"))
     input_pdf = work / "sample.pdf"
-    output_pdf = work / "sample_ocr.pdf"
     try:
         print(f"\n[2/3] Генерация тестового PDF ({input_pdf.name})…")
         _render_sample_pdf(input_pdf)
         print(f"  ✅ {input_pdf.stat().st_size} байт")
 
-        # Stage 3: pipeline.
-        print(f"\n[3/3] Прогон пайплайна с профилем {args.profile!r}…")
-        ok, msg, elapsed = _run_pipeline(input_pdf, output_pdf, args.profile)
-        status = "✅" if ok else "❌"
-        print(f"  {status} За {elapsed:.1f} с: {msg}")
+        # Stage 3: pipeline for every profile.
+        failures = 0
+        total = len(profiles)
+        for idx, profile_name in enumerate(profiles, 1):
+            output_pdf = work / f"out_{profile_name}.pdf"
+            print(
+                f"\n[3/3] [{idx}/{total}] Профиль {profile_name!r}…"
+            )
+
+            # ``universal_accurate`` is 600 DPI — too slow for a quick
+            # smoke. We override DPI via a monkey-patch on the loaded
+            # profile so the rest of its config (adaptive_gaussian +
+            # CLAHE + denoise + all postprocess) is still exercised.
+            dpi_override = 300 if profile_name == "universal_accurate" else None
+
+            ok, msg, elapsed = _run_pipeline(
+                input_pdf, output_pdf, profile_name,
+                dpi_override=dpi_override,
+            )
+            status = "✅" if ok else "❌"
+            print(f"  {status} За {elapsed:.1f} с: {msg}")
+            if not ok:
+                failures += 1
+
         if args.keep_artifacts:
             print(f"\nАртефакты остались в {work}")
-        return 0 if ok else 1
+
+        if failures:
+            print(f"\n{'=' * 60}")
+            print(f"❌ {failures}/{total} профилей упали.")
+            return 1
+        print(f"\n{'=' * 60}")
+        print(f"✅ Все {total} профилей прошли.")
+        return 0
     finally:
         if not args.keep_artifacts:
             shutil.rmtree(work, ignore_errors=True)
