@@ -39,6 +39,11 @@ from tests.integration._real_ocr_helpers import (
 pytestmark = [requires_real_ocr, pytest.mark.exercise_preflight]
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
 def _quick_profile():
     """A ProfileData suitable for quick subprocess E2E.
 
@@ -246,3 +251,128 @@ class TestParallelProcessorSubprocessE2E:
         result = received[0]
         assert isinstance(result, JobResult)
         assert result.pages, "JobResult came back but with no pages"
+
+
+# ---------------------------------------------------------------------------
+# Windows-parity: force ``spawn`` start method on Linux
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnModeE2E:
+    """Force ``multiprocessing.get_context("spawn")`` on Linux so the
+    worker goes through the same code path as Windows production:
+
+      * Full re-import of every module (no fork-inherited state).
+      * ``OCRJobConfig`` / ``ProfileData`` must survive a real pickle
+        round-trip — any ``__slot__`` / lambda / local-class would
+        crash on ``PickleError``.
+      * ``os.environ`` is inherited BUT class-level caches
+        (``TesseractWrapper._binary_path``) are NOT. The worker must
+        rediscover Tesseract from scratch.
+
+    This is exactly the code path that surfaces the "works on Linux
+    CI, crashes on Windows" class of bug. If this test is green, the
+    same job submission would succeed on Windows — barring
+    platform-specific filesystem/encoding differences that are
+    tested separately in ``test_e2e_user_workflow.py``.
+
+    ~20 s per test because spawn re-imports everything from scratch.
+    """
+
+    def test_single_job_with_spawn_context(self, tmp_path: Path) -> None:
+        """Full real-OCR job through a SPAWN-mode worker. The tightest
+        possible parity with Windows production."""
+        import multiprocessing
+
+        from src.application.parallel_processor import ParallelProcessor
+        from src.core.models import OCRJobConfig
+        from src.shared.types import JobStatus
+
+        input_pdf = render_clean_text_pdf(
+            tmp_path / "in.pdf", text="SPAWN MODE"
+        )
+        output_pdf = tmp_path / "out.pdf"
+
+        spawn_ctx = multiprocessing.get_context("spawn")
+        pp = ParallelProcessor(max_workers=1, mp_context=spawn_ctx)
+        try:
+            progress_events: list[tuple[str, int, int, str]] = []
+
+            def on_progress(
+                job_id: str, current: int, total: int, stage: str
+            ) -> None:
+                progress_events.append((job_id, current, total, stage))
+
+            future = pp.submit(
+                OCRJobConfig(
+                    input_path=str(input_pdf),
+                    output_path=str(output_pdf),
+                    profile=_quick_profile(),
+                ),
+                on_progress=on_progress,
+            )
+            result_dict = future.result(timeout=120)
+        finally:
+            pp.shutdown(wait=True)
+
+        assert result_dict["status"] == JobStatus.COMPLETED.value, (
+            f"Spawn-mode job FAILED: {result_dict.get('error')!r}"
+        )
+        assert output_pdf.exists()
+
+        # Progress events crossed the IPC bridge — spawn mode uses
+        # a NEW multiprocessing.Queue, not a fork-inherited one.
+        stages = {s for _, _, _, s in progress_events}
+        assert "ocr" in stages, (
+            f"No OCR progress in spawn mode. Stages: {stages}"
+        )
+
+        # Real text landed.
+        import fitz
+
+        with fitz.open(str(output_pdf)) as doc:
+            text = doc.load_page(0).get_text("text") or ""
+        assert any(
+            w in text.upper() for w in ("SPAWN", "MODE")
+        ), f"output PDF lacks text: {text!r}"
+
+    def test_spawn_context_concurrent_jobs(self, tmp_path: Path) -> None:
+        """Two concurrent jobs in spawn mode — worker processes share
+        nothing. Each must independently discover Tesseract from
+        PATH, reconstruct the pipeline, and produce output."""
+        import multiprocessing
+
+        from src.application.parallel_processor import ParallelProcessor
+        from src.core.models import OCRJobConfig
+        from src.shared.types import JobStatus
+
+        in1 = render_clean_text_pdf(tmp_path / "a.pdf", text="ALPHA")
+        in2 = render_clean_text_pdf(tmp_path / "b.pdf", text="BRAVO")
+        out1 = tmp_path / "a_ocr.pdf"
+        out2 = tmp_path / "b_ocr.pdf"
+
+        spawn_ctx = multiprocessing.get_context("spawn")
+        pp = ParallelProcessor(max_workers=2, mp_context=spawn_ctx)
+        try:
+            f1 = pp.submit(
+                OCRJobConfig(
+                    input_path=str(in1),
+                    output_path=str(out1),
+                    profile=_quick_profile(),
+                ),
+            )
+            f2 = pp.submit(
+                OCRJobConfig(
+                    input_path=str(in2),
+                    output_path=str(out2),
+                    profile=_quick_profile(),
+                ),
+            )
+            r1 = f1.result(timeout=120)
+            r2 = f2.result(timeout=120)
+        finally:
+            pp.shutdown(wait=True)
+
+        assert r1["status"] == JobStatus.COMPLETED.value, r1.get("error")
+        assert r2["status"] == JobStatus.COMPLETED.value, r2.get("error")
+        assert out1.exists() and out2.exists()

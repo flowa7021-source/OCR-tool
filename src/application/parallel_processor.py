@@ -461,13 +461,24 @@ class ParallelProcessor:
         max_workers: Maximum concurrent worker processes.
     """
 
-    def __init__(self, max_workers: int = DEFAULT_PARALLEL_WORKERS) -> None:
+    def __init__(
+        self,
+        max_workers: int = DEFAULT_PARALLEL_WORKERS,
+        mp_context: multiprocessing.context.BaseContext | None = None,
+    ) -> None:
         """Create a processor with ``max_workers`` workers.
 
         Args:
             max_workers: Number of worker processes.
+            mp_context: Optional :mod:`multiprocessing` context to pass
+                to :class:`ProcessPoolExecutor` (e.g.
+                ``multiprocessing.get_context("spawn")``). ``None``
+                uses the platform default (``fork`` on Linux, ``spawn``
+                on Windows). Exposed so test suites can force ``spawn``
+                on Linux for Windows-parity.
         """
         self.max_workers = max(1, int(max_workers))
+        self._mp_context = mp_context
         self._executor: ProcessPoolExecutor | None = None
 
         # Cross-process progress plumbing. A Manager gives us a proxy Queue
@@ -546,9 +557,14 @@ class ParallelProcessor:
                 )
                 # max_tasks_per_child was added in 3.11; fall back if we
                 # ever get run on an older interpreter.
+                executor_kwargs: dict[str, object] = {
+                    "max_workers": self.max_workers,
+                }
+                if self._mp_context is not None:
+                    executor_kwargs["mp_context"] = self._mp_context
                 try:
                     self._executor = ProcessPoolExecutor(
-                        max_workers=self.max_workers,
+                        **executor_kwargs,
                         max_tasks_per_child=10,
                     )
                 except TypeError:
@@ -556,9 +572,7 @@ class ParallelProcessor:
                         "max_tasks_per_child unsupported on this Python; "
                         "workers will not recycle"
                     )
-                    self._executor = ProcessPoolExecutor(
-                        max_workers=self.max_workers
-                    )
+                    self._executor = ProcessPoolExecutor(**executor_kwargs)
                 self._start_progress_bridge()
             return self._executor
 
