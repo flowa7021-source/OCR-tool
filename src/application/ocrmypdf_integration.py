@@ -191,12 +191,14 @@ def _invoke_ocrmypdf_with_timeout_retry(
          recognised characters. The job looks successful; the user
          sees empty text and can't tell it was a timeout.
 
-    Both shapes are fixed by the same escalation: retry with::
+    Both shapes are fixed by the same escalation: retry with
+    ``tesseract_timeout = min(base * 3, _MAX_RETRY_TESSERACT_TIMEOUT_SEC)``
+    — generally 3× the user's setting, floor 10 min, cap 15 min.
 
-      * ``tesseract_timeout = min(base * 3, _MAX_RETRY_TESSERACT_TIMEOUT_SEC)``
-      * ``use_threads = False`` — removes CPU contention between 4
-        parallel Tesseract workers which is often the root cause of
-        the timeout on mid-tier hardware.
+    We do NOT change ``use_threads`` on the retry: OCRmyPDF 16.x
+    has an upstream bug where ``use_threads=False`` crashes with
+    ``AttributeError: 'OcrOptions' object has no attribute
+    'tesseract'``.
 
     Any other exception (``ExitCodeException``, non-graft
     FileNotFoundError) propagates unchanged to the caller.
@@ -225,10 +227,16 @@ def _invoke_ocrmypdf_with_timeout_retry(
     )
     retry_kwargs = dict(kwargs)
     retry_kwargs["tesseract_timeout"] = retry_timeout
-    retry_kwargs["use_threads"] = False
+    # We used to also set ``use_threads=False`` to reduce CPU contention,
+    # but OCRmyPDF 16.x has an upstream bug where ``use_threads=False``
+    # crashes with ``AttributeError: 'OcrOptions' object has no attribute
+    # 'tesseract'`` inside ``generate_hocr``. Keeping the original
+    # ``use_threads`` value (``True``) avoids the crash; the timeout
+    # increase alone is sufficient for the retry to succeed on the
+    # vast majority of timed-out pages.
     logger.warning(
         "OCRmyPDF first attempt unusable (%s) at tesseract_timeout=%ds — "
-        "retrying once with tesseract_timeout=%ds and use_threads=False. "
+        "retrying once with tesseract_timeout=%ds. "
         "If this retry also fails the user will need to lower DPI or "
         "raise tesseract_timeout in the profile.",
         retry_reason, base_timeout, retry_timeout,

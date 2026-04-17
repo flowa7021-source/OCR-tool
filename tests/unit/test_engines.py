@@ -268,9 +268,8 @@ class TestRunOcrmypdfIntegration:
         in the graft phase with a ``FileNotFoundError`` pointing at a
         missing ``*_ocr_hocr.hocr``. The wrapper must NOT surface that
         error straight to the UI — it must first retry once with a
-        longer timeout (and ``use_threads=False`` to remove CPU
-        contention). Only if the retry also fails do we bubble up to
-        the user.
+        longer timeout. Only if the retry also fails do we bubble up
+        to the user.
 
         This test exercises the "retry succeeds" path: first call
         raises the graft-hocr-miss shape, second call returns cleanly,
@@ -332,14 +331,15 @@ class TestRunOcrmypdfIntegration:
         assert first_call.kwargs["tesseract_timeout"] == 120
         assert first_call.kwargs["use_threads"] is True
 
-        # Retry: timeout escalated to ≥ max(base*3, 600) = 600 and
-        # threading disabled to remove CPU contention as a variable.
+        # Retry: timeout escalated to ≥ max(base*3, 600) = 600.
+        # ``use_threads`` is NOT changed (OCRmyPDF 16.x upstream bug
+        # crashes when ``use_threads=False``).
         assert retry_call.kwargs["tesseract_timeout"] >= 600
         assert retry_call.kwargs["tesseract_timeout"] == 600, (
             "escalation should be min(max(base*3, 600), 900); "
             f"got {retry_call.kwargs['tesseract_timeout']}"
         )
-        assert retry_call.kwargs["use_threads"] is False
+        assert retry_call.kwargs["use_threads"] is True
 
     def test_graft_hocr_miss_persists_through_retry_raises_clear_error(
         self, tmp_path: Path
@@ -522,7 +522,9 @@ class TestRunOcrmypdfIntegration:
         # Second call kwargs reflect the escalation.
         retry_kwargs = fake_ocrmypdf.ocr.call_args_list[1].kwargs
         assert retry_kwargs["tesseract_timeout"] >= 600
-        assert retry_kwargs["use_threads"] is False
+        # use_threads must NOT be changed — OCRmyPDF 16.x crashes
+        # with use_threads=False.
+        assert retry_kwargs["use_threads"] is True
 
     def test_non_empty_output_skips_retry(self, tmp_path: Path) -> None:
         """The happy path must not retry — that would double every
