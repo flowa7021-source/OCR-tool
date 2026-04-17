@@ -8,22 +8,6 @@ on:
   schedule:
     - cron: "0 3 * * *"   # 03:00 UTC daily
   workflow_dispatch:       # manual trigger from the Actions tab
-  # TEMPORARY: also run on push to claude/** branches so the first
-  # real execution happens immediately instead of waiting until the
-  # next 03:00 UTC cron tick. Remove this once the suite has proven
-  # itself on a live run; after that the cron + manual-dispatch
-  # triggers are sufficient.
-  push:
-    branches:
-      - "claude/**"
-    paths:
-      - "src/application/engines/**"
-      - "src/application/ocrmypdf_integration.py"
-      - "tests/integration/test_e2e_retry_tiers.py"
-      - "tests/integration/test_e2e_engine_real.py"
-      - "tests/integration/test_nightly_corpus.py"
-      - "tests/fixtures/generate_fixtures.py"
-      - ".github/workflows/nightly-real-ocr.yml"
 
 concurrency:
   group: nightly-real-ocr
