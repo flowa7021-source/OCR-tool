@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 
+from src.shared.types import JobStatus
 from tests.integration._real_ocr_helpers import (
     assert_ocr_recognised,
     make_realistic_profile,
@@ -40,7 +41,6 @@ from tests.integration._real_ocr_helpers import (
     requires_real_russian_ocr,
     run_pipeline,
 )
-from src.shared.types import JobStatus
 
 pytestmark = [requires_real_ocr, pytest.mark.exercise_preflight]
 
