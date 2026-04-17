@@ -29,7 +29,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # Windows is the app's only shipping target — the installer
+        # is Windows-only, tessdata/ghostscript are bundled from
+        # Windows paths, and every user-reported bug has come from
+        # a Windows host. We drop Ubuntu from the per-PR tests to
+        # halve CI time; nightly-real-ocr.yml still runs on Ubuntu
+        # for cheap-and-fast cron coverage of the real-OCR suite.
+        os: [windows-latest]
         python-version: ["3.11", "3.12"]
 
     steps:

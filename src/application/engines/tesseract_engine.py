@@ -52,6 +52,34 @@ _RETRY_DPI: int = 200
 _LAST_RESORT_DPI: int = 150
 
 
+def _page_pdf_has_text(pdf_path: Path) -> bool:
+    """Return True if the single-page PDF at ``pdf_path`` has any text.
+
+    OCRmyPDF's "success" return doesn't guarantee a non-empty text
+    layer: when Tesseract times out or can't segment the page, the
+    graft phase stamps an EMPTY hOCR and OCRmyPDF still reports
+    completion. The engine's retry tiers need to distinguish
+    "stamped a real text layer" from "stamped an empty shell" —
+    this helper is the check.
+    """
+    import fitz
+
+    try:
+        with fitz.open(str(pdf_path)) as doc:
+            for page in doc:
+                if (page.get_text("text") or "").strip():
+                    return True
+    except Exception as exc:  # noqa: BLE001
+        # If we can't even open the output PDF, treat as no-text so
+        # the next tier gets a chance. A genuinely broken file would
+        # be caught by the raster-fallback branch anyway.
+        logger.debug(
+            "_page_pdf_has_text: failed to probe %s: %s", pdf_path, exc
+        )
+        return False
+    return False
+
+
 class TesseractEngine(OCREngine):
     """Tesseract 5 via OCRmyPDF — page-by-page processing with per-page retry.
 
@@ -156,21 +184,41 @@ class TesseractEngine(OCREngine):
                 page_out = work_dir / f"page_{i + 1:04d}_ocr.pdf"
                 page_opts = map_ocr_config(config, page_pdf, page_out)
 
+                primary_failed_reason: str | None = None
                 try:
                     run_ocrmypdf(page_opts)
+                except Exception as exc:  # noqa: BLE001
+                    primary_failed_reason = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                else:
+                    # ``run_ocrmypdf`` returns cleanly even when the
+                    # resulting PDF has an EMPTY text layer — OCRmyPDF
+                    # grafts a silent-skipped hOCR and calls it a
+                    # success. We must verify the output actually
+                    # has text; otherwise the retry tier never fires
+                    # and the user gets a raster-only page. This is
+                    # the "rotated_table.pdf" failure shape we hit
+                    # in CI: primary returned successfully, but the
+                    # page layer was empty.
+                    if not _page_pdf_has_text(page_out):
+                        primary_failed_reason = (
+                            "primary attempt returned empty text layer"
+                        )
+
+                if primary_failed_reason is None:
                     page_results.append(page_out)
                     ok_count += 1
                     logger.info(
                         "Page %d/%d OCR'd successfully", i + 1, page_count
                     )
                     continue
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Page %d/%d primary OCR FAILED (%s: %s); "
-                        "retrying with simplified settings",
-                        i + 1, page_count,
-                        type(exc).__name__, exc,
-                    )
+
+                logger.warning(
+                    "Page %d/%d primary OCR FAILED (%s); "
+                    "retrying with simplified settings",
+                    i + 1, page_count, primary_failed_reason,
+                )
 
                 recovered_pdf = self._retry_page_with_simpler_settings(
                     page_pdf=page_pdf,
@@ -316,6 +364,13 @@ class TesseractEngine(OCREngine):
                 page_index, type(exc).__name__, exc,
             )
             return None
+        if not _page_pdf_has_text(page_out):
+            logger.warning(
+                "Page %d simplified-settings retry returned empty text "
+                "layer — escalating to last-resort tier",
+                page_index,
+            )
+            return None
         return page_out
 
     def _retry_page_last_resort(
@@ -366,6 +421,17 @@ class TesseractEngine(OCREngine):
             logger.warning(
                 "Page %d last-resort retry also failed (%s: %s)",
                 page_index, type(exc).__name__, exc,
+            )
+            return None
+        # Even last-resort can return an empty layer on a genuinely
+        # unreadable page (all-white scan, destroyed content). Signal
+        # the caller so it falls back to raster rather than stamping
+        # an empty text layer that looks like it worked.
+        if not _page_pdf_has_text(page_out):
+            logger.warning(
+                "Page %d last-resort retry returned empty text layer — "
+                "page is truly unreadable, falling back to raster",
+                page_index,
             )
             return None
         return page_out

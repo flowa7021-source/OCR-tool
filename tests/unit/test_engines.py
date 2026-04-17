@@ -157,8 +157,6 @@ class TestTesseractEngine:
         assert out.exists()
 
     def test_progress_callback_fires(self, tmp_path: Path) -> None:
-        import shutil
-
         import fitz
 
         engine = TesseractEngine()
@@ -173,7 +171,18 @@ class TestTesseractEngine:
         events: list[tuple[int, int, str]] = []
 
         def _fake_run(opts):
-            shutil.copy2(str(opts.input_file), str(opts.output_file))
+            # Write a PDF with a real text layer — the engine now
+            # verifies the output PDF isn't an empty shell before
+            # accepting the primary attempt. A plain ``copy2`` of
+            # an empty raster would make the engine treat the
+            # primary as failed and try the retry tiers.
+            d = fitz.open()
+            try:
+                page = d.new_page(width=200, height=200)
+                page.insert_text((10, 50), "ocr'd text", fontsize=12)
+                d.save(str(opts.output_file))
+            finally:
+                d.close()
 
         with patch.object(engine, "is_available", return_value=(True, "")), \
              patch("src.application.engines.tesseract_engine.run_ocrmypdf", side_effect=_fake_run):
@@ -199,8 +208,6 @@ class TestTesseractEngine:
         PSM=SINGLE_BLOCK; those settings rescue the layout-crash
         cases that the primary run can't handle.
         """
-        import shutil
-
         import fitz
 
         from src.shared.types import PSM
@@ -218,6 +225,16 @@ class TestTesseractEngine:
         out = tmp_path / "out.pdf"
         call_log: list[tuple[str, int]] = []
 
+        def _write_text_pdf(path):
+            """Write a tiny PDF with a real text layer."""
+            d = fitz.open()
+            try:
+                page = d.new_page(width=200, height=200)
+                page.insert_text((10, 50), "mocked ocr", fontsize=12)
+                d.save(str(path))
+            finally:
+                d.close()
+
         def _fake_run(opts):
             """Fail on page 2 primary attempt; succeed everywhere else."""
             name = opts.input_file.name
@@ -226,7 +243,7 @@ class TestTesseractEngine:
             # page_0002_simpler.pdf is the retry; let it succeed.
             if name == "page_0002.pdf":
                 raise RuntimeError("simulated Tesseract layout crash")
-            shutil.copy2(str(opts.input_file), str(opts.output_file))
+            _write_text_pdf(opts.output_file)
 
         with patch.object(engine, "is_available", return_value=(True, "")), \
              patch("src.application.engines.tesseract_engine.run_ocrmypdf", side_effect=_fake_run):
@@ -265,8 +282,6 @@ class TestTesseractEngine:
         mode Tesseract offers; it almost never crashes on weird
         layouts (stamps, rotated tables, mixed handwriting).
         """
-        import shutil
-
         import fitz
 
         from src.shared.types import PSM
@@ -286,9 +301,17 @@ class TestTesseractEngine:
         def _fake_run(opts):
             name = opts.input_file.name
             call_log.append((name, opts.psm))
-            # Primary and simplified both crash; last-resort succeeds.
+            # Primary and simplified both crash; last-resort succeeds
+            # by writing a PDF with a REAL text layer (the engine now
+            # rejects empty-output success as a silent-timeout).
             if "lastresort" in name:
-                shutil.copy2(str(opts.input_file), str(opts.output_file))
+                d = fitz.open()
+                try:
+                    p = d.new_page(width=200, height=200)
+                    p.insert_text((10, 50), "sparse text recovery", fontsize=12)
+                    d.save(str(opts.output_file))
+                finally:
+                    d.close()
                 return
             raise RuntimeError("simulated layout crash")
 
