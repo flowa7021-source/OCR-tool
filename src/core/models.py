@@ -241,6 +241,13 @@ class PostprocessConfig:
     #: URLs, product codes) the classifier bails out rather than
     #: corrupt anything.
     fix_cyrillic_latin_confusion: bool = True
+    #: Strictness level for :mod:`src.core.garbage_filter`. The filter
+    #: drops line-level OCR garbage — symbol walls, ruler lines, and
+    #: (on strict) orphan single-letter lines / low-letter-ratio
+    #: runs. Stored as a string so JSON profiles round-trip cleanly
+    #: without a custom encoder. Accepted values: ``"disabled"``,
+    #: ``"lenient"`` (default), ``"strict"``.
+    garbage_filter_strictness: str = "lenient"
     custom_rules: list[RegexRule] = field(default_factory=list)
 
 

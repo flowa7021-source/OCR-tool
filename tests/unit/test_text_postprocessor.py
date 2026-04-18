@@ -16,7 +16,7 @@ def processor() -> TextPostprocessor:
     return TextPostprocessor()
 
 
-def _noop_config(**overrides: bool) -> PostprocessConfig:
+def _noop_config(**overrides) -> PostprocessConfig:
     """PostprocessConfig with everything OFF except the flag(s) we pass in."""
     base = {
         "autocorrect_russian": False,
@@ -26,6 +26,7 @@ def _noop_config(**overrides: bool) -> PostprocessConfig:
         "normalize_unicode": False,
         "remove_artifacts": False,
         "fix_cyrillic_latin_confusion": False,
+        "garbage_filter_strictness": "disabled",
         "custom_rules": [],
     }
     base.update(overrides)

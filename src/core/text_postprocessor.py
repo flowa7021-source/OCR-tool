@@ -18,6 +18,7 @@ import unicodedata
 from re import Pattern
 from typing import Final
 
+from src.core.garbage_filter import GarbageStrictness, filter_garbage_lines
 from src.core.models import PostprocessConfig, RegexRule
 from src.shared.validators import ValidationError
 
@@ -379,6 +380,28 @@ class TextPostprocessor:
         if config.remove_artifacts:
             current = self._remove_artifacts(current)
             logger.debug("Postprocess: artifact lines removed")
+
+        # Line-level garbage filter runs AFTER artifact removal (which
+        # strips obvious noise chars) and BEFORE the autocorrect passes
+        # (which operate on individual characters). Dropping garbage
+        # lines first means the regex rules don't waste cycles on
+        # lines we were going to throw away anyway.
+        strictness_raw = getattr(
+            config, "garbage_filter_strictness", "lenient",
+        )
+        try:
+            strictness = GarbageStrictness(strictness_raw)
+        except ValueError:
+            logger.warning(
+                "Unknown garbage_filter_strictness=%r — falling back "
+                "to 'lenient'", strictness_raw,
+            )
+            strictness = GarbageStrictness.LENIENT
+        if strictness is not GarbageStrictness.DISABLED:
+            current = filter_garbage_lines(current, strictness)
+            logger.debug(
+                "Postprocess: garbage filter applied (%s)", strictness.value,
+            )
 
         # Word-level Latin↔Cyrillic look-alike fix must run BEFORE the
         # regex autocorrects — those rules rely on the text already

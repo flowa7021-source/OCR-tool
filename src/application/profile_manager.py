@@ -265,6 +265,11 @@ class ProfileManager:
             # letter pairs like ``О/O`` at word edges, and the
             # in-context regex autocorrect can't catch those.
             fix_cyrillic_latin_confusion=True,
+            # Lenient garbage filter drops ruler lines and symbol
+            # walls Tesseract emits from table borders and page
+            # noise, without touching legitimate short tokens like
+            # "ООО" or numeric totals.
+            garbage_filter_strictness="lenient",
             custom_rules=[],
         )
         return ProfileData(
