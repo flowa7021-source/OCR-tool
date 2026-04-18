@@ -53,20 +53,48 @@ jobs:
       # Windows CI leg: install Tesseract + Ghostscript via Chocolatey
       # (same mechanism as the per-PR CI in ci.yml) and expose
       # TESSDATA_PREFIX so the pipeline picks up the system tessdata.
+      #
+      # Chocolatey updates system PATH during install, but the
+      # current PowerShell process keeps a stale PATH snapshot.
+      # Later steps see the fresh system PATH through GitHub
+      # Actions' environment propagation, BUT within a step it's
+      # still stale. Append the canonical install locations to
+      # ``GITHUB_PATH`` so subsequent steps find the binaries
+      # regardless of Chocolatey's own PATH timing.
       - name: Install Tesseract + Ghostscript (Chocolatey)
         shell: pwsh
         run: |
           choco install tesseract --no-progress -y
           choco install ghostscript --no-progress -y
-          # Chocolatey installs tessdata next to tesseract.exe.
-          $tess = Get-Command tesseract -ErrorAction SilentlyContinue
-          if ($tess) {
-            $tessdir = Split-Path $tess.Source
-            $tessdata = Join-Path $tessdir "tessdata"
+
+          # Canonical Tesseract install location.
+          $tessInstall = "C:\Program Files\Tesseract-OCR"
+          if (Test-Path (Join-Path $tessInstall "tesseract.exe")) {
+            echo "$tessInstall" >> $env:GITHUB_PATH
+            $tessdata = Join-Path $tessInstall "tessdata"
             if (Test-Path $tessdata) {
               echo "TESSDATA_PREFIX=$tessdata" >> $env:GITHUB_ENV
               Write-Host "TESSDATA_PREFIX=$tessdata"
             }
+          }
+
+          # Ghostscript: Chocolatey installs into
+          # ``C:\Program Files\gs\gsVERSION\bin``. Version changes
+          # per release, so scan for any gs* subdirectory.
+          $gsRoot = "C:\Program Files\gs"
+          if (Test-Path $gsRoot) {
+            $gsBin = Get-ChildItem $gsRoot -Directory |
+                     ForEach-Object { Join-Path $_.FullName "bin" } |
+                     Where-Object { Test-Path (Join-Path $_ "gswin64c.exe") } |
+                     Select-Object -First 1
+            if ($gsBin) {
+              echo "$gsBin" >> $env:GITHUB_PATH
+              Write-Host "Ghostscript bin added to PATH: $gsBin"
+            } else {
+              Write-Warning "No gswin64c.exe found under $gsRoot"
+            }
+          } else {
+            Write-Warning "Ghostscript install root $gsRoot not found"
           }
 
       # Chocolatey's tesseract package ships ``eng.traineddata`` only.
