@@ -8,6 +8,24 @@ on:
   schedule:
     - cron: "0 3 * * *"   # 03:00 UTC daily
   workflow_dispatch:       # manual trigger from the Actions tab
+  # TEMPORARY: run on push while we validate Initiative 1 stages
+  # A-D (benchmark, script detection, garbage filter, user dicts)
+  # against real Windows + Tesseract. Remove after the first
+  # green run establishes the baseline CER/WER.
+  push:
+    branches:
+      - "claude/**"
+    paths:
+      - "src/core/script_detector.py"
+      - "src/core/garbage_filter.py"
+      - "src/core/text_postprocessor.py"
+      - "src/core/models.py"
+      - "src/application/ocrmypdf_integration.py"
+      - "src/application/engines/**"
+      - "resources/tessdata/user-*"
+      - "tests/fixtures/accuracy_corpus/**"
+      - "tests/integration/test_accuracy_benchmark.py"
+      - ".github/workflows/nightly-real-ocr.yml"
 
 concurrency:
   group: nightly-real-ocr
