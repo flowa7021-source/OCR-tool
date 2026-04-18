@@ -643,9 +643,22 @@ jobs:
           $dst = "${{ github.workspace }}\resources\ghostscript"
           New-Item -ItemType Directory -Force -Path $dst | Out-Null
 
-          # Lift gswin64c.exe + gsdll64.dll only. OCRmyPDF's OCR merge
-          # path doesn't exercise Fontmap/iccprofiles/Resource assets,
-          # and bundling them adds ~30 MB for zero gain.
+          # gswin64c.exe + gsdll64.dll alone are NOT enough. Ghostscript's
+          # PostScript interpreter refuses to start without the runtime
+          # libraries in ``lib/`` and the initialisation files in
+          # ``Resource/Init/`` (specifically gs_init.ps). The previous
+          # build skipped both subdirs to save ~30 MB — that worked
+          # accidentally because OCRmyPDF only invokes Ghostscript at
+          # the optimization step, and end-to-end OCR was hitting the
+          # tessdata/configs bug long before reaching optimization.
+          # With configs/ fixed, the Ghostscript-Resource gap becomes
+          # the next visible failure mode (PDF would build but the
+          # final ``optimize=LOSSLESS`` pass would crash with
+          # "Can't find initialization file gs_init.ps").
+          #
+          # Bundling lib/ + Resource/ adds ~25 MB to the installer —
+          # an acceptable tax for "OCR finishes without a cryptic
+          # PostScript error".
           foreach ($wanted in @("gswin64c.exe", "gsdll64.dll")) {
             $hit = Get-ChildItem -Path $extractDir -Filter $wanted -Recurse -File |
                    Select-Object -First 1
@@ -656,11 +669,101 @@ jobs:
             Write-Host ("Copied {0} ({1:N1} MB)" -f $wanted, ($hit.Length/1MB))
           }
 
-          # Smoke test.
+          # Locate the Ghostscript install root (parent of bin\, lib\, Resource\).
+          $gsExe = Get-ChildItem -Path $extractDir -Filter "gswin64c.exe" -Recurse -File |
+                   Select-Object -First 1
+          if (-not $gsExe) { throw "gswin64c.exe missing after extraction" }
+          # Resource/ and lib/ live at the same level as bin/ — go up
+          # two levels from ``...\bin\gswin64c.exe`` to find them.
+          $gsRoot = $gsExe.Directory.Parent.FullName
+          Write-Host "Ghostscript root: $gsRoot"
+
+          # Copy lib/ — the PostScript runtime (~3 MB)
+          $libSrc = Join-Path $gsRoot "lib"
+          if (Test-Path $libSrc) {
+            Copy-Item -Path $libSrc -Destination (Join-Path $dst "lib") `
+                      -Recurse -Force
+            Write-Host "Copied Ghostscript lib/"
+          } else {
+            throw "Ghostscript lib/ subdirectory not found at $libSrc"
+          }
+
+          # Copy Resource/Init/ + Resource/Font/ + Resource/CMap/ +
+          # Resource/ColorSpace/ + iccprofiles/. These are everything
+          # Ghostscript's pdfwrite device needs to round-trip a PDF
+          # through the optimization pipeline. We DON'T copy the full
+          # Resource/ tree because Resource/CIDFont/ alone is ~15 MB
+          # of CJK fonts our users don't need.
+          $resSrc = Join-Path $gsRoot "Resource"
+          $resDst = Join-Path $dst "Resource"
+          New-Item -ItemType Directory -Force -Path $resDst | Out-Null
+          foreach ($sub in @("Init", "Font", "CMap", "ColorSpace", "Decoding")) {
+            $src = Join-Path $resSrc $sub
+            if (Test-Path $src) {
+              Copy-Item -Path $src `
+                        -Destination (Join-Path $resDst $sub) `
+                        -Recurse -Force
+              Write-Host "Copied Resource/$sub"
+            } else {
+              Write-Warning "Resource/$sub not found — skipping"
+            }
+          }
+
+          # iccprofiles/ for PDF/A and colour management (~2 MB)
+          $iccSrc = Join-Path $gsRoot "iccprofiles"
+          if (Test-Path $iccSrc) {
+            Copy-Item -Path $iccSrc `
+                      -Destination (Join-Path $dst "iccprofiles") `
+                      -Recurse -Force
+            Write-Host "Copied iccprofiles/"
+          }
+
+          # Sanity: Resource/Init/gs_init.ps MUST be present — it's
+          # the one file Ghostscript stat()s to start the PostScript
+          # interpreter. Without it every Ghostscript invocation
+          # bails immediately.
+          $gsInit = Join-Path $resDst "Init\gs_init.ps"
+          if (-not (Test-Path $gsInit)) {
+            throw "Ghostscript Resource/Init/gs_init.ps missing after copy"
+          }
+
+          $totalMB = [math]::Round(
+            ((Get-ChildItem $dst -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB),
+            1
+          )
+          Write-Host "Ghostscript bundle total: $totalMB MB"
+
+          # Smoke test #1: --version (works without Resource/lib).
           & "$dst\gswin64c.exe" --version
           if ($LASTEXITCODE -ne 0) {
             throw "Bundled gswin64c.exe --version failed (exit=$LASTEXITCODE)"
           }
+
+          # Smoke test #2: actually interpret a tiny PostScript program.
+          # This is the test that catches missing Resource/Init/gs_init.ps —
+          # the previous --version-only check would pass even with a
+          # broken Ghostscript bundle because --version short-circuits
+          # the PostScript interpreter init. Building a one-page PDF
+          # via pdfwrite forces the interpreter to load gs_init.ps,
+          # the Resource/Font/ defaults, and an iccprofiles entry.
+          $smokeIn  = Join-Path $env:RUNNER_TEMP "gs-smoke-in.ps"
+          $smokeOut = Join-Path $env:RUNNER_TEMP "gs-smoke-out.pdf"
+          @"
+%!PS
+/Helvetica findfont 12 scalefont setfont
+72 720 moveto (Ghostscript bundle smoke test) show
+showpage
+"@ | Out-File -FilePath $smokeIn -Encoding ascii
+          & "$dst\gswin64c.exe" `
+              -dBATCH -dNOPAUSE -dQUIET `
+              -sDEVICE=pdfwrite `
+              -o $smokeOut $smokeIn
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $smokeOut)) {
+            throw "Bundled Ghostscript pdfwrite smoke test failed (exit=$LASTEXITCODE). Resource/Init/lib/ likely incomplete."
+          }
+          Write-Host "Ghostscript pdfwrite smoke test OK ($((Get-Item $smokeOut).Length) bytes)"
+          Remove-Item $smokeIn, $smokeOut -ErrorAction SilentlyContinue
+
           Get-ChildItem $dst | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,2)}}
 
       # ------------------------------------------------------------------

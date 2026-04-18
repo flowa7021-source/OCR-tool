@@ -220,11 +220,72 @@ def verify_required_for_ocrmypdf() -> list[str]:
     in the pipeline so end users see a meaningful error message
     instead of OCRmyPDF's internal ``MissingDependencyError``
     stacktrace.
+
+    A tool is considered "missing" not only when its binary is
+    absent but also when its required runtime files are incomplete
+    — e.g. Ghostscript with no ``Resource/Init/gs_init.ps`` will
+    fail every PostScript call even though ``gswin64c.exe`` exists.
     """
     missing: list[str] = []
     for tool in REGISTRY:
         if not tool.required_for_ocrmypdf:
             continue
-        if locate(tool) is None:
+        path = locate(tool)
+        if path is None:
             missing.append(tool.name)
+            continue
+        if tool.name == "ghostscript" and not _ghostscript_runtime_complete(path):
+            missing.append("ghostscript (incomplete: missing Resource/Init/)")
     return missing
+
+
+def _ghostscript_runtime_complete(gs_binary: Path) -> bool:
+    """Check that the Ghostscript bundle has the files PS interp needs.
+
+    ``gswin64c.exe --version`` works without the runtime tree, but any
+    actual PostScript work (which OCRmyPDF's optimisation step does)
+    fails immediately with ``Error: /undefinedfilename in (gs_init.ps)``
+    when ``Resource/Init/gs_init.ps`` is missing. Same for the
+    ``lib/`` subdirectory.
+
+    For system-installed Ghostscript these always exist; the check
+    matters specifically for our bundled-installer path where a build
+    regression could ship gswin64c.exe + gsdll64.dll without the
+    Resource tree.
+
+    Returns True when the runtime tree is intact OR when the binary
+    is on the system PATH (we trust system installs).
+    """
+    bundle_dirs = [
+        p for tool in REGISTRY if tool.name == "ghostscript"
+        for p in [tool.bundle_dir]
+    ]
+    bin_dir = gs_binary.parent
+    is_bundled = any(
+        bundle_dir.resolve() == bin_dir.resolve()
+        for bundle_dir in bundle_dirs
+        if bundle_dir is not None
+    )
+    if not is_bundled:
+        return True
+
+    gs_init = bin_dir / "Resource" / "Init" / "gs_init.ps"
+    gs_lib = bin_dir / "lib"
+    if not gs_init.is_file():
+        logger.error(
+            "Bundled Ghostscript missing Resource/Init/gs_init.ps at %s — "
+            "PostScript interpreter cannot start. OCRmyPDF optimisation "
+            "step will fail at the end of every job. Reinstall the latest "
+            "OCR Studio build or copy the missing files from a working "
+            "Ghostscript install at the same version.",
+            gs_init,
+        )
+        return False
+    if not gs_lib.is_dir():
+        logger.error(
+            "Bundled Ghostscript missing lib/ subdirectory at %s — "
+            "PostScript runtime will fail. Reinstall the latest build.",
+            gs_lib,
+        )
+        return False
+    return True
