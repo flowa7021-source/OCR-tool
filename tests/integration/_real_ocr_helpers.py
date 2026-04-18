@@ -80,8 +80,26 @@ def tesseract_tessdata_dir() -> Path | None:
     return None
 
 
+def _find_ghostscript() -> str | None:
+    """Return a Ghostscript executable path, or None.
+
+    The console binary is called ``gs`` on POSIX but ``gswin64c.exe`` /
+    ``gswin32c.exe`` on Windows — Artifex's Windows build never ships a
+    ``gs.exe``. ``shutil.which("gs")`` therefore returns ``None`` on
+    every Windows host with a correctly-installed Ghostscript, and the
+    ``REAL_OCR_AVAILABLE`` probe below would silently skip every
+    real-OCR test under ``tests/integration/``. Scan the platform-
+    specific names so Windows CI actually runs the suite.
+    """
+    for name in ("gs", "gswin64c", "gswin32c"):
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
 REAL_OCR_AVAILABLE: bool = bool(
-    shutil.which("tesseract") and shutil.which("gs")
+    shutil.which("tesseract") and _find_ghostscript()
 )
 """``True`` when the host has both Tesseract and Ghostscript on PATH."""
 

@@ -220,8 +220,31 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           OCR_ACCURACY_BENCHMARK: "1"
         run: |
+          # If baseline.json is missing (first run on this OS / after a
+          # deliberate reset), capture it via --regenerate-baseline so
+          # the tests exit 0 with the measurements written to the
+          # baseline path; the artifact upload below picks it up for
+          # the maintainer to commit. Once a baseline is in the repo,
+          # subsequent nightlies run the assertion path.
+          $baseline = "tests/fixtures/accuracy_corpus/baseline.json"
+          $regen = @()
+          if (-not (Test-Path $baseline)) {
+            Write-Host "No baseline.json — capturing a new one"
+            $regen = @("--regenerate-baseline")
+          } else {
+            Write-Host "Using committed baseline $baseline"
+          }
           pytest tests/integration/test_accuracy_benchmark.py `
-                 --tb=short -v
+                 --tb=short -v @regen
+
+      - name: Upload captured accuracy baseline
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accuracy-baseline-${{ github.run_id }}
+          path: tests/fixtures/accuracy_corpus/baseline.json
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Stage 3 — full nightly corpus matrix
         shell: pwsh
