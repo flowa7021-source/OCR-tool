@@ -1,3 +1,37 @@
 {
-  "_comment": "OCR accuracy baseline. Each entry records the CER and WER measured by tests/integration/test_accuracy_benchmark.py for the current preprocessing + postprocessing + engine stack. A new measurement that exceeds baseline + tolerance fails the benchmark. Regenerate with `pytest tests/integration/test_accuracy_benchmark.py --regenerate-baseline` after an intentional accuracy improvement. Numbers below are placeholder 'first-run' values — nightly CI will populate real numbers via --regenerate-baseline once Tesseract binaries are available. Every field is float ∈ [0, 1]; 0.0 is perfect, 1.0 is no overlap with truth."
+  "en_business_letter": {
+    "name": "en_business_letter",
+    "cer": 0.0055,
+    "wer": 0.0217,
+    "recognised_chars": 540,
+    "ground_truth_chars": 541
+  },
+  "ru_business_letter": {
+    "name": "ru_business_letter",
+    "cer": 0.0216,
+    "wer": 0.2317,
+    "recognised_chars": 557,
+    "ground_truth_chars": 556
+  },
+  "ru_en_mixed_memo": {
+    "name": "ru_en_mixed_memo",
+    "cer": 0.104,
+    "wer": 0.2597,
+    "recognised_chars": 579,
+    "ground_truth_chars": 577
+  },
+  "ru_invoice_body": {
+    "name": "ru_invoice_body",
+    "cer": 0.0156,
+    "wer": 0.0777,
+    "recognised_chars": 579,
+    "ground_truth_chars": 578
+  },
+  "ru_dense_small": {
+    "name": "ru_dense_small",
+    "cer": 0.0,
+    "wer": 0.0,
+    "recognised_chars": 601,
+    "ground_truth_chars": 601
+  }
 }
