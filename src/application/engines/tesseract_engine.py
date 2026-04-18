@@ -65,34 +65,107 @@ _RETRY_DPI: int = 200
 # is the whole point of this tier.
 _LAST_RESORT_DPI: int = 150
 
-# Cap on inner per-page parallelism. The outer ParallelProcessor
-# may already be running N files concurrently — we don't want the
-# engine to multiply that by another 4× and thrash a 4-core CPU
-# with 16 concurrent Tesseract subprocesses. 4 is a sweet spot for
-# typical 4-8 core consumer hardware: enough parallelism for big
-# wins on single-file runs, tame enough that queue mode doesn't
-# explode.
-_MAX_PER_PAGE_WORKERS: int = 4
+# Initiative 3: cap on inner per-page parallelism raised from
+# 4 to 8. 8 matches the core count on the modern Windows laptops
+# this app targets. The outer ``ParallelProcessor`` still runs
+# files in parallel, but the memory-pressure guard below keeps
+# outer × inner from thrashing the OS with more concurrent
+# Tesseract subprocesses than the host's RAM can hold.
+_MAX_PER_PAGE_WORKERS: int = 8
+
+# Memory budget per worker. A Tesseract + OCRmyPDF + pikepdf
+# pipeline on a 500 DPI A4 page holds:
+#   * ~80 MB for the binarised page in RAM
+#   * ~150 MB for the LSTM forward pass
+#   * ~100 MB for pikepdf's in-flight object buffers
+# Rounded up to 500 MB for safety on real-world page complexity
+# (tables, stamps, photographed pages with rich colour channels).
+_MIN_RAM_PER_WORKER_MB: int = 500
 
 
-def _resolve_per_page_workers(page_count: int) -> int:
+def _available_memory_mb() -> int | None:
+    """Return free + reclaimable memory in MB, or None if psutil
+    isn't importable.
+
+    We query ``psutil.virtual_memory().available`` which includes
+    file-cache pages the OS can drop under pressure — the
+    practically-free memory the OS will hand to our processes.
+    """
+    try:
+        import psutil  # type: ignore[import-not-found]
+    except ImportError:  # pragma: no cover - psutil is a real dep
+        return None
+    try:
+        return int(psutil.virtual_memory().available / (1024 * 1024))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _resolve_per_page_workers(
+    page_count: int,
+    *,
+    cpu_count: int | None = None,
+    available_memory_mb: int | None = None,
+) -> int:
     """Pick how many worker threads to use for per-page OCR.
 
-    Override via ``OCR_PER_PAGE_WORKERS=N`` for debugging or hosts
-    with very many cores. Default: ``min(page_count, cpu_count, 4)``.
+    Three caps, the tightest wins:
+      * ``page_count`` — can't run more workers than pages.
+      * ``cpu_count`` (default: :func:`os.cpu_count`) — more
+        workers than cores wastes context switches.
+      * Memory budget — ``available_memory_mb //
+        _MIN_RAM_PER_WORKER_MB``. Oversubscribing RAM drops us
+        into swap, which is strictly worse than fewer workers.
+
+    And two bypasses, in this order:
+      * ``OCR_PER_PAGE_WORKERS`` env var — user can force a
+        specific count (still clamped against page_count).
+      * ``_MAX_PER_PAGE_WORKERS`` global cap (default 8) — even
+        on a 32-core box with 128 GB RAM we don't exceed this.
+
+    Returns:
+        Integer ≥ 1. Never 0 — a zero would make the
+        ThreadPoolExecutor refuse submitted work.
     """
+    # Normalise inputs — caller passes explicit values in tests,
+    # production uses the live system values.
+    if cpu_count is None:
+        cpu_count = os.cpu_count() or 1
+    if available_memory_mb is None:
+        available_memory_mb = _available_memory_mb()
+
+    # Env override short-circuits auto-detect but still respects
+    # the page-count upper bound.
     override = os.environ.get("OCR_PER_PAGE_WORKERS")
     if override:
         try:
             n = int(override)
             if n >= 1:
-                return min(page_count, n)
+                return max(1, min(max(page_count, 1), n))
         except ValueError:
             logger.warning(
-                "Ignoring invalid OCR_PER_PAGE_WORKERS=%r", override
+                "Ignoring invalid OCR_PER_PAGE_WORKERS=%r", override,
             )
-    cpu = os.cpu_count() or 1
-    return max(1, min(page_count, cpu, _MAX_PER_PAGE_WORKERS))
+
+    workers = min(
+        max(page_count, 1),  # zero-page edge case: floor to 1
+        cpu_count,
+        _MAX_PER_PAGE_WORKERS,
+    )
+
+    if available_memory_mb is not None:
+        memory_cap = max(1, available_memory_mb // _MIN_RAM_PER_WORKER_MB)
+        if memory_cap < workers:
+            logger.info(
+                "Per-page workers throttled by available RAM: "
+                "%d MB available, %d MB per worker → %d workers "
+                "(cpu/page cap would have been %d)",
+                available_memory_mb, _MIN_RAM_PER_WORKER_MB,
+                memory_cap, workers,
+            )
+        workers = min(workers, memory_cap)
+
+    return max(1, workers)
 
 
 def _page_pdf_has_text(pdf_path: Path) -> bool:
