@@ -73,16 +73,42 @@ jobs:
       # The accuracy benchmark + retry-tier tests need Russian
       # recognition, so fetch ``rus`` and ``osd`` from the official
       # tessdata_best repo and drop them next to eng.
+      #
+      # Note on PATH discovery: Chocolatey updates system PATH during
+      # its install step, but the CURRENT PowerShell process keeps
+      # the old PATH snapshot until ``refreshenv`` or a new shell.
+      # ``Get-Command tesseract`` in this step would fail with
+      # "tesseract not on PATH" even though the binary is installed
+      # at the well-known Chocolatey location. Fall back to the
+      # canonical install directory when the PATH lookup misses.
       - name: Download rus + osd traineddata
         shell: pwsh
         run: |
           $tess = Get-Command tesseract -ErrorAction SilentlyContinue
-          if (-not $tess) { throw "tesseract not on PATH" }
-          $tessdir = Split-Path $tess.Source
+          if ($tess) {
+            $tessdir = Split-Path $tess.Source
+          } else {
+            $tessdir = "C:\Program Files\Tesseract-OCR"
+            $exe = Join-Path $tessdir "tesseract.exe"
+            if (-not (Test-Path $exe)) {
+              throw (
+                "tesseract not on PATH and not at the default " +
+                "Chocolatey install location ($tessdir). " +
+                "Check the 'Install Tesseract + Ghostscript' step."
+              )
+            }
+            Write-Host "Using Chocolatey default location: $tessdir"
+            # Also expose it to subsequent steps so the pipeline's
+            # own PATH discovery works when it shells out.
+            echo "$tessdir" >> $env:GITHUB_PATH
+          }
           $tessdata = Join-Path $tessdir "tessdata"
           if (-not (Test-Path $tessdata)) {
             New-Item -ItemType Directory -Force -Path $tessdata | Out-Null
           }
+          # Re-export TESSDATA_PREFIX in case the previous step
+          # skipped it (it gated on Get-Command too).
+          echo "TESSDATA_PREFIX=$tessdata" >> $env:GITHUB_ENV
           $base = "https://github.com/tesseract-ocr/tessdata_best/raw/main"
           foreach ($lang in @("rus", "osd")) {
             $out = Join-Path $tessdata "$lang.traineddata"
