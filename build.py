@@ -67,6 +67,31 @@ def ensure_resources() -> None:
             "Place them in resources/tessdata/ before shipping."
         )
 
+    # Stage D of Initiative 1: user-words + user-patterns. These are
+    # checked into the repo under ``resources/tessdata/`` and picked
+    # up automatically by the ``--add-data=resources/tessdata`` hook
+    # below, but someone deleting them would silently regress Russian
+    # accuracy (ИНН / КПП / dates / entity abbreviations) with no
+    # visible error. Refuse to build so the regression is caught at
+    # packaging time rather than after release.
+    required_user_dicts = ("user-words.rus", "user-patterns.rus")
+    missing_user_dicts = [
+        f for f in required_user_dicts if not (tessdata / f).exists()
+    ]
+    if missing_user_dicts:
+        raise SystemExit(
+            f"[build] ERROR: tessdata/ missing required user-dict files: "
+            f"{missing_user_dicts}.\n"
+            "These files hold Russian business vocabulary and regex "
+            "patterns (ИНН / КПП / dates) that Tesseract loads at OCR "
+            "time to improve accuracy. They live in the repo under "
+            "resources/tessdata/ and are bundled automatically by the "
+            "--add-data hook; only a manual delete or a broken checkout "
+            "would remove them. Restore them from git (``git checkout "
+            "-- resources/tessdata/user-words.rus "
+            "resources/tessdata/user-patterns.rus``) and re-run."
+        )
+
     # The ``configs/`` subdirectory of tessdata holds Tesseract's
     # output-format params (``hocr``, ``txt``, ``pdf``, etc.). Without
     # these the bundled Tesseract runs but cannot emit hOCR — every

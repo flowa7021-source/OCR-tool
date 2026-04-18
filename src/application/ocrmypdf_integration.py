@@ -15,8 +15,59 @@ from pathlib import Path
 from typing import Any
 
 from src.core.models import OCRConfig
+from src.shared.constants import TESSDATA_DIR
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_user_dict_paths(primary_language: str) -> tuple[Path | None, Path | None]:
+    """Return paths to bundled user-words / user-patterns for ``primary_language``.
+
+    Looks under the module-level :data:`TESSDATA_DIR` (which defaults to
+    ``resources/tessdata`` relative to the app root and is monkey-patched
+    by tests). If either file is missing, logs a WARNING and returns
+    ``None`` for that slot so the caller can skip the corresponding
+    ``user_words=`` / ``user_patterns=`` kwarg instead of crashing.
+
+    OCRmyPDF / Tesseract accept exactly one of each per run, so we
+    key off ``primary_language`` rather than the full language list —
+    picking the pair that matches what the document mostly contains.
+
+    Args:
+        primary_language: ISO 639-3 Tesseract language code, e.g.
+            ``"rus"`` or ``"eng"``. Anything outside our bundled set
+            results in ``(None, None)`` with a debug-level log (not a
+            warning — it's a supported no-op, not a misconfiguration).
+
+    Returns:
+        ``(user_words_path, user_patterns_path)``. Either element may
+        be ``None`` if the file is missing.
+    """
+    words_path = TESSDATA_DIR / f"user-words.{primary_language}"
+    patterns_path = TESSDATA_DIR / f"user-patterns.{primary_language}"
+
+    resolved_words: Path | None = words_path if words_path.is_file() else None
+    resolved_patterns: Path | None = (
+        patterns_path if patterns_path.is_file() else None
+    )
+
+    if resolved_words is None:
+        logger.warning(
+            "user-words file missing at %s — Tesseract will run without "
+            "the custom dictionary for language %r. Accuracy on ИНН / "
+            "КПП / ОГРН / month names may suffer. Check that the "
+            "installer bundled resources/tessdata/user-words.%s.",
+            words_path, primary_language, primary_language,
+        )
+    if resolved_patterns is None:
+        logger.warning(
+            "user-patterns file missing at %s — Tesseract will run "
+            "without custom regex patterns for language %r. Accuracy on "
+            "dates and tax IDs may suffer. Check that the installer "
+            "bundled resources/tessdata/user-patterns.%s.",
+            patterns_path, primary_language, primary_language,
+        )
+    return resolved_words, resolved_patterns
 
 
 class OCRmyPDFError(RuntimeError):
@@ -62,6 +113,13 @@ class OCRmyPDFOptions:
     char_blacklist: str = ""
     progress_bar: Callable[[int, int], None] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    #: Resolved paths to the bundled user-words / user-patterns files
+    #: for ``primary_language``. ``None`` means "do not forward the
+    #: corresponding kwarg to ocrmypdf.ocr" — either the user disabled
+    #: ``OCRConfig.use_user_dictionaries`` or the file is missing from
+    #: the bundle (graceful-degradation path, logged at map time).
+    user_words: Path | None = None
+    user_patterns: Path | None = None
 
 
 def map_ocr_config(
@@ -81,6 +139,15 @@ def map_ocr_config(
     Returns:
         Populated :class:`OCRmyPDFOptions` ready to pass to :func:`run_ocrmypdf`.
     """
+    # Resolve user-dict paths once up front so any "file missing"
+    # warning lands in the logs at pipeline-setup time, not deep
+    # inside the OCR call where it's harder to associate with the
+    # triggering job.
+    user_words: Path | None = None
+    user_patterns: Path | None = None
+    if cfg.use_user_dictionaries:
+        user_words, user_patterns = _resolve_user_dict_paths(cfg.primary_language)
+
     return OCRmyPDFOptions(
         input_file=input_file,
         output_file=output_file,
@@ -93,6 +160,8 @@ def map_ocr_config(
         char_whitelist=cfg.char_whitelist,
         char_blacklist=cfg.char_blacklist,
         progress_bar=progress_bar,
+        user_words=user_words,
+        user_patterns=user_patterns,
     )
 
 
@@ -292,6 +361,18 @@ def run_ocrmypdf(options: OCRmyPDFOptions) -> None:
     tess_config = _build_tesseract_config(options)
     if tess_config is not None:
         kwargs["tesseract_config"] = tess_config
+
+    # User-words / user-patterns forwarding. Only pass each kwarg if we
+    # have a resolved path; if the file was missing,
+    # ``_resolve_user_dict_paths`` already logged a warning and left
+    # the slot ``None`` so we silently skip it here (graceful
+    # degradation — the OCR still runs, just without the custom
+    # dictionary). Kwargs are serialised as strings because OCRmyPDF
+    # hands them straight to Tesseract's CLI.
+    if options.user_words is not None:
+        kwargs["user_words"] = str(options.user_words)
+    if options.user_patterns is not None:
+        kwargs["user_patterns"] = str(options.user_patterns)
 
     # Merge any advanced extras (allows callers to pass e.g. ``rotate_pages``).
     for key, value in options.extra.items():

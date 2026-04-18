@@ -159,6 +159,16 @@ class OCRConfig:
     #: default) disables the limit and means "OCR the whole document".
     #: Useful for previewing a profile before running a full 500-page job.
     max_pages: int = 0
+    #: Forward bundled ``resources/tessdata/user-words.{lang}`` and
+    #: ``user-patterns.{lang}`` to Tesseract via OCRmyPDF's ``user_words=``
+    #: and ``user_patterns=`` kwargs. OCRmyPDF / Tesseract accept only
+    #: ONE of each per run, so :mod:`src.application.ocrmypdf_integration`
+    #: picks the pair matching ``primary_language`` (typically ``"rus"``
+    #: for this app's Russian-first audience). Enabled by default: the
+    #: files are tiny, the accuracy win on ИНН / КПП / dates / entity
+    #: abbreviations is consistent, and if the files happen to be
+    #: missing the integration degrades gracefully with a WARNING.
+    use_user_dictionaries: bool = True
 
     @property
     def tesseract_language_string(self) -> str:
