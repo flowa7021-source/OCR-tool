@@ -24,7 +24,19 @@ on:
       - "src/application/engines/**"
       - "resources/tessdata/user-*"
       - "tests/fixtures/accuracy_corpus/**"
+      # Every test file this workflow actually runs — not just the
+      # accuracy benchmark. If a retry-tier or corpus-matrix test
+      # changes, nightly should re-exercise it too.
       - "tests/integration/test_accuracy_benchmark.py"
+      - "tests/integration/test_e2e_retry_tiers.py"
+      - "tests/integration/test_e2e_engine_real.py"
+      - "tests/integration/test_nightly_corpus.py"
+      # Shared helper that decides REAL_OCR_AVAILABLE and
+      # RUSSIAN_OCR_AVAILABLE for every real-OCR test. A change here
+      # (e.g. the recent gswin64c Windows-path fix) can silently
+      # flip the whole nightly between "runs" and "skips everything",
+      # so it belongs in the trigger paths.
+      - "tests/integration/_real_ocr_helpers.py"
       - ".github/workflows/nightly-real-ocr.yml"
 
 concurrency:
