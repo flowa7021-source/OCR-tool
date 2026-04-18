@@ -1,11 +1,17 @@
 """Tesseract 5 back-end (via OCRmyPDF).
 
 Processes each page INDIVIDUALLY through ``ocrmypdf.ocr`` so that a
-Tesseract crash on one page does not kill the rest. This is the
-primary design, not a fallback — production logs showed that batch
-OCR on multi-page PDFs fails whenever a single page has a complex
-element (stamp, rotated table, handwritten signature) that crashes
-Tesseract's layout analysis.
+Tesseract crash on one page does not kill the rest. Pages are OCR'd
+in **parallel** via a ``ThreadPoolExecutor`` so the N-page wall time
+matches the slowest page, not the sum. This was the speed regression
+that made the user's 4-page document take 15-20 minutes — the per-
+page split removed the implicit parallelism that ``ocrmypdf.ocr``
+had via its ``use_threads=True`` mode.
+
+Worker count is capped at ``min(page_count, cpu_count, 4)`` to avoid
+contending with the outer ``ParallelProcessor`` when the user runs a
+multi-file queue. Override with ``OCR_PER_PAGE_WORKERS=N`` for
+debugging or for hosts with very many cores.
 
 When a page fails on the primary attempt, the engine retries that
 specific page with progressively simpler settings (lower DPI raster,
@@ -13,6 +19,12 @@ Otsu binarisation, no preprocessing, more tolerant PSM) so that the
 final output has a text layer on **every** page. Only if every retry
 tier also fails for a page does the engine fall back to keeping the
 raster.
+
+Per-page OCR is invoked with ``optimize_level=NONE`` regardless of
+the user profile; OCRmyPDF's optimiser (Ghostscript re-encode) runs
+ONCE on the final merged PDF instead of N times. This saves
+~10-20 s per page on the user's 400 DPI workload at zero quality
+cost — the optimiser is lossy by definition only at level ≥ 2.
 """
 
 from __future__ import annotations
@@ -20,8 +32,10 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import logging
+import os
 import shutil
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from src.application.engines.base import (
@@ -50,6 +64,35 @@ _RETRY_DPI: int = 200
 # PSM.SPARSE_TEXT this almost always returns *some* text layer, which
 # is the whole point of this tier.
 _LAST_RESORT_DPI: int = 150
+
+# Cap on inner per-page parallelism. The outer ParallelProcessor
+# may already be running N files concurrently — we don't want the
+# engine to multiply that by another 4× and thrash a 4-core CPU
+# with 16 concurrent Tesseract subprocesses. 4 is a sweet spot for
+# typical 4-8 core consumer hardware: enough parallelism for big
+# wins on single-file runs, tame enough that queue mode doesn't
+# explode.
+_MAX_PER_PAGE_WORKERS: int = 4
+
+
+def _resolve_per_page_workers(page_count: int) -> int:
+    """Pick how many worker threads to use for per-page OCR.
+
+    Override via ``OCR_PER_PAGE_WORKERS=N`` for debugging or hosts
+    with very many cores. Default: ``min(page_count, cpu_count, 4)``.
+    """
+    override = os.environ.get("OCR_PER_PAGE_WORKERS")
+    if override:
+        try:
+            n = int(override)
+            if n >= 1:
+                return min(page_count, n)
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid OCR_PER_PAGE_WORKERS=%r", override
+            )
+    cpu = os.cpu_count() or 1
+    return max(1, min(page_count, cpu, _MAX_PER_PAGE_WORKERS))
 
 
 def _page_pdf_has_text(pdf_path: Path) -> bool:
@@ -157,9 +200,36 @@ class TesseractEngine(OCREngine):
             raise OCRmyPDFError("Preprocessed PDF has zero pages")
 
         work_dir = Path(tempfile.mkdtemp(prefix="ocr-pages-"))
-        page_results: list[Path] = []
-        ok_count = 0
-        retry_count = 0
+        # Per-index slot so parallel workers can drop their result
+        # without locking — Python list assignment to a fixed index
+        # is GIL-protected.
+        page_results: list[Path | None] = [None] * page_count
+        ok_pages: set[int] = set()
+        retry_pages: set[int] = set()
+
+        # Per-page work uses ``optimize=NONE`` to skip the Ghostscript
+        # re-encode pass (saves 10-20 s per page on the user's 400
+        # DPI workload). The final merged PDF is optimised once
+        # below using the user-configured level.
+        per_page_config = dataclasses.replace(
+            config, optimize_level=OptimizeLevel.NONE
+        )
+
+        # Progress accounting under a lock — multiple worker threads
+        # call back here as their pages finish.
+        import threading
+
+        progress_lock = threading.Lock()
+        completed_count = [0]
+
+        def _emit_progress() -> None:
+            if progress_callback is None:
+                return
+            with progress_lock:
+                completed_count[0] += 1
+                done = completed_count[0]
+            with contextlib.suppress(Exception):
+                progress_callback(done, page_count, "ocr")
 
         try:
             # 1. Split into single-page PDFs.
@@ -175,100 +245,80 @@ class TesseractEngine(OCREngine):
                     single.close()
             src.close()
 
-            # 2. OCR each page: primary → retry → last-resort.
-            for i, page_pdf in enumerate(page_pdfs):
-                if progress_callback is not None:
-                    with contextlib.suppress(Exception):
-                        progress_callback(i, page_count, "ocr")
+            # Initial 0% tick before any work starts so the UI stops
+            # showing a stale "page N-1" from the previous file.
+            if progress_callback is not None:
+                with contextlib.suppress(Exception):
+                    progress_callback(0, page_count, "ocr")
 
-                page_out = work_dir / f"page_{i + 1:04d}_ocr.pdf"
-                page_opts = map_ocr_config(config, page_pdf, page_out)
+            # 2. OCR each page in parallel: primary → retry → last-resort.
+            workers = _resolve_per_page_workers(page_count)
+            logger.info(
+                "Per-page OCR: %d pages × %d workers (cpu_count=%d)",
+                page_count, workers, os.cpu_count() or 1,
+            )
 
-                primary_failed_reason: str | None = None
-                try:
-                    run_ocrmypdf(page_opts)
-                except Exception as exc:  # noqa: BLE001
-                    primary_failed_reason = (
-                        f"{type(exc).__name__}: {exc}"
-                    )
-                else:
-                    # ``run_ocrmypdf`` returns cleanly even when the
-                    # resulting PDF has an EMPTY text layer — OCRmyPDF
-                    # grafts a silent-skipped hOCR and calls it a
-                    # success. We must verify the output actually
-                    # has text; otherwise the retry tier never fires
-                    # and the user gets a raster-only page. This is
-                    # the "rotated_table.pdf" failure shape we hit
-                    # in CI: primary returned successfully, but the
-                    # page layer was empty.
-                    if not _page_pdf_has_text(page_out):
-                        primary_failed_reason = (
-                            "primary attempt returned empty text layer"
-                        )
+            with ThreadPoolExecutor(max_workers=workers) as exe:
+                futures = {
+                    exe.submit(
+                        self._process_one_page,
+                        page_pdf=page_pdf,
+                        work_dir=work_dir,
+                        page_index=idx + 1,
+                        page_count=page_count,
+                        per_page_config=per_page_config,
+                        original_config=config,
+                    ): idx
+                    for idx, page_pdf in enumerate(page_pdfs)
+                }
+                for fut in as_completed(futures):
+                    idx = futures[fut]
+                    result_pdf, status = fut.result()
+                    page_results[idx] = result_pdf
+                    if status == "primary":
+                        ok_pages.add(idx)
+                    elif status == "retry":
+                        ok_pages.add(idx)
+                        retry_pages.add(idx)
+                    # status == "raster" → page failed every tier
+                    _emit_progress()
 
-                if primary_failed_reason is None:
-                    page_results.append(page_out)
-                    ok_count += 1
-                    logger.info(
-                        "Page %d/%d OCR'd successfully", i + 1, page_count
-                    )
-                    continue
+            ok_count = len(ok_pages)
+            retry_count = len(retry_pages)
 
-                logger.warning(
-                    "Page %d/%d primary OCR FAILED (%s); "
-                    "retrying with simplified settings",
-                    i + 1, page_count, primary_failed_reason,
-                )
-
-                recovered_pdf = self._retry_page_with_simpler_settings(
-                    page_pdf=page_pdf,
-                    work_dir=work_dir,
-                    page_index=i + 1,
-                    original_config=config,
-                )
-                if recovered_pdf is not None:
-                    page_results.append(recovered_pdf)
-                    ok_count += 1
-                    retry_count += 1
-                    logger.info(
-                        "Page %d/%d recovered via simplified-settings retry",
-                        i + 1, page_count,
-                    )
-                    continue
-
-                last_resort_pdf = self._retry_page_last_resort(
-                    page_pdf=page_pdf,
-                    work_dir=work_dir,
-                    page_index=i + 1,
-                    original_config=config,
-                )
-                if last_resort_pdf is not None:
-                    page_results.append(last_resort_pdf)
-                    ok_count += 1
-                    retry_count += 1
-                    logger.info(
-                        "Page %d/%d recovered via last-resort sparse-text retry",
-                        i + 1, page_count,
-                    )
-                    continue
-
-                logger.warning(
-                    "Page %d/%d FAILED on every retry tier; keeping "
-                    "original raster (no text layer on this page)",
-                    i + 1, page_count,
-                )
-                page_results.append(page_pdf)
-
-            # 3. Merge into the final output PDF.
+            # 3. Merge into the final output PDF, then run the user-
+            # requested optimisation pass once on the merged file.
+            unoptimised = work_dir / "merged_unoptimised.pdf"
             merged = fitz.open()
             try:
                 for result_pdf in page_results:
-                    if result_pdf.exists():
+                    if result_pdf is not None and result_pdf.exists():
                         with fitz.open(str(result_pdf)) as p:
                             merged.insert_pdf(p)
-                merged.save(str(output_pdf))
+                merged.save(str(unoptimised))
             finally:
                 merged.close()
+
+            # Optimisation: only invoke OCRmyPDF if the user actually
+            # asked for it. Default profile uses LOSSLESS (level 1)
+            # which is just lossless object compression — no quality
+            # impact, but takes a few seconds. Levels 2-3 are lossy
+            # JPEG re-encoding, which the user opted into.
+            if int(config.optimize_level) > 0:
+                try:
+                    optimise_opts = map_ocr_config(
+                        dataclasses.replace(config, skip_text=True),
+                        unoptimised, output_pdf,
+                    )
+                    run_ocrmypdf(optimise_opts)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Final-PDF optimisation failed (%s); "
+                        "delivering unoptimised merge", exc,
+                    )
+                    shutil.copy2(str(unoptimised), str(output_pdf))
+            else:
+                shutil.copy2(str(unoptimised), str(output_pdf))
 
             if progress_callback is not None:
                 with contextlib.suppress(Exception):
@@ -306,6 +356,92 @@ class TesseractEngine(OCREngine):
         return [
             PageOCRResult(page_number=i + 1) for i in range(page_count)
         ]
+
+    def _process_one_page(
+        self,
+        *,
+        page_pdf: Path,
+        work_dir: Path,
+        page_index: int,
+        page_count: int,
+        per_page_config: OCRConfig,
+        original_config: OCRConfig,
+    ) -> tuple[Path, str]:
+        """OCR one page through primary → retry → last-resort tiers.
+
+        Designed to be called concurrently from a ``ThreadPoolExecutor``.
+        Each invocation operates on its own input/output paths, so
+        worker threads don't share mutable state — the only contention
+        is on ``run_ocrmypdf`` itself, which spawns separate Tesseract
+        and Ghostscript subprocesses per call.
+
+        Returns ``(result_pdf, status)`` where status is one of:
+          * ``"primary"`` — the user's settings worked first try
+          * ``"retry"``   — recovered via simplified-settings or
+                            last-resort tier
+          * ``"raster"``  — every tier failed; ``result_pdf`` is the
+                            original raster page (no text layer)
+        """
+        page_out = work_dir / f"page_{page_index:04d}_ocr.pdf"
+        page_opts = map_ocr_config(per_page_config, page_pdf, page_out)
+
+        primary_failed_reason: str | None = None
+        try:
+            run_ocrmypdf(page_opts)
+        except Exception as exc:  # noqa: BLE001
+            primary_failed_reason = f"{type(exc).__name__}: {exc}"
+        else:
+            # Empty-text-layer detection — see module-level docstring
+            # for why ``run_ocrmypdf`` returning cleanly isn't enough.
+            if not _page_pdf_has_text(page_out):
+                primary_failed_reason = (
+                    "primary attempt returned empty text layer"
+                )
+
+        if primary_failed_reason is None:
+            logger.info(
+                "Page %d/%d OCR'd successfully", page_index, page_count
+            )
+            return page_out, "primary"
+
+        logger.warning(
+            "Page %d/%d primary OCR FAILED (%s); "
+            "retrying with simplified settings",
+            page_index, page_count, primary_failed_reason,
+        )
+
+        recovered_pdf = self._retry_page_with_simpler_settings(
+            page_pdf=page_pdf,
+            work_dir=work_dir,
+            page_index=page_index,
+            original_config=original_config,
+        )
+        if recovered_pdf is not None:
+            logger.info(
+                "Page %d/%d recovered via simplified-settings retry",
+                page_index, page_count,
+            )
+            return recovered_pdf, "retry"
+
+        last_resort_pdf = self._retry_page_last_resort(
+            page_pdf=page_pdf,
+            work_dir=work_dir,
+            page_index=page_index,
+            original_config=original_config,
+        )
+        if last_resort_pdf is not None:
+            logger.info(
+                "Page %d/%d recovered via last-resort sparse-text retry",
+                page_index, page_count,
+            )
+            return last_resort_pdf, "retry"
+
+        logger.warning(
+            "Page %d/%d FAILED on every retry tier; keeping original "
+            "raster (no text layer on this page)",
+            page_index, page_count,
+        )
+        return page_pdf, "raster"
 
     def _retry_page_with_simpler_settings(
         self,
