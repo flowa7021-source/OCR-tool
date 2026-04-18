@@ -215,6 +215,16 @@ class TesseractEngine(OCREngine):
             config, optimize_level=OptimizeLevel.NONE
         )
 
+        # Stage B of Initiative 1: pre-OCR script detection. If the
+        # preprocessed page image is unambiguously Cyrillic or Latin,
+        # narrow the Tesseract ``-l`` flag from ``rus+eng`` to the
+        # single detected language. Eliminates Latin/Cyrillic look-
+        # alike confusion at OCR time instead of cleaning it up
+        # post-hoc. Opt-out via ``OCR_AUTO_SCRIPT_DETECT=0``.
+        per_page_config = self._maybe_narrow_script_language(
+            per_page_config, preprocessed_pdf,
+        )
+
         # Progress accounting under a lock — multiple worker threads
         # call back here as their pages finish.
         import threading
@@ -356,6 +366,68 @@ class TesseractEngine(OCREngine):
         return [
             PageOCRResult(page_number=i + 1) for i in range(page_count)
         ]
+
+    @staticmethod
+    def _maybe_narrow_script_language(
+        per_page_config: OCRConfig, preprocessed_pdf: Path,
+    ) -> OCRConfig:
+        """Optionally narrow ``languages`` to a single detected script.
+
+        Runs Tesseract's OSD on the first page of the preprocessed
+        PDF; if it reports Cyrillic or Latin with confidence above
+        the detector threshold, returns a copy of ``per_page_config``
+        with ``languages`` narrowed to that single code. A narrower
+        ``-l`` flag is the single most effective way to stop Tesseract
+        picking the wrong script for visually-identical characters
+        (``О/O``, ``А/A``, ``Е/E``...).
+
+        Gated on ``OCR_AUTO_SCRIPT_DETECT=0`` env var. Fails open:
+        any error returns the original config unchanged.
+        """
+        if os.environ.get("OCR_AUTO_SCRIPT_DETECT", "1") == "0":
+            return per_page_config
+        if len(per_page_config.languages) <= 1:
+            return per_page_config
+
+        try:
+            import fitz
+            import numpy as np
+
+            with fitz.open(str(preprocessed_pdf)) as doc:
+                if doc.page_count == 0:
+                    return per_page_config
+                pix = doc[0].get_pixmap(dpi=150, colorspace=fitz.csGRAY)
+                arr = np.frombuffer(
+                    pix.samples, dtype=np.uint8,
+                ).reshape(pix.height, pix.width)
+
+            from src.core.script_detector import detect_dominant_script
+
+            detected = detect_dominant_script(arr)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Script auto-detect failed (%s) — keeping original "
+                "languages=%s", exc, per_page_config.languages,
+            )
+            return per_page_config
+
+        if detected is None:
+            return per_page_config
+        if (
+            detected == per_page_config.primary_language
+            and per_page_config.languages == [detected]
+        ):
+            return per_page_config
+
+        logger.info(
+            "Auto-script: narrowing OCR languages from %s to [%r]",
+            per_page_config.languages, detected,
+        )
+        return dataclasses.replace(
+            per_page_config,
+            languages=[detected],
+            primary_language=detected,
+        )
 
     def _process_one_page(
         self,
