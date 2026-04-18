@@ -5,9 +5,53 @@ from __future__ import annotations
 import multiprocessing
 import sys
 
+# CLI-signalling argv flags. If ANY of these appears in sys.argv we
+# route straight to ``src.cli.main()`` instead of starting the Qt
+# event loop. A bare ``OCRStudio.exe file.pdf`` still opens the GUI
+# (the GUI accepts a PDF path as an open-on-launch argument); the
+# CLI takes over only when the user asks for it explicitly.
+#
+# Keeping this list short and flag-based (rather than "any non-PDF
+# argv") avoids accidentally breaking file-association double-click
+# where Windows passes paths that might contain dashes.
+_CLI_FLAGS: frozenset[str] = frozenset({
+    "--cli",
+    "-o", "--output",
+    "-p", "--profile",
+    "--list-profiles",
+    "--workers",
+    "--txt",
+    "--docx",
+    "--version",
+    "-h", "--help",
+})
+
+
+def _should_route_to_cli(argv: list[str]) -> bool:
+    """Return True when argv contains any CLI-only flag."""
+    return any(a in _CLI_FLAGS for a in argv[1:])
+
 
 def main() -> int:
-    """Start the Qt event loop and return its exit code."""
+    """Start the Qt event loop and return its exit code.
+
+    When invoked with CLI-only flags (``--cli``, ``--profile``,
+    ``-o``, etc.) we skip the Qt bootstrap entirely and dispatch to
+    ``src.cli.main`` — this lets the single ``OCRStudio.exe`` binary
+    serve both GUI double-click launches AND headless CI / scripting
+    invocations without needing two separate PyInstaller bundles.
+    """
+    # CLI path first: no QApplication, no single-instance guard, no
+    # window — just argparse + pipeline. This is what the install
+    # smoke-test + any user-written batch script hits.
+    if _should_route_to_cli(sys.argv):
+        # Strip a bare ``--cli`` so src.cli's argparse doesn't choke
+        # on it. Other flags pass through verbatim.
+        cli_argv = [a for a in sys.argv[1:] if a != "--cli"]
+        from src import cli as _cli
+
+        return _cli.main(cli_argv)
+
     # Suppress the brief console windows Tesseract/Ghostscript would
     # otherwise flash on Windows ``--windowed`` builds. No-op on
     # POSIX. Must run before anything else imports ``subprocess``-

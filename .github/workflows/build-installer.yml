@@ -1039,7 +1039,7 @@ jobs:
       # error message identifying the gap.
       - name: Smoke-test the installed product (full OCR round-trip)
         shell: pwsh
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           $ErrorActionPreference = "Stop"
           $installer = Get-ChildItem installer\Output\*.exe | Select-Object -First 1
@@ -1095,7 +1095,9 @@ jobs:
           # 3. Build a tiny one-page test PDF that's guaranteed to
           # OCR cleanly: large Helvetica, plenty of contrast, English
           # so we don't depend on rus.traineddata being present.
-          # Uses PyMuPDF which is already installed on this runner.
+          # Rasterise at 100 DPI to keep the test input small (~200 KB
+          # instead of ~11 MB at 200 DPI) — we're testing that OCR
+          # runs end-to-end, not accuracy, so the low DPI is fine.
           $smokeIn  = Join-Path $env:RUNNER_TEMP "smoke-input.pdf"
           $smokeOut = Join-Path $env:RUNNER_TEMP "smoke-output.pdf"
           $pyScript = Join-Path $env:RUNNER_TEMP "make-smoke.py"
@@ -1103,13 +1105,13 @@ jobs:
             "import fitz",
             "doc = fitz.open()",
             "page = doc.new_page(width=612, height=792)",
-            "page.insert_text((72, 200), 'SMOKE TEST OCR 2026', fontsize=40, fontname='helv')",
+            "page.insert_text((72, 200), 'SMOKE TEST OCR 2026', fontsize=48, fontname='helv')",
             "raw = doc.tobytes()",
             "doc.close()",
             "scan = fitz.open()",
             "src = fitz.open(stream=raw, filetype='pdf')",
             "for p in src:",
-            "    pix = p.get_pixmap(dpi=200, alpha=False)",
+            "    pix = p.get_pixmap(dpi=100, alpha=False)",
             "    new = scan.new_page(width=p.rect.width, height=p.rect.height)",
             "    new.insert_image(new.rect, stream=pix.tobytes('png'))",
             "scan.save(r'$smokeIn')",
@@ -1125,13 +1127,22 @@ jobs:
           Write-Host "Smoke input: $smokeIn ($((Get-Item $smokeIn).Length) bytes)"
 
           # 4. Run the installed binary in CLI mode on the test PDF.
+          # The ``OCRStudio.exe`` binary is a PyInstaller --windowed
+          # GUI build by default — argparse alone wouldn't route
+          # correctly without the ``--cli`` sentinel that src/main.py
+          # checks for before constructing QApplication. Without this
+          # flag the installed EXE opens the GUI window, tries to
+          # ``open`` the input PDF, and sits waiting for user input
+          # until the workflow step times out.
+          #
           # Uses ``quick_reliable`` (300 DPI, minimal preprocess) so
-          # the smoke-test wall time stays under ~60 s even when the
+          # the smoke-test wall time stays under ~2 min even when the
           # bundle includes the full HTR stack.
           Write-Host "Running OCR via installed CLI..."
           $sw = [System.Diagnostics.Stopwatch]::StartNew()
           $proc = Start-Process -FilePath $cli `
               -ArgumentList @(
+                "--cli",
                 $smokeIn,
                 "-o", $smokeOut,
                 "--profile", "quick_reliable",
