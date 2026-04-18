@@ -141,16 +141,30 @@ class TestLaptop1280x720Target:
     def test_fits_in_laptop_viewport(self, main_window) -> None:
         main_window.resize(1280, 720)
         main_window.show()
-        # Nothing extends past the window. Check each top-level
-        # child: its geometry must be inside the window rect.
+
+        # Walk widgets, flagging any that overflow the window.
+        # QScrollArea descendants are EXPECTED to overflow — the
+        # scroll area itself fits, its internal content scrolls on
+        # demand. Only flag widgets that are not reachable via a
+        # scroll area ancestor.
+        from PySide6.QtWidgets import QScrollArea
+
+        def _has_scroll_area_ancestor(widget) -> bool:
+            parent = widget.parent()
+            while parent is not None:
+                if isinstance(parent, QScrollArea):
+                    return True
+                parent = parent.parent() if hasattr(parent, "parent") else None
+            return False
+
         window_rect = main_window.rect()
         offenders: list[tuple[str, int, int, int, int]] = []
         for child in main_window.findChildren(object):
-            if not hasattr(child, "rect"):
-                continue
-            if not hasattr(child, "mapTo"):
+            if not hasattr(child, "rect") or not hasattr(child, "mapTo"):
                 continue
             if not child.isVisible():
+                continue
+            if _has_scroll_area_ancestor(child):
                 continue
             try:
                 top_left = child.mapTo(main_window, child.rect().topLeft())
@@ -168,7 +182,9 @@ class TestLaptop1280x720Target:
                     )
                 )
         assert not offenders, (
-            f"At 1280×720 these widgets overflow the window: {offenders}"
+            f"At 1280×720 these TOP-LEVEL widgets overflow the "
+            f"window (QScrollArea descendants are intentionally "
+            f"excluded): {offenders}"
         )
 
     def test_queue_panel_visible_at_laptop_size(
