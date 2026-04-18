@@ -13,6 +13,7 @@ from pathlib import Path
 from src.core.models import (
     BackgroundConfig,
     BinarizationConfig,
+    BorderRemovalConfig,
     ContrastConfig,
     DenoiseConfig,
     DenoiseStep,
@@ -234,6 +235,15 @@ class ProfileManager:
             # input. The ~500 ms per page cost is worth the
             # accuracy gain.
             background=BackgroundConfig(enabled=True, blur_kernel=55),
+            # Stage E: erase long horizontal / vertical runs (table
+            # borders, form rules) before binarisation so Tesseract
+            # doesn't fuse adjacent text into the border glyph.
+            # 75 px matches the 500 DPI rasterisation — about 0.15 cm
+            # of continuous line, longer than any legitimate letter
+            # stroke.
+            border_removal=BorderRemovalConfig(
+                enabled=True, min_line_length=75,
+            ),
         )
         ocr = OCRConfig(
             languages=["rus", "eng"],

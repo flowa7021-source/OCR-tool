@@ -128,6 +128,24 @@ class ImagePreprocessor:
             logger.debug("Preprocess: deskew enabled")
             current, angle = self._apply_deskew(current, config.deskew)
 
+        # Border removal runs AFTER deskew (so lines are axis-aligned
+        # by then) but BEFORE everything else. Erasing table borders
+        # while the image is still geometric-clean gives the morphology
+        # kernels a true horizontal / vertical axis to work with.
+        if getattr(config, "border_removal", None) and (
+            config.border_removal.enabled
+        ):
+            from src.core.border_remover import remove_border_lines
+
+            logger.debug(
+                "Preprocess: border removal (min_line_length=%d)",
+                config.border_removal.min_line_length,
+            )
+            current = remove_border_lines(
+                current,
+                min_line_length=config.border_removal.min_line_length,
+            )
+
         # Background removal FIRST, then contrast. The old order (CLAHE
         # before background removal) amplified the scanner-lamp
         # gradient into the text itself — CLAHE is a local-contrast

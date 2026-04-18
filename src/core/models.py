@@ -117,6 +117,22 @@ class BackgroundConfig:
 
 
 @dataclass
+class BorderRemovalConfig:
+    """Table-border / ruler-line removal before OCR.
+
+    Erases long horizontal and vertical runs (table borders, form
+    rules, underlines) that Tesseract tends to misread as letters,
+    fuse into adjacent text, or emit as spurious ``|`` / ``_``
+    sequences.
+    """
+
+    enabled: bool = False
+    #: Minimum run length in pixels. Scale with DPI — 50 is right
+    #: for 300 DPI; universal_accurate at 500 DPI uses 75.
+    min_line_length: int = 50
+
+
+@dataclass
 class PreprocessConfig:
     """Complete preprocessing pipeline configuration."""
 
@@ -126,6 +142,9 @@ class PreprocessConfig:
     denoise: DenoiseConfig = field(default_factory=DenoiseConfig)
     contrast: ContrastConfig = field(default_factory=ContrastConfig)
     background: BackgroundConfig = field(default_factory=BackgroundConfig)
+    border_removal: BorderRemovalConfig = field(
+        default_factory=BorderRemovalConfig,
+    )
 
 
 # ---------------------------------------------------------------------------
