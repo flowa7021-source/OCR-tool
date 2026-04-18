@@ -347,7 +347,16 @@ def run_ocrmypdf(options: OCRmyPDFOptions) -> None:
         "deskew": False,
         "clean": False,
         "remove_background": False,
-        "tesseract_thresholding": 0,
+        # ``tesseract_thresholding`` in ocrmypdf's typed dict is declared
+        # ``int | None``, but since 16.x the API implementation serialises
+        # the int back into a CLI arg via ``str(value)`` and re-parses it
+        # through argparse with ``choices=('auto','otsu','adaptive-otsu',
+        # 'sauvola')``. Passing ``0`` therefore crashes with
+        # "'0' must be one of: auto, otsu, adaptive-otsu, sauvola".
+        # We pass ``"auto"`` explicitly (which maps back to 0) — that
+        # round-trips cleanly through argparse AND matches what ocrmypdf
+        # uses by default, so behaviour is unchanged.
+        "tesseract_thresholding": "auto",
         # Tesseract engine settings.
         "tesseract_oem": options.oem,
         "tesseract_pagesegmode": options.psm,

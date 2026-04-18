@@ -272,3 +272,57 @@ class TestUserWordsWiring:
             assert Path(up).name == "user-patterns.eng", (
                 f"English-primary OCR should not use Russian user-patterns: {up!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# ``tesseract_thresholding`` kwarg shape
+# ---------------------------------------------------------------------------
+
+
+class TestTesseractThresholdingKwargType:
+    """Regression guard: ``tesseract_thresholding`` MUST be a string from
+    ocrmypdf's allowed set, NOT a bare int.
+
+    ocrmypdf 16.x declares the API typed-dict slot as ``int | None`` but
+    internally calls ``str(value)`` and re-parses through argparse with
+    ``choices=('auto', 'otsu', 'adaptive-otsu', 'sauvola')``. Passing
+    ``0`` crashes every OCR call on 16.13+ with
+
+        argparse.ArgumentTypeError: '0' must be one of:
+        auto, otsu, adaptive-otsu, sauvola
+
+    which is exactly the failure the install smoke-test surfaced. The
+    ocrmypdf mock doesn't validate choices, so this test asserts the
+    kwarg SHAPE rather than functional correctness: a string from the
+    valid set round-trips through ocrmypdf argparse; an int never does.
+    """
+
+    _VALID = {"auto", "otsu", "adaptive-otsu", "sauvola"}
+
+    def test_thresholding_is_string_from_valid_set(
+        self, fake_input_pdf: Path, fake_output_pdf: Path, tmp_path: Path,
+    ) -> None:
+        cfg = OCRConfig(languages=["rus"], primary_language="rus")
+        options = _make_options(cfg, fake_input_pdf, fake_output_pdf)
+
+        fake_ocrmypdf, fake_exceptions = _fake_ocrmypdf_modules(tmp_path)
+        with patch.dict(
+            sys.modules,
+            {
+                "ocrmypdf": fake_ocrmypdf,
+                "ocrmypdf.exceptions": fake_exceptions,
+            },
+        ):
+            run_ocrmypdf(options)
+
+        call = fake_ocrmypdf.ocr.call_args
+        value = call.kwargs.get("tesseract_thresholding")
+        assert value is None or value in self._VALID, (
+            "tesseract_thresholding must be one of "
+            f"{self._VALID} or absent; got {value!r} "
+            f"(type={type(value).__name__}). "
+            "ocrmypdf 16.x rejects bare ints — see the docstring above."
+        )
+        assert not isinstance(value, bool) and not isinstance(value, int), (
+            f"tesseract_thresholding must NOT be an int; got {value!r}"
+        )
