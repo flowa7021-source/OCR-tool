@@ -158,15 +158,14 @@ class TestUniversalAccurateProfile:
             "fix_cyrillic_latin_confusion",
         ):
             assert getattr(profile.postprocess, flag) is True, flag
-        # High-DPI rasterisation is an intentional part of the preset —
-        # anything below 400 defeats the purpose of a "max accuracy"
-        # pick because Tesseract's LSTM benefits significantly from
-        # extra pixel density on tight typography. 400 is the floor
-        # chosen after production-log evidence that 600 DPI on A4
-        # Russian contracts blows past even 900 s Tesseract timeouts
-        # — see commit ca56642 for the full reasoning.
-        assert profile.ocr.dpi >= 400, (
-            f"universal_accurate must request ≥400 DPI; got {profile.ocr.dpi}"
+        # The "maximum accuracy" preset requires ≥ 500 DPI as of
+        # Initiative 4 (bumped from 400 → 500). Dense small-font
+        # Russian body text measured 25 % CER at 400 DPI on the
+        # nightly benchmark; 500 DPI gives the LSTM more pixel
+        # density per character without hitting Tesseract's
+        # layout-analysis timeout ceiling.
+        assert profile.ocr.dpi >= 500, (
+            f"universal_accurate must request ≥500 DPI; got {profile.ocr.dpi}"
         )
 
     def test_description_hints_at_purpose(self, tmp_path: Path) -> None:

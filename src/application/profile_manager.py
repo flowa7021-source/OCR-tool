@@ -240,19 +240,29 @@ class ProfileManager:
             primary_language="rus",
             psm=PSM.AUTO,
             oem=OEM.LSTM_ONLY,
-            # 400 DPI is the practical max for Tesseract on complex
-            # Russian contracts. 600 DPI was the original choice but
-            # production logs showed page 4 of a real contract timing
-            # out at BOTH 300s and 900s — Tesseract's layout analysis
-            # on a 600 DPI A4 page produces an image so large (~5000×
-            # 7000 pixels) that even the LSTM engine can't finish one
-            # page within any reasonable timeout. 400 DPI gives the
-            # same recognition accuracy on typical 10-12pt text while
-            # keeping per-page processing under 2 minutes.
-            dpi=400,
+            # 500 DPI is the sweet spot for the "maximum accuracy"
+            # preset after the parallel-per-page engine lifted the
+            # per-page timeout ceiling. 600 DPI was tried first and
+            # still blows past 900 s on A4 Russian contracts
+            # (5000×7000 pixels crashes Tesseract's layout analyser).
+            # 400 worked but left ``ru_dense_small`` CER at ~25 % —
+            # small 10pt body text genuinely needed more pixel density.
+            # 500 DPI gives the LSTM 25 % more pixels per character
+            # with ~1.56× image area vs 400; combined with the
+            # raised timeout below, real-world contracts complete
+            # without hitting retry tiers.
+            dpi=500,
             optimize_level=OptimizeLevel.LOSSLESS,
             confidence_threshold=60.0,
             skip_text=True,
+            # Timeout raised 300 → 450 s to match the ~1.56× per-page
+            # work at 500 DPI. Still well under the per-page retry
+            # escalation ceiling in ocrmypdf_integration.py
+            # (``_MAX_RETRY_TESSERACT_TIMEOUT_SEC = 900``), so a rare
+            # dense page that exceeds 450 s still gets one retry at
+            # the 900 s cap before falling back to the simplified-
+            # settings tier.
+            tesseract_timeout=450,
         )
         postprocess = PostprocessConfig(
             autocorrect_russian=True,
