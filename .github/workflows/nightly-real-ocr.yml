@@ -64,8 +64,27 @@ jobs:
       - name: Install Tesseract + Ghostscript (Chocolatey)
         shell: pwsh
         run: |
-          choco install tesseract --no-progress -y
-          choco install ghostscript --no-progress -y
+          # Chocolatey's community feed occasionally returns 504
+          # Gateway Timeout for package metadata. Retry with
+          # exponential backoff so a flaky CDN doesn't kill the run.
+          function Install-ChocoPackage {
+            param([string]$Name)
+            $maxAttempts = 4
+            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+              Write-Host "choco install $Name (attempt $attempt/$maxAttempts)"
+              choco install $Name --no-progress -y
+              if ($LASTEXITCODE -eq 0) { return }
+              if ($attempt -lt $maxAttempts) {
+                $wait = [math]::Pow(2, $attempt) * 5
+                Write-Host "choco install $Name failed (exit $LASTEXITCODE); retrying in ${wait}s"
+                Start-Sleep -Seconds $wait
+              }
+            }
+            throw "choco install $Name failed after $maxAttempts attempts"
+          }
+
+          Install-ChocoPackage -Name "tesseract"
+          Install-ChocoPackage -Name "ghostscript"
 
           # Canonical Tesseract install location.
           $tessInstall = "C:\Program Files\Tesseract-OCR"
