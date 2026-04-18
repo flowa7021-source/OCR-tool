@@ -157,17 +157,26 @@ jobs:
           pip install --prefer-binary -r requirements.txt
           pip install --prefer-binary "pyinstaller>=6.6,<7" pytest pytest-mock pytest-qt Pillow cairosvg
           if ("${{ steps.htr_flag.outputs.with_htr }}" -eq "true") {
-            Write-Host "Installing [htr] extras (torch, transformers, tiktoken, einops, accelerate)…"
+            Write-Host "Installing [htr] extras from pyproject.toml..."
+            # SINGLE SOURCE OF TRUTH: install via the ``[htr]`` extras so
+            # any dep listed in pyproject.toml is pulled in. The previous
+            # hard-coded ``pip install torch transformers tiktoken einops
+            # accelerate`` silently omitted ``torchvision`` and ``verovio``,
+            # both of which ``GOTOCREngine.is_available()`` requires —
+            # users saw "Для GOT-OCR 2.0 требуется пакет 'torchvision'"
+            # in a freshly-installed bundle.
+            #
             # CPU-only torch wheel keeps the bundle ~1 GB smaller than the
-            # CUDA build. Users who want GPU acceleration can replace torch
-            # in the deployed env, but the CPU build runs everywhere.
-            # einops + accelerate are transitive deps of GOT-OCR 2.0's
-            # trust_remote_code scripts — without them from_pretrained
-            # fails at inference time with a bare ModuleNotFoundError.
-            pip install --prefer-binary --extra-index-url https://download.pytorch.org/whl/cpu `
-                "torch>=2.1,<3" "transformers>=4.40" "tiktoken>=0.5" `
-                "einops>=0.7" "accelerate>=0.30"
-            python -c "import torch, transformers, einops, accelerate; print('torch', torch.__version__, '/ transformers', transformers.__version__, '/ einops', einops.__version__, '/ accelerate', accelerate.__version__)"
+            # CUDA build. The extra-index-url applies to torch AND
+            # torchvision (both ship CPU wheels at that index).
+            pip install --prefer-binary `
+                --extra-index-url https://download.pytorch.org/whl/cpu `
+                -e ".[htr]"
+            # Verify every dep GOTOCREngine.is_available() requires is
+            # actually importable in this env. If one is missing, fail
+            # the build HERE with a clear message — don't wait for the
+            # frozen bundle's runtime probe to discover it.
+            python -c "import torch, torchvision, transformers, einops, accelerate, tiktoken, safetensors, verovio; print('HTR deps OK:', 'torch', torch.__version__, '/ torchvision', torchvision.__version__, '/ transformers', transformers.__version__)"
           }
 
       - name: Resolve installer version + release metadata
@@ -842,23 +851,50 @@ jobs:
           }
           # PyInstaller 6.x --onedir bundles data under _internal\; fallback to top-level on older versions.
           $searchRoots = @("dist\OCRStudio\_internal", "dist\OCRStudio")
-          $tessOk = $false; $dataOk = $false; $gsOk = $false; $torchOk = $false; $transformersOk = $false; $weightsOk = $false
-          foreach ($root in $searchRoots) {
-            if (Test-Path "$root\resources\tesseract\tesseract.exe") { $tessOk = $true }
-            if (Test-Path "$root\resources\tessdata\rus.traineddata") { $dataOk = $true }
-            if (Test-Path "$root\resources\ghostscript\gswin64c.exe") { $gsOk = $true }
-            if (Test-Path "$root\torch") { $torchOk = $true }
-            if (Test-Path "$root\transformers") { $transformersOk = $true }
-            if (Test-Path "$root\resources\models\got_ocr2\model.safetensors") { $weightsOk = $true }
+
+          function Find-InRoots($roots, $relPath) {
+            foreach ($root in $roots) {
+              if (Test-Path (Join-Path $root $relPath)) { return $true }
+            }
+            return $false
           }
+
+          $tessOk = Find-InRoots $searchRoots "resources\tesseract\tesseract.exe"
+          $dataOk = Find-InRoots $searchRoots "resources\tessdata\rus.traineddata"
+          $gsOk   = Find-InRoots $searchRoots "resources\ghostscript\gswin64c.exe"
           if (-not $tessOk) { throw "Bundled Tesseract missing from PyInstaller output" }
           if (-not $dataOk) { throw "Bundled tessdata (rus) missing from PyInstaller output" }
           if (-not $gsOk) { throw "Bundled Ghostscript (gswin64c.exe) missing from PyInstaller output — OCRmyPDF would fail at first run" }
+
           if ("${{ steps.htr_flag.outputs.with_htr }}" -eq "true") {
-            if (-not $torchOk) { throw "Bundled torch missing from PyInstaller output (--with-htr was set)" }
-            if (-not $transformersOk) { throw "Bundled transformers missing from PyInstaller output (--with-htr was set)" }
-            if (-not $weightsOk) { throw "Bundled GOT-OCR 2.0 weights missing from PyInstaller output — run /.github/scripts/download_got_ocr2.py before PyInstaller" }
-            Write-Host "HTR bundle: torch + transformers + GOT-OCR 2.0 weights present"
+            # Every package ``GOTOCREngine.is_available()`` imports MUST
+            # exist as a directory in the frozen tree. Missing any one
+            # of these means the bundle ships broken — user sees
+            # "Для GOT-OCR 2.0 требуется пакет 'X'" on first launch.
+            # Previous iterations only checked torch/transformers, which
+            # let torchvision + verovio silently drop out.
+            $htrDirs = @(
+              "torch", "torchvision", "transformers", "tokenizers",
+              "tiktoken", "safetensors", "einops", "accelerate",
+              "verovio", "PIL"
+            )
+            $missing = @()
+            foreach ($pkg in $htrDirs) {
+              if (-not (Find-InRoots $searchRoots $pkg)) {
+                $missing += $pkg
+              }
+            }
+            if ($missing.Count -gt 0) {
+              throw (
+                "Bundled HTR packages missing from PyInstaller output: " +
+                ($missing -join ', ') +
+                " — check build.py --collect-all hooks and pyproject.toml [htr] extras."
+              )
+            }
+            if (-not (Find-InRoots $searchRoots "resources\models\got_ocr2\model.safetensors")) {
+              throw "Bundled GOT-OCR 2.0 weights missing from PyInstaller output — run /.github/scripts/download_got_ocr2.py before PyInstaller"
+            }
+            Write-Host ("HTR bundle OK: {0} + weights" -f ($htrDirs -join ', '))
           }
           $size = (Get-ChildItem dist\OCRStudio -Recurse | Measure-Object -Property Length -Sum).Sum
           Write-Host ("Frozen bundle size: {0:N0} bytes ({1:N1} MB)" -f $size, ($size/1MB))
@@ -1191,6 +1227,30 @@ jobs:
           python $verifyScript
           if ($LASTEXITCODE -ne 0) {
             throw "Output PDF text-layer verification failed (exit=$LASTEXITCODE)"
+          }
+
+          # 6. HTR engine readiness probe. The Tesseract-only round-trip
+          # above never touches the GOT-OCR stack, so a bundle missing
+          # torchvision / verovio / einops / accelerate (all needed by
+          # ``GOTOCREngine.is_available()``) would ship green. Invoke the
+          # installed CLI's ``--check-engine got_ocr2`` hook; if the
+          # bundle dropped a dep, this exits 1 with the Russian diagnostic
+          # the end user would see. Skipped when HTR isn't bundled.
+          if ("${{ steps.htr_flag.outputs.with_htr }}" -eq "true") {
+            Write-Host "Probing GOT-OCR 2.0 engine availability..."
+            $probeOut = Join-Path $env:RUNNER_TEMP "htr-probe.out.log"
+            $probeErr = Join-Path $env:RUNNER_TEMP "htr-probe.err.log"
+            $probe = Start-Process -FilePath $cli `
+                -ArgumentList @("--cli", "--check-engine", "got_ocr2") `
+                -NoNewWindow -PassThru -Wait `
+                -RedirectStandardOutput $probeOut `
+                -RedirectStandardError $probeErr
+            Get-Content $probeOut -Tail 20 -ErrorAction SilentlyContinue | Write-Host
+            Get-Content $probeErr -Tail 20 -ErrorAction SilentlyContinue | Write-Host
+            if ($probe.ExitCode -ne 0) {
+              throw "Bundled HTR engine not available — probe exit $($probe.ExitCode). Most likely a transitive dep (torchvision / verovio / einops / accelerate) dropped from the PyInstaller bundle. Check build.py --collect-all hooks and pyproject.toml [htr] extras."
+            }
+            Write-Host "HTR engine probe: OK"
           }
 
           Write-Host "Install + smoke-test PASSED"

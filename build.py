@@ -193,15 +193,28 @@ def build_pyinstaller(onefile: bool = False, with_htr: bool = False) -> int:
         # GOT-OCR 2.0 needs the entire torch + transformers + tokenizer
         # stack. PyInstaller's static analyser can't follow `from_pretrained`
         # dynamic loading, so we collect everything explicitly.
+        #
+        # ``--collect-all`` for torchvision / einops / accelerate / verovio
+        # is CRITICAL: these are only imported from inside the HF
+        # ``trust_remote_code`` modeling_*.py scripts that get ``exec()``ed
+        # at ``from_pretrained`` time — PyInstaller's static analyser never
+        # visits them. A plain ``--hidden-import=torchvision`` also misses
+        # torchvision's native C++ ops (``torchvision/_C.*.pyd``), which
+        # are loaded via ``torch.ops.load_library`` at import time; without
+        # the data-collection pass, ``import torchvision`` succeeds but
+        # any vision-encoder forward pass dies with "operator X not found".
         args.extend(
             [
                 "--collect-all=torch",
+                "--collect-all=torchvision",
                 "--collect-all=transformers",
                 "--collect-all=tokenizers",
                 "--collect-all=tiktoken",
+                "--collect-all=safetensors",
+                "--collect-all=einops",
+                "--collect-all=accelerate",
+                "--collect-all=verovio",
                 "--collect-all=PIL",
-                "--collect-data=safetensors",
-                "--collect-submodules=safetensors",
                 # GOT-OCR 2.0 weights ship with `trust_remote_code=True`
                 # Python files, so transformers will exec() them at runtime.
                 # The hidden-imports below cover the symbols those files
@@ -209,7 +222,6 @@ def build_pyinstaller(onefile: bool = False, with_htr: bool = False) -> int:
                 "--hidden-import=torch._dynamo",
                 "--hidden-import=torch._dynamo.config",
                 "--hidden-import=torch._inductor",
-                "--hidden-import=torchvision",
                 "--hidden-import=transformers.models.auto",
                 "--hidden-import=transformers.modeling_utils",
                 "--hidden-import=transformers.generation",
