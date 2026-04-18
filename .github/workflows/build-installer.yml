@@ -746,23 +746,22 @@ jobs:
           # the PostScript interpreter init. Building a one-page PDF
           # via pdfwrite forces the interpreter to load gs_init.ps,
           # the Resource/Font/ defaults, and an iccprofiles entry.
-          $smokeIn  = Join-Path $env:RUNNER_TEMP "gs-smoke-in.ps"
+          #
+          # The PostScript is passed inline via ``-c`` rather than a
+          # heredoc — a heredoc would require ``%!PS`` at column 0,
+          # which conflicts with YAML literal-block indentation rules
+          # and breaks the workflow file.
           $smokeOut = Join-Path $env:RUNNER_TEMP "gs-smoke-out.pdf"
-          @"
-%!PS
-/Helvetica findfont 12 scalefont setfont
-72 720 moveto (Ghostscript bundle smoke test) show
-showpage
-"@ | Out-File -FilePath $smokeIn -Encoding ascii
           & "$dst\gswin64c.exe" `
               -dBATCH -dNOPAUSE -dQUIET `
               -sDEVICE=pdfwrite `
-              -o $smokeOut $smokeIn
+              -o $smokeOut `
+              -c "/Helvetica findfont 12 scalefont setfont 72 720 moveto (Ghostscript bundle smoke test) show showpage"
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path $smokeOut)) {
             throw "Bundled Ghostscript pdfwrite smoke test failed (exit=$LASTEXITCODE). Resource/Init/lib/ likely incomplete."
           }
           Write-Host "Ghostscript pdfwrite smoke test OK ($((Get-Item $smokeOut).Length) bytes)"
-          Remove-Item $smokeIn, $smokeOut -ErrorAction SilentlyContinue
+          Remove-Item $smokeOut -ErrorAction SilentlyContinue
 
           Get-ChildItem $dst | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,2)}}
 
@@ -1026,6 +1025,178 @@ showpage
           }
 
           Write-Host "Installer integrity check passed"
+
+      # ------------------------------------------------------------------
+      # Install + smoke-test the actual produced installer
+      # ------------------------------------------------------------------
+      # Catches the entire class of "we built the installer but it
+      # ships without file X" bugs — e.g. tessdata/configs/ (3-day
+      # production blocker) and Ghostscript Resource/Init/ (next-bug
+      # fix). The previous CI verified that the installer COMPILED;
+      # this step verifies that an installed copy can actually OCR a
+      # real PDF and produce a searchable result. If anything is
+      # missing from the bundle, this step fails with a concrete
+      # error message identifying the gap.
+      - name: Smoke-test the installed product (full OCR round-trip)
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Get-ChildItem installer\Output\*.exe | Select-Object -First 1
+          if (-not $installer) { throw "No installer to smoke-test" }
+
+          # 1. Silent-install to a temp directory inside the workspace.
+          # /SILENT (not /VERYSILENT) shows minimal progress in the log
+          # so we can tell the installer didn't hang. /SP- skips the
+          # initial "Welcome" prompt. /DIR forces a known install path.
+          $installDir = "${{ github.workspace }}\smoke_install"
+          if (Test-Path $installDir) {
+            Remove-Item $installDir -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+
+          $installLog = Join-Path $env:RUNNER_TEMP "installer-smoke.log"
+          Write-Host "Running silent install to $installDir"
+          $proc = Start-Process -FilePath $installer.FullName `
+              -ArgumentList "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", `
+                            "/SP-", "/DIR=$installDir", "/LOG=$installLog" `
+              -PassThru -Wait
+          if ($proc.ExitCode -ne 0) {
+            if (Test-Path $installLog) {
+              Get-Content $installLog -Tail 50 | Write-Host
+            }
+            throw "Silent install exited with $($proc.ExitCode)"
+          }
+          Write-Host "Install OK. Contents:"
+          Get-ChildItem $installDir | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,2)}}
+
+          # 2. Locate the CLI entry point. The installer ships a GUI
+          # launcher (OCRStudio.exe) that also exposes the CLI when
+          # invoked with arguments — same binary, argparse routes to
+          # CLI mode. Tolerate both ``OCRStudio.exe`` at the install
+          # root and inside an ``OCR Studio`` subdir.
+          $cli = $null
+          foreach ($candidate in @(
+            (Join-Path $installDir "OCRStudio.exe"),
+            (Join-Path $installDir "OCR Studio.exe")
+          )) {
+            if (Test-Path $candidate) { $cli = $candidate; break }
+          }
+          if (-not $cli) {
+            $cli = Get-ChildItem -Path $installDir -Filter "*.exe" -Recurse -File |
+                   Where-Object { $_.Name -notlike 'unins*' } |
+                   Where-Object { $_.Name -notlike 'tesseract*' } |
+                   Where-Object { $_.Name -notlike 'gs*' } |
+                   Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $cli) { throw "Could not locate the installed application binary" }
+          Write-Host "Application binary: $cli"
+
+          # 3. Build a tiny one-page test PDF that's guaranteed to
+          # OCR cleanly: large Helvetica, plenty of contrast, English
+          # so we don't depend on rus.traineddata being present.
+          # Uses PyMuPDF which is already installed on this runner.
+          $smokeIn  = Join-Path $env:RUNNER_TEMP "smoke-input.pdf"
+          $smokeOut = Join-Path $env:RUNNER_TEMP "smoke-output.pdf"
+          $pyScript = Join-Path $env:RUNNER_TEMP "make-smoke.py"
+          $pyContent = @(
+            "import fitz",
+            "doc = fitz.open()",
+            "page = doc.new_page(width=612, height=792)",
+            "page.insert_text((72, 200), 'SMOKE TEST OCR 2026', fontsize=40, fontname='helv')",
+            "raw = doc.tobytes()",
+            "doc.close()",
+            "scan = fitz.open()",
+            "src = fitz.open(stream=raw, filetype='pdf')",
+            "for p in src:",
+            "    pix = p.get_pixmap(dpi=200, alpha=False)",
+            "    new = scan.new_page(width=p.rect.width, height=p.rect.height)",
+            "    new.insert_image(new.rect, stream=pix.tobytes('png'))",
+            "scan.save(r'$smokeIn')",
+            "scan.close()",
+            "src.close()",
+            "print('wrote', r'$smokeIn')"
+          )
+          $pyContent | Set-Content -Path $pyScript -Encoding ascii
+          python $pyScript
+          if (-not (Test-Path $smokeIn)) {
+            throw "Failed to render smoke-test input PDF"
+          }
+          Write-Host "Smoke input: $smokeIn ($((Get-Item $smokeIn).Length) bytes)"
+
+          # 4. Run the installed binary in CLI mode on the test PDF.
+          # Uses ``quick_reliable`` (300 DPI, minimal preprocess) so
+          # the smoke-test wall time stays under ~60 s even when the
+          # bundle includes the full HTR stack.
+          Write-Host "Running OCR via installed CLI..."
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          $proc = Start-Process -FilePath $cli `
+              -ArgumentList @(
+                $smokeIn,
+                "-o", $smokeOut,
+                "--profile", "quick_reliable",
+                "--workers", "1"
+              ) `
+              -NoNewWindow -PassThru -Wait `
+              -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP "smoke-stdout.log") `
+              -RedirectStandardError  (Join-Path $env:RUNNER_TEMP "smoke-stderr.log")
+          $sw.Stop()
+          Write-Host ("OCR finished in {0:N1}s, exit code = {1}" -f $sw.Elapsed.TotalSeconds, $proc.ExitCode)
+          Get-Content (Join-Path $env:RUNNER_TEMP "smoke-stdout.log") -Tail 40 | Write-Host
+          Get-Content (Join-Path $env:RUNNER_TEMP "smoke-stderr.log") -Tail 40 | Write-Host
+
+          if ($proc.ExitCode -ne 0) {
+            throw "Installed CLI exited with code $($proc.ExitCode)"
+          }
+          if (-not (Test-Path $smokeOut)) {
+            throw "Installed CLI did not produce an output PDF at $smokeOut"
+          }
+
+          # 5. Verify the output PDF actually has a text layer with
+          # recognisable content. This is the critical assertion: any
+          # missing tessdata/configs/, Ghostscript Resource/, OCRmyPDF
+          # data file or other bundled-but-incomplete dependency
+          # would surface here as either an empty text layer or a
+          # crashed pipeline.
+          $verifyScript = Join-Path $env:RUNNER_TEMP "verify-smoke.py"
+          $verifyContent = @(
+            "import fitz, sys",
+            "doc = fitz.open(r'$smokeOut')",
+            "all_text = ''",
+            "for page in doc:",
+            "    all_text += page.get_text('text') or ''",
+            "doc.close()",
+            "all_text = all_text.strip()",
+            "if not all_text:",
+            "    sys.exit('FAIL: output PDF has no text layer at all')",
+            "print(f'OK: extracted {len(all_text)} characters')",
+            "print(f'sample: {all_text[:200]!r}')",
+            "# Tesseract should at least recognise SOME of the smoke string.",
+            "if not any(tok in all_text.upper() for tok in ('SMOKE', 'TEST', 'OCR', '2026')):",
+            "    sys.exit(f'FAIL: text layer present but recognised content unexpected: {all_text!r}')",
+            "print('verification passed')"
+          )
+          $verifyContent | Set-Content -Path $verifyScript -Encoding ascii
+          python $verifyScript
+          if ($LASTEXITCODE -ne 0) {
+            throw "Output PDF text-layer verification failed (exit=$LASTEXITCODE)"
+          }
+
+          Write-Host "Install + smoke-test PASSED"
+
+      - name: Upload smoke-test artefacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-failure-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/installer-smoke.log
+            ${{ runner.temp }}/smoke-stdout.log
+            ${{ runner.temp }}/smoke-stderr.log
+            ${{ runner.temp }}/smoke-input.pdf
+            ${{ runner.temp }}/smoke-output.pdf
+          if-no-files-found: ignore
+          retention-days: 7
 
       # ------------------------------------------------------------------
       # Artifacts + release
