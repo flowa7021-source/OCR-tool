@@ -39,12 +39,20 @@ def _run_cli(*args: str, cwd: Path, timeout: int = 120) -> subprocess.CompletedP
         if key in os.environ:
             env[key] = os.environ[key]
     env["PYTHONPATH"] = str(repo_root)
+    # PYTHONIOENCODING forces the child Python's stdout/stderr to UTF-8,
+    # which matters on Windows where the default is cp1252. Russian text
+    # in error messages (e.g. "Отсутствуют языки: rus") would otherwise
+    # crash subprocess._readerthread with UnicodeDecodeError when we
+    # try to capture it, killing the test before the real assertion runs.
+    env["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run(
         [sys.executable, "-m", "src.cli", *args],
         cwd=str(cwd),
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
     )
 

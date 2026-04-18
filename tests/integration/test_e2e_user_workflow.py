@@ -311,7 +311,7 @@ class TestCLIEndToEnd:
         )
         output_pdf = tmp_path / "out.pdf"
 
-        env = {**os.environ}
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         # Use tmp-scoped profile + cache so the user's real install
         # doesn't influence the test.
         env["OCRSTUDIO_LOGS_DIR"] = str(tmp_path / "logs")
@@ -327,6 +327,8 @@ class TestCLIEndToEnd:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             env=env,
             timeout=120,
             check=False,
@@ -356,7 +358,7 @@ class TestCLIEndToEnd:
             input_pdf, text="АКТ", cyrillic=True
         )
 
-        env = {**os.environ}
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         env["OCRSTUDIO_LOGS_DIR"] = str(tmp_path / "logs")
 
         proc = subprocess.run(
@@ -370,6 +372,8 @@ class TestCLIEndToEnd:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             env=env,
             timeout=120,
             check=False,
@@ -391,7 +395,7 @@ class TestCLIEndToEnd:
         )
         output_pdf = tmp_path / "out.pdf"
 
-        env = {**os.environ}
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         env["OCRSTUDIO_LOGS_DIR"] = str(tmp_path / "logs")
 
         proc = subprocess.run(
@@ -406,6 +410,8 @@ class TestCLIEndToEnd:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             env=env,
             timeout=120,
             check=False,
@@ -433,7 +439,7 @@ class TestSmokeTestScript:
     15-minute installer grind. Treat it as a first-class contract."""
 
     def test_smoke_test_script_runs_green(self, tmp_path: Path) -> None:
-        env = {**os.environ}
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         env["OCRSTUDIO_LOGS_DIR"] = str(tmp_path / "logs")
 
         proc = subprocess.run(
@@ -443,6 +449,8 @@ class TestSmokeTestScript:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             env=env,
             timeout=120,
             check=False,

@@ -234,6 +234,20 @@ _ALL_TESSERACT_PROFILES: list[str] = [
 
 
 def main() -> int:
+    # Force stdout/stderr to UTF-8 so the Russian help text and status
+    # messages don't crash the script with ``UnicodeEncodeError`` on a
+    # Windows host whose default console encoding is cp1252 / cp866 —
+    # exactly what happens when the script is invoked as a subprocess
+    # by CI (``test_smoke_test_script_runs_green``). Safe no-op on
+    # *nix where stdout is already UTF-8.
+    import contextlib
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            with contextlib.suppress(AttributeError, OSError, ValueError):
+                reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(
         description=(
             "Быстрый smoke-test: прогоняет синтетический PDF через "
