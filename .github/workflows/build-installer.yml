@@ -440,7 +440,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: resources\tessdata
-          key: tessdata-best-rus-eng-osd-v2
+          key: tessdata-best-rus-eng-osd-configs-v3
 
       - name: Download tessdata_best (rus, eng, osd)
         if: steps.cache-tessdata.outputs.cache-hit != 'true'
@@ -488,6 +488,78 @@ jobs:
             }
           }
           Get-ChildItem $dst | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,2)}}
+
+      # ------------------------------------------------------------------
+      # tessdata/configs/ — Tesseract's output-format config files.
+      # These tiny text files (a few bytes each) tell Tesseract WHICH
+      # output formats to produce: ``hocr`` flips ``tessedit_create_hocr``,
+      # ``txt`` flips ``tessedit_create_txt``, etc. Without them
+      # OCRmyPDF cannot ask Tesseract to emit hOCR — Tesseract logs
+      # ``read_params_file: Can't open hocr`` and writes nothing, then
+      # OCRmyPDF crashes in graft with ``FileNotFoundError`` because
+      # the per-page hOCR file it stat()s never got created.
+      #
+      # The configs ship in the main ``tesseract`` source repo, NOT in
+      # ``tessdata_best`` (which only has language models). We download
+      # the canonical set from upstream so every installer carries them.
+      # ------------------------------------------------------------------
+      - name: Download tessdata/configs (output-format configs)
+        if: steps.cache-tessdata.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $configsDst = "${{ github.workspace }}\resources\tessdata\configs"
+          New-Item -ItemType Directory -Force -Path $configsDst | Out-Null
+
+          # Canonical config files from tesseract-ocr/tesseract main:
+          #   https://github.com/tesseract-ocr/tesseract/tree/main/tessdata/configs
+          # Listed explicitly so a future upstream addition doesn't
+          # silently change the bundle behaviour. ``hocr``, ``txt`` and
+          # ``pdf`` are the ones OCRmyPDF actually uses; the rest are
+          # included for parity with a standard Tesseract install so
+          # users running the bundled binary directly aren't surprised.
+          $configs = @(
+            "alto", "ambigs.train", "api_config", "bazaar", "bigram",
+            "box.train", "box.train.stderr", "digits", "get.images",
+            "hocr", "inter", "kannada", "linebox", "logfile",
+            "lstm.train", "lstmbox", "lstmdebug", "makebox", "pdf",
+            "quiet", "rebox", "strokewidth", "tsv", "txt", "unlv",
+            "wordstrbox"
+          )
+
+          $mirrors = @(
+            "https://github.com/tesseract-ocr/tesseract/raw/main/tessdata/configs",
+            "https://raw.githubusercontent.com/tesseract-ocr/tesseract/main/tessdata/configs"
+          )
+
+          foreach ($cfg in $configs) {
+            $out = Join-Path $configsDst $cfg
+            $success = $false
+            foreach ($base in $mirrors) {
+              $url = "$base/$cfg"
+              try {
+                Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+                $success = $true
+                break
+              } catch {
+                Write-Warning "Config $cfg from $base failed: $($_.Exception.Message)"
+              }
+            }
+            if (-not $success) {
+              throw "Failed to download tessdata config '$cfg' from any mirror"
+            }
+          }
+
+          # Sanity: hocr, txt, pdf MUST be present — those are the
+          # ones OCRmyPDF actually reads. If any is missing, OCR fails
+          # silently at runtime with the dreaded graft-hocr-miss error.
+          foreach ($required in @("hocr", "txt", "pdf")) {
+            $p = Join-Path $configsDst $required
+            if (-not (Test-Path $p)) {
+              throw "Required tessdata config '$required' missing after download"
+            }
+          }
+          Write-Host "tessdata/configs/ ready:"
+          Get-ChildItem $configsDst | Select-Object Name, Length
 
       # ------------------------------------------------------------------
       # Ghostscript — HARD runtime dependency of OCRmyPDF

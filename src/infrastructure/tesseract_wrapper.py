@@ -315,6 +315,37 @@ class TesseractWrapper:
 
         messages.append(f"Языки: {', '.join(langs)}")
 
+        # tessdata/configs/ holds Tesseract's output-format params.
+        # ``hocr`` flips ``tessedit_create_hocr`` so Tesseract writes
+        # the per-page hOCR file OCRmyPDF needs to graft. Without
+        # these tiny config files, every OCR call appears to "succeed"
+        # at the binary level but Tesseract emits nothing — OCRmyPDF
+        # then crashes in graft with a misleading
+        # ``FileNotFoundError: ..._ocr_hocr.hocr``. We refuse to
+        # report ``ok=True`` from this probe so the engine can surface
+        # a clear, actionable error before processing user data.
+        configs_dir = tessdata / "configs"
+        required_configs = ("hocr", "txt", "pdf")
+        missing_configs = [
+            c for c in required_configs
+            if not (configs_dir / c).exists()
+        ]
+        if missing_configs:
+            hint = (
+                f"В bundled tessdata отсутствуют файлы конфигурации "
+                f"вывода: configs/{', configs/'.join(missing_configs)}. "
+                "Без них Tesseract не сможет сформировать hOCR — "
+                "OCRmyPDF будет падать на каждой странице с "
+                "'_ocr_hocr.hocr not found'. "
+                "Это бэйг сборки инсталлера; переустановите свежий билд "
+                "или вручную скопируйте файлы из "
+                "github.com/tesseract-ocr/tesseract/tree/main/tessdata/configs "
+                f"в {configs_dir}."
+            )
+            logger.error(hint)
+            messages.append(hint)
+            return False, " | ".join(messages)
+
         try:
             self.configure_pytesseract()
         except Exception as exc:  # pragma: no cover - pytesseract optional at import

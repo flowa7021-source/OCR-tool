@@ -67,6 +67,37 @@ def ensure_resources() -> None:
             "Place them in resources/tessdata/ before shipping."
         )
 
+    # The ``configs/`` subdirectory of tessdata holds Tesseract's
+    # output-format params (``hocr``, ``txt``, ``pdf``, etc.). Without
+    # these the bundled Tesseract runs but cannot emit hOCR — every
+    # OCRmyPDF call ends in the dreaded
+    # ``FileNotFoundError: ..._ocr_hocr.hocr`` graft crash. Refuse to
+    # build (rather than warn) because shipping without them produces
+    # a binary that fails on every page of every document.
+    configs = tessdata / "configs"
+    required_configs = ("hocr", "txt", "pdf")
+    missing_configs = [
+        c for c in required_configs if not (configs / c).exists()
+    ]
+    if missing_configs:
+        raise SystemExit(
+            f"[build] ERROR: tessdata/configs/ missing required files: "
+            f"{missing_configs}.\n"
+            "These are tiny text files from "
+            "github.com/tesseract-ocr/tesseract/tree/main/tessdata/configs "
+            "that tell Tesseract which output formats to produce. Without "
+            "them OCRmyPDF crashes on every page with "
+            "'_ocr_hocr.hocr not found'.\n"
+            "The CI workflow downloads them automatically; if you're "
+            "building locally, run:\n"
+            f"  mkdir -p {configs}\n"
+            "  for f in hocr txt pdf; do\n"
+            "    curl -fsSL "
+            "https://github.com/tesseract-ocr/tesseract/raw/main/tessdata/configs/$f "
+            f"-o {configs}/$f\n"
+            "  done"
+        )
+
     tess_bin = PROJECT_ROOT / "resources" / "tesseract" / "tesseract.exe"
     if os.name == "nt" and not tess_bin.exists():
         print(
