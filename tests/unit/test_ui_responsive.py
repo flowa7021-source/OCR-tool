@@ -36,27 +36,65 @@ pytest.importorskip("pytestqt")
 def main_window(qtbot, tmp_path, monkeypatch):
     """Construct :class:`MainWindow` with isolated config storage.
 
-    The real MainWindow wires QueueManager, ProfileManager,
-    RecoveryManager etc. on __init__; we route their on-disk
-    state to ``tmp_path`` so tests don't touch the real user
-    profile directory.
+    MainWindow requires five injected dependencies (profile manager,
+    queue manager, parallel processor, export manager, settings
+    storage). We route their on-disk state to ``tmp_path`` and stub
+    the parallel processor so no subprocess workers are spawned
+    inside pytest-qt.
     """
+    from unittest.mock import MagicMock
+
+    from src.application.export_manager import ExportManager
+    from src.application.profile_manager import ProfileManager
+    from src.application.queue_manager import QueueManager
+    from src.infrastructure import config_storage as _cfg
+    from src.infrastructure import ocr_cache as _ocr_cache
+    from src.infrastructure.config_storage import (
+        ProfileStorage,
+        SettingsStorage,
+    )
+    from src.shared import constants
+
+    # Redirect every on-disk directory so tests never touch real
+    # user profiles / cache.
+    for name, value in {
+        "USER_DATA_DIR": tmp_path,
+        "CONFIG_DIR": tmp_path / "config",
+        "PROFILES_DIR": tmp_path / "profiles",
+        "TEMP_DIR": tmp_path / "temp",
+        "LOGS_DIR": tmp_path / "logs",
+        "RECOVERY_DIR": tmp_path / "recovery",
+        "OCR_CACHE_DIR": tmp_path / "ocr-cache",
+    }.items():
+        monkeypatch.setattr(constants, name, value, raising=False)
+        value.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(
-        "src.shared.constants.USER_DATA_DIR", tmp_path,
+        _ocr_cache, "OCR_CACHE_DIR", tmp_path / "ocr-cache",
+        raising=False,
     )
     monkeypatch.setattr(
-        "src.shared.constants.CONFIG_DIR", tmp_path / "config",
+        _cfg, "PROFILES_DIR", tmp_path / "profiles", raising=False,
     )
-    monkeypatch.setattr(
-        "src.shared.constants.PROFILES_DIR", tmp_path / "profiles",
-    )
-    monkeypatch.setattr(
-        "src.shared.constants.RECOVERY_DIR", tmp_path / "recovery",
-    )
+
+    profile_storage = ProfileStorage(profiles_dir=tmp_path / "profiles")
+    profile_manager = ProfileManager(profile_storage)
+    profile_manager.initialize_builtins()
+    queue_manager = QueueManager()
+    parallel_processor = MagicMock()
+    parallel_processor.submit = MagicMock()
+    parallel_processor.shutdown = MagicMock()
+    export_manager = ExportManager()
+    settings_storage = SettingsStorage(config_dir=tmp_path / "config")
 
     from src.ui.main_window import MainWindow
 
-    window = MainWindow()
+    window = MainWindow(
+        profile_manager=profile_manager,
+        queue_manager=queue_manager,
+        parallel_processor=parallel_processor,
+        export_manager=export_manager,
+        settings_storage=settings_storage,
+    )
     qtbot.addWidget(window)
     return window
 
