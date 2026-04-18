@@ -95,21 +95,10 @@ class DocumentResult:
     ground_truth_chars: int
 
 
-def pytest_addoption(parser) -> None:  # noqa: D401
-    """Register ``--regenerate-baseline`` so ``pytest <this-file>
-    --regenerate-baseline`` rewrites baseline.json after an
-    intentional accuracy improvement."""
-    parser.addoption(
-        "--regenerate-baseline",
-        action="store_true",
-        default=False,
-        help=(
-            "Run the accuracy benchmark and OVERWRITE the baseline "
-            "JSON with the measured values. Use after an intentional "
-            "accuracy improvement."
-        ),
-    )
-
+# ``--regenerate-baseline`` is registered by tests/integration/conftest.py
+# (pytest refuses to register ``pytest_addoption`` from a test module
+# because the hook is discovered during plugin loading, before test
+# modules are imported).
 
 pytestmark = [
     requires_real_russian_ocr,
