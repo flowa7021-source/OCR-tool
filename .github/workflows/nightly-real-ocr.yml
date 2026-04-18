@@ -31,6 +31,13 @@ concurrency:
   group: nightly-real-ocr
   cancel-in-progress: false   # let yesterday's run finish if overlap
 
+# Stage 2 can auto-commit a freshly captured ``baseline.json`` back to
+# the branch so the next nightly can run the regression-assertion path.
+# Requires ``contents: write`` on the workflow token; default per-job
+# token permissions are read-only since 2023.
+permissions:
+  contents: write
+
 jobs:
   nightly:
     name: Nightly real-OCR (Windows)
@@ -251,6 +258,51 @@ jobs:
           if ($needsCapture) { $regen = @("--regenerate-baseline") }
           pytest tests/integration/test_accuracy_benchmark.py `
                  --tb=short -v @regen
+
+      # Auto-commit a freshly captured baseline back to the branch so the
+      # next nightly runs the regression-assertion path without a human
+      # having to download the artifact + push manually. The commit
+      # message carries ``[skip ci]`` so GitHub Actions does NOT
+      # re-trigger nightly (or any other workflow) on this push, which
+      # would otherwise cause an infinite loop since ``baseline.json``
+      # is inside the nightly's ``paths`` trigger.
+      #
+      # Guarded by ``git status`` so the step is a no-op when the
+      # committed baseline was already real and we ran the assertion
+      # path. Guarded by ``if: success()`` so a failed Stage 2 never
+      # half-commits partial results.
+      - name: Auto-commit captured baseline
+        if: success()
+        shell: pwsh
+        run: |
+          $baseline = "tests/fixtures/accuracy_corpus/baseline.json"
+          git diff --quiet -- $baseline
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "baseline.json unchanged — nothing to commit"
+            exit 0
+          }
+          Write-Host "baseline.json was captured — committing back to branch"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add $baseline
+          $msg = "Capture Windows accuracy baseline (nightly run $($env:GITHUB_RUN_ID)) [skip ci]"
+          git commit -m $msg
+          # ``github.ref_name`` is the branch we're running on; push to
+          # the same remote ref. Retry briefly on transient 5xx from
+          # the push endpoint.
+          $branch = "${{ github.ref_name }}"
+          $tries = 0
+          while ($tries -lt 3) {
+            git push origin "HEAD:$branch"
+            if ($LASTEXITCODE -eq 0) { break }
+            $tries++
+            if ($tries -ge 3) {
+              throw "git push failed after $tries retries"
+            }
+            Start-Sleep -Seconds (5 * $tries)
+            # Pull --rebase in case a concurrent push landed first.
+            git pull --rebase origin $branch
+          }
 
       - name: Upload captured accuracy baseline
         if: always()
