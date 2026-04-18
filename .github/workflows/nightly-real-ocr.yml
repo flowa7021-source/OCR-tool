@@ -69,6 +69,44 @@ jobs:
             }
           }
 
+      # Chocolatey's tesseract package ships ``eng.traineddata`` only.
+      # The accuracy benchmark + retry-tier tests need Russian
+      # recognition, so fetch ``rus`` and ``osd`` from the official
+      # tessdata_best repo and drop them next to eng.
+      - name: Download rus + osd traineddata
+        shell: pwsh
+        run: |
+          $tess = Get-Command tesseract -ErrorAction SilentlyContinue
+          if (-not $tess) { throw "tesseract not on PATH" }
+          $tessdir = Split-Path $tess.Source
+          $tessdata = Join-Path $tessdir "tessdata"
+          if (-not (Test-Path $tessdata)) {
+            New-Item -ItemType Directory -Force -Path $tessdata | Out-Null
+          }
+          $base = "https://github.com/tesseract-ocr/tessdata_best/raw/main"
+          foreach ($lang in @("rus", "osd")) {
+            $out = Join-Path $tessdata "$lang.traineddata"
+            if (Test-Path $out) {
+              Write-Host "Already present: $lang.traineddata"
+              continue
+            }
+            Write-Host "Downloading $lang.traineddata to $out"
+            $tries = 0
+            while ($tries -lt 3) {
+              try {
+                Invoke-WebRequest -Uri "$base/$lang.traineddata" `
+                    -OutFile $out -UseBasicParsing
+                break
+              } catch {
+                $tries++
+                if ($tries -ge 3) { throw }
+                Start-Sleep -Seconds (2 * $tries)
+              }
+            }
+          }
+          Get-ChildItem $tessdata -Filter "*.traineddata" |
+              Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}}
+
       - name: Install Python dependencies
         shell: pwsh
         run: |
