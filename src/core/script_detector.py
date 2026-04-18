@@ -45,7 +45,16 @@ except ImportError:  # pragma: no cover - CI lint jobs without tesseract deps
 logger = logging.getLogger(__name__)
 
 
-MIN_SCRIPT_CONFIDENCE: float = 1.0
+# Below this ``Script confidence`` reported by Tesseract OSD we
+# refuse to override the user's language setting. Raised from 1.0
+# to 2.0 in Stage F after the nightly benchmark showed
+# ``ru_en_mixed_memo`` at 14 % CER / 50 % WER: pages with ~70 %
+# Russian body + 30 % English technical terms report OSD confidence
+# in the 1.0 – 2.0 band, and narrowing to ``-l rus`` on those
+# pages mangles the English islands. 2.0 is tight enough to exclude
+# mixed content while still accepting unambiguously single-script
+# scans (clean A4 Russian typically reports 2.5 – 5.0).
+MIN_SCRIPT_CONFIDENCE: float = 2.0
 _MIN_IMAGE_DIMENSION: int = 64
 _SCRIPT_TO_LANG: dict[str, str] = {
     "Cyrillic": "rus",

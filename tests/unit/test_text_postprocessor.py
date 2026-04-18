@@ -242,3 +242,58 @@ class TestCyrillicLatinFixup:
         result = processor.process(text, cfg)
         # After fixup both look-alikes should be Cyrillic
         assert result == "Иванов"
+
+
+class TestCyrillicLatinFixupMonoLookalikeWords:
+    """Stage F tightening — words made ENTIRELY of look-alikes.
+
+    ``ru_business_letter`` landed at WER 25 % on the nightly
+    benchmark because Tesseract emits short all-look-alike tokens
+    like ``Сo`` (Cyrillic С + Latin o) or ``AS`` (Latin
+    look-alikes) that the ``_classify_word_script`` "mixed" branch
+    refuses to touch. This is correct for ambiguous content but
+    wrong for Russian documents where a 2-4 char run of look-
+    alikes almost certainly means one slipped script.
+
+    The fix uses the surrounding paragraph: if the paragraph has a
+    clear script-exclusive majority, short all-look-alike tokens
+    inherit that majority.
+    """
+
+    def test_paragraph_context_resolves_short_lookalike_token(
+        self, processor: TextPostprocessor,
+    ) -> None:
+        # Two-word Cyrillic sentence + ``Сo`` fragment with Latin o.
+        # Without paragraph context the current fixup leaves ``Сo``
+        # alone (pure look-alikes → "mixed" classifier). With
+        # paragraph context it inherits the surrounding Cyrillic
+        # majority and swaps the Latin o.
+        text = "Видно что С\u006f сделано"  # Latin o after С
+        cfg = _noop_config(fix_cyrillic_latin_confusion=True)
+        result = processor.process(text, cfg)
+        assert result == "Видно что Со сделано", (
+            f"Short all-look-alike token not inherited from "
+            f"Cyrillic paragraph context: {result!r}"
+        )
+
+    def test_latin_majority_paragraph_preserves_latin_token(
+        self, processor: TextPostprocessor,
+    ) -> None:
+        # English sentence with an all-look-alike 2-letter token.
+        # Paragraph context is Latin → token stays Latin.
+        text = "The quick brown fox jumps over ABC"
+        cfg = _noop_config(fix_cyrillic_latin_confusion=True)
+        result = processor.process(text, cfg)
+        assert result == text, (
+            f"Latin-majority paragraph wrongly modified: {result!r}"
+        )
+
+    def test_ambiguous_paragraph_leaves_tokens_alone(
+        self, processor: TextPostprocessor,
+    ) -> None:
+        # No unambiguous script evidence in the paragraph → fall
+        # through to the per-word classifier which keeps everything.
+        text = "ABC oo"
+        cfg = _noop_config(fix_cyrillic_latin_confusion=True)
+        result = processor.process(text, cfg)
+        assert result == text

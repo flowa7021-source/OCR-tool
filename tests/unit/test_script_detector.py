@@ -85,6 +85,24 @@ class TestLowConfidenceFallback:
                 is None
             )
 
+    def test_medium_confidence_returns_none(
+        self, script_detector_module,
+    ) -> None:
+        # Stage F tightening: OSD confidence below 2.0 is "guessing
+        # from a few glyphs" — typical for mixed-content pages where
+        # a bilingual memo has 70 % Russian body and 30 % English tech
+        # terms. Narrowing to ``-l rus`` there mangles the English
+        # islands. 1.5 is squarely in that ambiguous zone and MUST
+        # return None so the caller keeps the multi-language config.
+        with patch(
+            "src.core.script_detector.pytesseract.image_to_osd",
+            return_value=_fake_osd("Cyrillic", 1.5),
+        ):
+            assert (
+                script_detector_module.detect_dominant_script(_blank_image())
+                is None
+            )
+
     def test_confidence_exactly_at_threshold_accepts(
         self, script_detector_module,
     ) -> None:

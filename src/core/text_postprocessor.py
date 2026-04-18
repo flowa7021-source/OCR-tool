@@ -245,7 +245,9 @@ def _classify_word_script(word: str) -> str:
     return "mixed"
 
 
-def _normalize_cyrillic_latin_word(word: str) -> str:
+def _normalize_cyrillic_latin_word(
+    word: str, *, paragraph_majority: str | None = None,
+) -> str:
     """Replace Latin ↔ Cyrillic look-alikes inside a single word.
 
     Skips URLs, emails and Windows-style paths outright (see
@@ -254,17 +256,43 @@ def _normalize_cyrillic_latin_word(word: str) -> str:
 
       * ``cyr`` — swap every Latin look-alike → its Cyrillic twin
       * ``lat`` — swap every Cyrillic look-alike → its Latin twin
-      * ``mixed`` — leave as-is (either pure look-alikes or genuinely
-        cross-script content we must not touch)
+      * ``mixed`` — when ``paragraph_majority`` is provided, the
+        paragraph-wide script wins (fixes short all-look-alike
+        tokens like ``Со`` in a Russian document). Without a
+        paragraph hint, leaves as-is.
     """
     if _SKIP_TOKEN_RE.search(word):
         return word
     kind = _classify_word_script(word)
+    if kind == "mixed" and paragraph_majority is not None:
+        kind = paragraph_majority
     if kind == "cyr":
         return "".join(_LATIN_TO_CYRILLIC.get(ch, ch) for ch in word)
     if kind == "lat":
         return "".join(_CYRILLIC_TO_LATIN.get(ch, ch) for ch in word)
     return word
+
+
+def _paragraph_script_majority(text: str) -> str | None:
+    """Return ``"cyr"``, ``"lat"`` or ``None`` for the whole document.
+
+    Counts unambiguous script-exclusive characters across the full
+    string. Used to break ties for short all-look-alike tokens —
+    e.g. ``Со`` in a Russian sentence should inherit the paragraph's
+    Cyrillic majority rather than stay mixed. Requires at least 3×
+    as many of one script's exclusive chars as the other, AND at
+    least 3 total exclusive chars, so a single stray Latin letter
+    in a Russian document doesn't flip the majority.
+    """
+    cyr = sum(1 for ch in text if ch in _CYRILLIC_EXCLUSIVE)
+    lat = sum(1 for ch in text if ch in _LATIN_EXCLUSIVE)
+    if cyr + lat < 3:
+        return None
+    if cyr >= 3 * lat and cyr > 0:
+        return "cyr"
+    if lat >= 3 * cyr and lat > 0:
+        return "lat"
+    return None
 
 
 def normalize_cyrillic_latin_confusion(text: str) -> str:
@@ -273,11 +301,22 @@ def normalize_cyrillic_latin_confusion(text: str) -> str:
     Non-letter characters (digits, punctuation, whitespace) pass
     through unchanged. See :func:`_normalize_cyrillic_latin_word` for
     the per-word logic.
+
+    Stage F enhancement: short all-look-alike tokens (which the
+    per-word classifier refuses to touch because they carry no
+    script-exclusive evidence) inherit the paragraph-wide script
+    majority if one exists. This recovers words like ``Со`` and
+    ``Оно`` in predominantly-Russian pages that Tesseract split
+    with a Latin letter in the middle.
     """
     if not text:
         return text
+    paragraph_majority = _paragraph_script_majority(text)
     return _WORD_CHUNK_RE.sub(
-        lambda m: _normalize_cyrillic_latin_word(m.group(0)), text,
+        lambda m: _normalize_cyrillic_latin_word(
+            m.group(0), paragraph_majority=paragraph_majority,
+        ),
+        text,
     )
 
 
