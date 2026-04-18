@@ -128,13 +128,20 @@ class ImagePreprocessor:
             logger.debug("Preprocess: deskew enabled")
             current, angle = self._apply_deskew(current, config.deskew)
 
-        if config.contrast.clahe_enabled or config.contrast.manual_enabled:
-            logger.debug("Preprocess: contrast adjustment")
-            current = self._apply_contrast(current, config.contrast)
-
+        # Background removal FIRST, then contrast. The old order (CLAHE
+        # before background removal) amplified the scanner-lamp
+        # gradient into the text itself — CLAHE is a local-contrast
+        # enhancer so it preserved the gradient, leaving the binariser
+        # to chase it out. Removing the gradient first gives CLAHE a
+        # flat canvas and the binariser sees consistent text strokes
+        # across the page.
         if config.background.enabled:
             logger.debug("Preprocess: background removal")
             current = self._apply_background_removal(current, config.background)
+
+        if config.contrast.clahe_enabled or config.contrast.manual_enabled:
+            logger.debug("Preprocess: contrast adjustment")
+            current = self._apply_contrast(current, config.contrast)
 
         if config.denoise.enabled and config.denoise.steps:
             logger.debug("Preprocess: denoise chain (%d steps)", len(config.denoise.steps))

@@ -142,14 +142,20 @@ class TestUniversalAccurateProfile:
         # Key preprocessing toggles match the universal preset.
         assert profile.preprocess.deskew.enabled
         assert profile.preprocess.contrast.clahe_enabled
-        # Background removal is off by design (perf trade-off).
-        assert not profile.preprocess.background.enabled
+        # Background removal is ON by design — it flattens scanner-
+        # lamp gradients before CLAHE + binarisation, which gives
+        # measurable accuracy wins on real scans. The ~500 ms per
+        # page cost is acceptable for the "max accuracy" preset.
+        assert profile.preprocess.background.enabled
         assert len(profile.preprocess.denoise.steps) >= 2
-        # Every postprocess step on.
+        # Every postprocess step on — including the word-level
+        # Cyrillic/Latin look-alike fixup, which is critical for
+        # Russian documents Tesseract OCRs with rus+eng.
         for flag in (
             "autocorrect_russian", "autocorrect_english",
             "merge_hyphenated", "normalize_whitespace",
             "normalize_unicode", "remove_artifacts",
+            "fix_cyrillic_latin_confusion",
         ):
             assert getattr(profile.postprocess, flag) is True, flag
         # High-DPI rasterisation is an intentional part of the preset —

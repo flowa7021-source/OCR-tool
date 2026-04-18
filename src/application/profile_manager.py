@@ -200,10 +200,17 @@ class ProfileManager:
         preprocess = PreprocessConfig(
             deskew=DeskewConfig(enabled=True, auto_detect=True, max_angle=45.0),
             dewarp=DewarpConfig(enabled=False),
+            # Sauvola adapts threshold per-pixel based on local mean +
+            # standard deviation — handles uneven lighting far better
+            # than adaptive Gaussian on real-world scans with shadows
+            # or page-edge darkening. Window 25 is the typical sweet
+            # spot for 300-400 DPI text; k=0.2 is the paper default
+            # for documents (lower than k=0.5 which is better for
+            # photos).
             binarization=BinarizationConfig(
-                method=BinarizationMethod.ADAPTIVE_GAUSSIAN,
-                adaptive_block_size=31,
-                adaptive_c=10,
+                method=BinarizationMethod.SAUVOLA,
+                sauvola_window=25,
+                sauvola_k=0.2,
             ),
             denoise=DenoiseConfig(
                 enabled=True,
@@ -212,14 +219,21 @@ class ProfileManager:
                     DenoiseStep(method=DenoiseMethod.MORPH_CLOSE, morph_ksize=3),
                 ],
             ),
+            # CLAHE clip 3.0 (was 2.0) gives a more aggressive local
+            # contrast boost without the global over-brightening a
+            # straight histogram equalise would cause. Makes a
+            # measurable difference on faded photocopies where 2.0
+            # leaves the text barely darker than the paper.
             contrast=ContrastConfig(
-                clahe_enabled=True, clahe_clip=2.0, clahe_tile=8
+                clahe_enabled=True, clahe_clip=3.0, clahe_tile=8
             ),
-            # Background removal stays OFF in the universal preset; its
-            # large-kernel blur is the single most expensive pipeline
-            # step at 600 DPI. Users with photographed pages should
-            # pick `low_quality_scan` which has it enabled.
-            background=BackgroundConfig(enabled=False),
+            # Background removal ENABLED. Real scanned contracts
+            # almost always have a light gradient (scanner lamp
+            # unevenness, off-axis lighting). Removing it before
+            # Sauvola + CLAHE gives the binariser a flat, clean
+            # input. The ~500 ms per page cost is worth the
+            # accuracy gain.
+            background=BackgroundConfig(enabled=True, blur_kernel=55),
         )
         ocr = OCRConfig(
             languages=["rus", "eng"],
@@ -247,13 +261,18 @@ class ProfileManager:
             normalize_whitespace=True,
             normalize_unicode=True,
             remove_artifacts=True,
+            # Critical for Russian documents — Tesseract swaps
+            # letter pairs like ``О/O`` at word edges, and the
+            # in-context regex autocorrect can't catch those.
+            fix_cyrillic_latin_confusion=True,
             custom_rules=[],
         )
         return ProfileData(
             name="universal_accurate",
             description=(
-                "Универсальный «максимум точности»: 400 DPI, adaptive "
-                "Gaussian + CLAHE + deskew, вся постобработка"
+                "Универсальный «максимум точности»: 400 DPI, Sauvola + "
+                "CLAHE + удаление фона + deskew, полная постобработка "
+                "включая нормализацию кириллицы/латиницы"
             ),
             preprocess=preprocess,
             ocr=ocr,

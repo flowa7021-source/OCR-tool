@@ -233,6 +233,14 @@ class PostprocessConfig:
     normalize_whitespace: bool = True
     normalize_unicode: bool = True
     remove_artifacts: bool = True
+    #: Word-level Latin↔Cyrillic look-alike normalisation. Tesseract
+    #: mixes ``O/О``, ``A/А``, ``E/Е``, ``K/К``, ``H/Н``, ``P/Р`` etc.
+    #: at word boundaries where the in-context regex autocorrect can't
+    #: fire. Enabled by default — on pure-Latin / pure-Cyrillic words
+    #: the fixup is a no-op, and on genuinely-mixed content (emails,
+    #: URLs, product codes) the classifier bails out rather than
+    #: corrupt anything.
+    fix_cyrillic_latin_confusion: bool = True
     custom_rules: list[RegexRule] = field(default_factory=list)
 
 

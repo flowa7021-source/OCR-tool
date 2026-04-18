@@ -161,6 +161,126 @@ DEFAULT_ENGLISH_RULES: Final[list[tuple[str, str, str]]] = [
 
 
 # ---------------------------------------------------------------------------
+# Word-level Latin↔Cyrillic look-alike normalisation.
+#
+# Tesseract routinely confuses visually-identical letters across the two
+# scripts — notably at word boundaries where the inline
+# ``DEFAULT_RUSSIAN_RULES`` look-behind / look-ahead rules above can't
+# fire. ``Ивановo`` (Latin ``o`` at the end of "Иванов") and ``oткрыть``
+# (Latin ``o`` at the start of "открыть") both slip through the
+# regex-only pass because the Latin look-alike sits next to whitespace
+# on one side.
+#
+# This word-level pass tokenises the text, classifies each word as
+# "definitely Cyrillic" / "definitely Latin" / "ambiguous" by looking
+# for unambiguous script-exclusive characters, and normalises the
+# look-alikes inside unambiguous words. Ambiguous words (pure
+# look-alikes like ``ABC`` or words with script-exclusive chars from
+# BOTH scripts) are left untouched to avoid wrecking legitimate mixed
+# content (technical terms, product codes, URLs).
+# ---------------------------------------------------------------------------
+
+
+#: Uppercase/lowercase Latin letters that have a visually identical
+#: Cyrillic counterpart. Keeps the mapping small and explicit — adding
+#: marginal look-alikes here (e.g. ``Q``→``Ԛ``) would over-correct.
+_LATIN_TO_CYRILLIC: Final[dict[str, str]] = {
+    "A": "А", "B": "В", "C": "С", "E": "Е", "H": "Н",
+    "K": "К", "M": "М", "O": "О", "P": "Р", "T": "Т",
+    "X": "Х", "Y": "У",
+    "a": "а", "c": "с", "e": "е", "o": "о", "p": "р",
+    "x": "х", "y": "у",
+}
+
+_CYRILLIC_TO_LATIN: Final[dict[str, str]] = {
+    v: k for k, v in _LATIN_TO_CYRILLIC.items()
+}
+
+#: Characters that can ONLY be Cyrillic — no Latin look-alike.
+#: Seeing any of these marks a word as unambiguously Cyrillic.
+_CYRILLIC_EXCLUSIVE: Final[frozenset[str]] = frozenset(
+    "БГДЖЗИЙЛПФЦЧШЩЪЫЬЭЮЯЁ"
+    "бгджзийлпфцчшщъыьэюяё"
+)
+
+#: Characters that can ONLY be Latin — no Cyrillic look-alike.
+#: Seeing any of these marks a word as unambiguously Latin.
+_LATIN_EXCLUSIVE: Final[frozenset[str]] = frozenset(
+    "DFGIJLNQRSUVWZ"
+    "bdfghijklmnqrstuvwz"
+)
+
+#: Tokens that must NOT be touched even if they look Cyrillic-majority.
+#: URLs and email-shaped tokens carry Latin on purpose; a path like
+#: ``/usr/local`` shouldn't have its letters swapped even if the
+#: surrounding text is Russian.
+_SKIP_TOKEN_RE: Final[Pattern[str]] = re.compile(
+    r"(?:https?://|www\.|[\w.-]+@|[A-Za-z]:[\\/])",
+)
+
+#: Word boundary splitter. Matches runs of letter-like characters
+#: plus hyphens/apostrophes (common inside words); everything else —
+#: whitespace, punctuation, digits — goes through verbatim.
+_WORD_CHUNK_RE: Final[Pattern[str]] = re.compile(
+    r"([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'’\-]*)",
+)
+
+
+def _classify_word_script(word: str) -> str:
+    """Return ``"cyr"``, ``"lat"`` or ``"mixed"`` for a single word.
+
+    A word is **unambiguously Cyrillic** when it contains at least one
+    character from :data:`_CYRILLIC_EXCLUSIVE` and zero characters from
+    :data:`_LATIN_EXCLUSIVE`. Symmetrically for Latin. Everything else
+    — pure look-alikes, or content with evidence from both scripts —
+    is ``"mixed"`` and left alone.
+    """
+    has_cyr = any(ch in _CYRILLIC_EXCLUSIVE for ch in word)
+    has_lat = any(ch in _LATIN_EXCLUSIVE for ch in word)
+    if has_cyr and not has_lat:
+        return "cyr"
+    if has_lat and not has_cyr:
+        return "lat"
+    return "mixed"
+
+
+def _normalize_cyrillic_latin_word(word: str) -> str:
+    """Replace Latin ↔ Cyrillic look-alikes inside a single word.
+
+    Skips URLs, emails and Windows-style paths outright (see
+    :data:`_SKIP_TOKEN_RE`). For ordinary words, dispatches on
+    :func:`_classify_word_script`:
+
+      * ``cyr`` — swap every Latin look-alike → its Cyrillic twin
+      * ``lat`` — swap every Cyrillic look-alike → its Latin twin
+      * ``mixed`` — leave as-is (either pure look-alikes or genuinely
+        cross-script content we must not touch)
+    """
+    if _SKIP_TOKEN_RE.search(word):
+        return word
+    kind = _classify_word_script(word)
+    if kind == "cyr":
+        return "".join(_LATIN_TO_CYRILLIC.get(ch, ch) for ch in word)
+    if kind == "lat":
+        return "".join(_CYRILLIC_TO_LATIN.get(ch, ch) for ch in word)
+    return word
+
+
+def normalize_cyrillic_latin_confusion(text: str) -> str:
+    """Tokenise ``text``, normalise Latin/Cyrillic look-alikes per-word.
+
+    Non-letter characters (digits, punctuation, whitespace) pass
+    through unchanged. See :func:`_normalize_cyrillic_latin_word` for
+    the per-word logic.
+    """
+    if not text:
+        return text
+    return _WORD_CHUNK_RE.sub(
+        lambda m: _normalize_cyrillic_latin_word(m.group(0)), text,
+    )
+
+
+# ---------------------------------------------------------------------------
 # TextPostprocessor
 # ---------------------------------------------------------------------------
 
@@ -259,6 +379,15 @@ class TextPostprocessor:
         if config.remove_artifacts:
             current = self._remove_artifacts(current)
             logger.debug("Postprocess: artifact lines removed")
+
+        # Word-level Latin↔Cyrillic look-alike fix must run BEFORE the
+        # regex autocorrects — those rules rely on the text already
+        # being classified consistently per word, and a lingering
+        # Latin ``o`` at the end of a Russian word would confuse the
+        # Cyrillic-context look-arounds downstream.
+        if config.fix_cyrillic_latin_confusion:
+            current = normalize_cyrillic_latin_confusion(current)
+            logger.debug("Postprocess: Cyrillic/Latin look-alikes normalised")
 
         if config.autocorrect_russian:
             current = self._autocorrect_russian(current)
