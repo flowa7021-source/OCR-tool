@@ -279,27 +279,29 @@ class TestUserWordsWiring:
 # ---------------------------------------------------------------------------
 
 
-class TestTesseractThresholdingKwargType:
-    """Regression guard: ``tesseract_thresholding`` MUST be a string from
-    ocrmypdf's allowed set, NOT a bare int.
+class TestTesseractThresholdingKwargAbsent:
+    """Regression guard: ``tesseract_thresholding`` MUST NOT be passed.
 
-    ocrmypdf 16.x declares the API typed-dict slot as ``int | None`` but
-    internally calls ``str(value)`` and re-parses through argparse with
-    ``choices=('auto', 'otsu', 'adaptive-otsu', 'sauvola')``. Passing
-    ``0`` crashes every OCR call on 16.13+ with
+    ocrmypdf has a version-dependent double-validation footgun. 16.13
+    and older re-serialise the value through argparse with
+    ``choices=('auto','otsu','adaptive-otsu','sauvola')`` — passing
+    the int ``0`` there crashes with
+    ``argparse.ArgumentTypeError: '0' must be one of: ...``. Meanwhile
+    16.14+ uses a pydantic ``OcrOptions`` model that declares
+    ``tesseract_thresholding: int`` — passing the string ``"auto"``
+    there crashes with
+    ``Input should be a valid integer, unable to parse string as an integer``.
 
-        argparse.ArgumentTypeError: '0' must be one of:
-        auto, otsu, adaptive-otsu, sauvola
-
-    which is exactly the failure the install smoke-test surfaced. The
-    ocrmypdf mock doesn't validate choices, so this test asserts the
-    kwarg SHAPE rather than functional correctness: a string from the
-    valid set round-trips through ocrmypdf argparse; an int never does.
+    There is NO value that passes both code paths. The only
+    version-stable answer is to let ocrmypdf use its own default
+    (``auto`` → 0), which happens to match the behaviour we want —
+    Tesseract's internal thresholding is orthogonal to our Sauvola
+    preprocessing. Both install-smoke-test and nightly-benchmark
+    surfaced these crashes in different ocrmypdf versions before
+    this guard landed.
     """
 
-    _VALID = {"auto", "otsu", "adaptive-otsu", "sauvola"}
-
-    def test_thresholding_is_string_from_valid_set(
+    def test_thresholding_kwarg_is_not_sent(
         self, fake_input_pdf: Path, fake_output_pdf: Path, tmp_path: Path,
     ) -> None:
         cfg = OCRConfig(languages=["rus"], primary_language="rus")
@@ -316,13 +318,10 @@ class TestTesseractThresholdingKwargType:
             run_ocrmypdf(options)
 
         call = fake_ocrmypdf.ocr.call_args
-        value = call.kwargs.get("tesseract_thresholding")
-        assert value is None or value in self._VALID, (
-            "tesseract_thresholding must be one of "
-            f"{self._VALID} or absent; got {value!r} "
-            f"(type={type(value).__name__}). "
-            "ocrmypdf 16.x rejects bare ints — see the docstring above."
-        )
-        assert not isinstance(value, bool) and not isinstance(value, int), (
-            f"tesseract_thresholding must NOT be an int; got {value!r}"
+        assert "tesseract_thresholding" not in call.kwargs, (
+            "tesseract_thresholding must NOT be passed to ocrmypdf.ocr — "
+            "no value passes both the argparse (16.13) and pydantic "
+            "(16.14+) validation layers. Let ocrmypdf use its default. "
+            f"Got kwargs['tesseract_thresholding']="
+            f"{call.kwargs.get('tesseract_thresholding')!r}."
         )
