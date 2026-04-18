@@ -230,8 +230,18 @@ def _enable_worker_faulthandler(worker_logger: logging.Logger) -> None:
             return
         os.makedirs(logs_dir, exist_ok=True)
         crash_path = os.path.join(logs_dir, f"worker-crash-{os.getpid()}.log")
+        # crash_file MUST stay open for the lifetime of the worker —
+        # faulthandler writes to it if the process segfaults. A
+        # context manager or explicit close() would defeat the whole
+        # point. But if ``faulthandler.enable()`` itself raises, the
+        # handle would leak; catch that specific case and close
+        # before re-logging.
         crash_file = open(crash_path, "w", encoding="utf-8")  # noqa: SIM115
-        faulthandler.enable(crash_file)
+        try:
+            faulthandler.enable(crash_file)
+        except Exception:
+            crash_file.close()
+            raise
         worker_logger.debug("faulthandler enabled, crash log at %s", crash_path)
     except Exception as exc:  # noqa: BLE001
         worker_logger.debug("Could not enable faulthandler: %s", exc)

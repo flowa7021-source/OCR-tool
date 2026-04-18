@@ -389,6 +389,16 @@ def _force_utf8_stdio() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI. Returns the process exit code."""
+    # Must happen BEFORE any subprocess-spawning code runs (Tesseract,
+    # Ghostscript, OCRmyPDF all fork children). Without this, CLI users
+    # on Windows see transient console windows flash every time a page
+    # is OCR'd — same problem ``src/main.py`` guards the GUI path with.
+    from src.infrastructure.subprocess_hygiene import (
+        install_windows_console_hide,
+    )
+
+    install_windows_console_hide()
+
     _force_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)

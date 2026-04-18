@@ -494,5 +494,8 @@ __all__ = [
     "ModelFile",
     "ModelManager",
     "ModelSpec",
-    "parse_manifest",
 ]
+# NOTE: ``parse_manifest`` is intentionally NOT re-exported. It's a
+# debug/test helper with no current callers; keeping it out of
+# ``__all__`` avoids polluting the public API surface. Any future
+# test that needs it can import by qualified name.

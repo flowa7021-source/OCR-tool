@@ -276,12 +276,24 @@ class TesseractWrapper:
         try:
             binary = self.find_tesseract_binary()
         except TesseractNotFoundError as exc:
-            return False, f"Tesseract не найден: {exc}"
+            # Log the raw exception (with searched paths) for diagnostics,
+            # but hand the user a clean actionable Russian message —
+            # don't dump internal search paths into GUI dialogs.
+            logger.error("Tesseract probe failed: %s", exc)
+            return False, (
+                "Tesseract не найден. Переустановите OCR Studio или "
+                "установите Tesseract в систему (choco install tesseract)."
+            )
 
         try:
             tessdata = self.find_tessdata_dir()
         except TessdataNotFoundError as exc:
-            return False, f"Tessdata не найдена: {exc}"
+            logger.error("Tessdata probe failed: %s", exc)
+            return False, (
+                "Tessdata не найдена. Переустановите OCR Studio или "
+                "укажите путь к tessdata через переменную окружения "
+                "TESSDATA_PREFIX."
+            )
 
         version = self.get_version()
         messages: list[str] = [
