@@ -2,7 +2,7 @@
 ; Builds a Windows installer from the PyInstaller --onedir output at dist/OCRStudio/
 
 #define MyAppName "OCR Studio"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "OCR Studio"
 #define MyAppURL "https://github.com/flowa7021-source/ocr-tool"
 #define MyAppExeName "OCRStudio.exe"
