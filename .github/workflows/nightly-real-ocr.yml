@@ -220,20 +220,35 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           OCR_ACCURACY_BENCHMARK: "1"
         run: |
-          # If baseline.json is missing (first run on this OS / after a
-          # deliberate reset), capture it via --regenerate-baseline so
-          # the tests exit 0 with the measurements written to the
-          # baseline path; the artifact upload below picks it up for
-          # the maintainer to commit. Once a baseline is in the repo,
-          # subsequent nightlies run the assertion path.
+          # If baseline.json is missing OR contains no real metrics
+          # (the committed file is a placeholder with only ``_comment``
+          # until the first nightly populates it), capture it via
+          # ``--regenerate-baseline``. The artifact upload below picks
+          # it up so the maintainer can commit. Once a real baseline is
+          # in the repo, subsequent nightlies run the assertion path.
           $baseline = "tests/fixtures/accuracy_corpus/baseline.json"
-          $regen = @()
-          if (-not (Test-Path $baseline)) {
-            Write-Host "No baseline.json — capturing a new one"
-            $regen = @("--regenerate-baseline")
+          $needsCapture = $true
+          if (Test-Path $baseline) {
+            try {
+              $data = Get-Content $baseline -Raw | ConvertFrom-Json
+              $docKeys = @(
+                $data.PSObject.Properties.Name |
+                  Where-Object { $_ -notlike "_*" }
+              )
+              if ($docKeys.Count -gt 0) {
+                $needsCapture = $false
+                Write-Host "Using committed baseline ($($docKeys.Count) docs)"
+              } else {
+                Write-Host "baseline.json present but holds no doc metrics — capturing"
+              }
+            } catch {
+              Write-Warning "baseline.json could not be parsed ($_); capturing fresh"
+            }
           } else {
-            Write-Host "Using committed baseline $baseline"
+            Write-Host "No baseline.json — capturing a new one"
           }
+          $regen = @()
+          if ($needsCapture) { $regen = @("--regenerate-baseline") }
           pytest tests/integration/test_accuracy_benchmark.py `
                  --tb=short -v @regen
 
