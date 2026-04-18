@@ -64,9 +64,13 @@ tests/test_data/*_ocr.pdf
 tests/test_data/output/
 
 # Generated test fixtures — produced by tests/fixtures/generate_fixtures.py
-# on first test run, not committed (200+ MB of synthetic PDFs).
+# and tests/fixtures/accuracy_corpus/generate.py on first test run, not
+# committed (300+ MB of synthetic PDFs total). The generators are
+# deterministic so any contributor can reproduce them.
 tests/fixtures/*.pdf
 tests/fixtures/nightly/
+tests/fixtures/accuracy_corpus/*.pdf
+tests/fixtures/accuracy_corpus/*.txt
 
 # OS
 Thumbs.db

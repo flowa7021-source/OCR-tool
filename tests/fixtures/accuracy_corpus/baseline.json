@@ -1,0 +1,3 @@
+{
+  "_comment": "OCR accuracy baseline. Each entry records the CER and WER measured by tests/integration/test_accuracy_benchmark.py for the current preprocessing + postprocessing + engine stack. A new measurement that exceeds baseline + tolerance fails the benchmark. Regenerate with `pytest tests/integration/test_accuracy_benchmark.py --regenerate-baseline` after an intentional accuracy improvement. Numbers below are placeholder 'first-run' values — nightly CI will populate real numbers via --regenerate-baseline once Tesseract binaries are available. Every field is float ∈ [0, 1]; 0.0 is perfect, 1.0 is no overlap with truth."
+}

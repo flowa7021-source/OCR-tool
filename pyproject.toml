@@ -36,6 +36,12 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
     "pyinstaller>=6.6",
+    # OCR accuracy benchmark. ``jiwer`` computes CER/WER via Levenshtein
+    # distance — the industry-standard quantitative metric for OCR
+    # regression testing. Keeps the test corpus honest: if a
+    # preprocessing tweak improves one document and silently regresses
+    # another, the benchmark flags it before merge.
+    "jiwer>=3.0",
 ]
 # Optional handwriting / transformer-OCR back-ends. Adds GOT-OCR 2.0
 # support (Apache-2.0). The model weights themselves (~580 MB) are

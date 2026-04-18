@@ -48,14 +48,21 @@ jobs:
           pip install python-docx PyMuPDF psutil deskew cffi
           pip install ocrmypdf pytesseract
           pip install pytest pytest-mock pytest-cov pytest-qt pytest-benchmark
+          # jiwer powers tests/integration/test_accuracy_benchmark.py
+          pip install jiwer
 
       - name: Generate nightly fixtures (20-doc corpus)
         run: |
           python tests/fixtures/generate_fixtures.py --nightly
 
-      # Two stages: adversarial retry-tier tests (smaller, fast signal)
-      # first, then the full 20-doc corpus (slow, exhaustive). Split so
-      # a crash in stage 1 is visible before stage 2 spends 30+ min.
+      - name: Generate accuracy-benchmark corpus
+        run: |
+          python tests/fixtures/accuracy_corpus/generate.py
+
+      # Three stages: adversarial retry-tier tests (fastest signal)
+      # first, then the accuracy benchmark (mid-speed), then the
+      # full 20-doc corpus (slow, exhaustive). Split so a crash
+      # in stage 1 is visible before stage 3 spends 30+ min.
       - name: Stage 1 — adversarial retry-tier tests
         env:
           QT_QPA_PLATFORM: offscreen
@@ -64,7 +71,15 @@ jobs:
                  tests/integration/test_e2e_engine_real.py \
                  --tb=short -v
 
-      - name: Stage 2 — full nightly corpus matrix
+      - name: Stage 2 — accuracy benchmark (CER / WER)
+        env:
+          QT_QPA_PLATFORM: offscreen
+          OCR_ACCURACY_BENCHMARK: "1"
+        run: |
+          pytest tests/integration/test_accuracy_benchmark.py \
+                 --tb=short -v
+
+      - name: Stage 3 — full nightly corpus matrix
         env:
           QT_QPA_PLATFORM: offscreen
           OCR_NIGHTLY: "1"
