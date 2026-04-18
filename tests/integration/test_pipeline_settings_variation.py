@@ -450,6 +450,12 @@ def test_remove_artifacts_flag_drops_pure_punctuation_lines(tmp_path: Path) -> N
             merge_hyphenated=False,
             normalize_whitespace=False,
             normalize_unicode=False,
+            # The ``lenient`` garbage filter would independently drop
+            # ``~~~~~`` / ``|||`` lines as mechanical garbage (Stage C
+            # of Initiative 1 — ruler / symbol-wall heuristic). Disable
+            # it for this test so we're measuring ONLY the effect of
+            # ``remove_artifacts``.
+            garbage_filter_strictness="disabled",
         ),
     )
     text_off = _run_with_postprocess(
@@ -462,6 +468,7 @@ def test_remove_artifacts_flag_drops_pure_punctuation_lines(tmp_path: Path) -> N
             merge_hyphenated=False,
             normalize_whitespace=False,
             normalize_unicode=False,
+            garbage_filter_strictness="disabled",
         ),
     )
 
