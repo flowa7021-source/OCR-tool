@@ -305,6 +305,12 @@ class ProfileManager:
             # (60 %), and mean_conf is reported over the kept set.
             # See ``src.core.confidence_filter`` for the mechanism.
             drop_low_conf_words=True,
+            # Adaptive threshold: clean pages (mean ≥ 90%) lower the
+            # bar to 40 to keep borderline-but-correct words; noisy
+            # pages (mean < 70%) raise the bar to 70 to filter harder.
+            # Turns the nominal ``confidence_threshold`` into a
+            # reasonable default instead of a per-document tuning knob.
+            adaptive_confidence_threshold=True,
             extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
         )
         postprocess = PostprocessConfig(
@@ -445,6 +451,8 @@ class ProfileManager:
             # letting borderline-conf words inside that region sneak
             # into Ctrl-F and copy-paste output.
             redact_noisy_blocks=True,
+            # Adapt the word-conf floor to each page's quality.
+            adaptive_confidence_threshold=True,
             extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
         )
         return ProfileData(

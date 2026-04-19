@@ -423,6 +423,42 @@ class OCRPipeline:
                     "«quick_reliable» или уменьшите DPI."
                 )
 
+            # Wrong-profile hint — when the job finished but mean
+            # confidence is low the user almost certainly picked the
+            # wrong profile for the document (high-DPI profile on a
+            # blurry phone snap; contracts_ru on an invoice with
+            # table rules; English profile on Russian text). Surface
+            # the suggestion via both the logger and a structured
+            # ``profile_recommendation`` progress event so the UI can
+            # show a non-blocking toast instead of burying the hint
+            # in the log viewer.
+            if not all_empty and result.pages:
+                avg_conf = result.average_confidence
+                if 0.0 < avg_conf < 60.0:
+                    current_profile = job.profile.name
+                    recommended: list[str] = []
+                    if current_profile != "low_quality_scan":
+                        recommended.append("low_quality_scan")
+                    if current_profile != "quick_reliable":
+                        recommended.append("quick_reliable")
+                    if recommended:
+                        logger.warning(
+                            "Job %s finished at %.1f%% mean confidence — "
+                            "current profile %r may not be the best "
+                            "match. Consider trying: %s",
+                            job_id, avg_conf, current_profile,
+                            " / ".join(recommended),
+                        )
+                        import contextlib
+
+                        with contextlib.suppress(Exception):
+                            self._report(
+                                total_pages,
+                                total_pages,
+                                f"profile_recommendation:{avg_conf:.0f}:"
+                                + ",".join(recommended),
+                            )
+
             logger.info(
                 "Job %s COMPLETED in %.2fs (avg conf=%.1f, pages=%d, out=%s)",
                 job_id,
@@ -1266,6 +1302,52 @@ class OCRPipeline:
                     confidences.append(c)
                     if c < threshold:
                         low_words.append(word)
+                # Per-page adaptive threshold: clean pages use a lower
+                # threshold (keep borderline words), noisy pages use
+                # a higher threshold (filter harder). See
+                # ``OCRConfig.adaptive_confidence_threshold`` for the
+                # exact rules.
+                page_mean = (
+                    sum(confidences) / len(confidences) if confidences else 0.0
+                )
+                effective_threshold = threshold
+                if (
+                    getattr(
+                        job.profile.ocr, "adaptive_confidence_threshold", False,
+                    )
+                    and confidences
+                ):
+                    if page_mean >= 90.0:
+                        effective_threshold = min(threshold, 40.0)
+                    elif page_mean < 70.0:
+                        effective_threshold = max(threshold, 70.0)
+                    if effective_threshold != threshold:
+                        logger.info(
+                            "Page %d: adaptive threshold %.1f → %.1f "
+                            "(page mean_conf=%.1f)",
+                            pr.page_number,
+                            threshold,
+                            effective_threshold,
+                            page_mean,
+                        )
+                # Recompute low-conf words against the effective
+                # threshold so the exported ``low_confidence_words``
+                # matches the filter that actually ran below.
+                if effective_threshold != threshold:
+                    low_words = []
+                    for conf, word in zip(
+                        data.get("conf", []),
+                        data.get("text", []),
+                        strict=False,
+                    ):
+                        try:
+                            c = float(conf)
+                        except (TypeError, ValueError):
+                            continue
+                        if c < 0 or not isinstance(word, str) or not word.strip():
+                            continue
+                        if c < effective_threshold:
+                            low_words.append(word)
                 if confidences:
                     pr.mean_confidence = sum(confidences) / len(confidences)
                     pr.low_confidence_words = low_words
@@ -1287,13 +1369,15 @@ class OCRPipeline:
                     )
 
                     filtered = reconstruct_text_from_tsv(
-                        data, min_confidence=threshold,
+                        data, min_confidence=effective_threshold,
                     )
                     if filtered.strip():
                         pr.text = self._postprocess_text(
                             filtered, job.profile.postprocess,
                         )
-                        kept = [c for c in confidences if c >= threshold]
+                        kept = [
+                            c for c in confidences if c >= effective_threshold
+                        ]
                         if kept:
                             pr.mean_confidence = sum(kept) / len(kept)
                         logger.info(
@@ -1302,7 +1386,7 @@ class OCRPipeline:
                             pr.page_number,
                             len(confidences) - len(kept),
                             len(confidences),
-                            threshold,
+                            effective_threshold,
                             pr.mean_confidence,
                         )
             except Exception as exc:  # noqa: BLE001

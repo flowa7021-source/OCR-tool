@@ -62,6 +62,7 @@
     "max_pages": 0,
     "drop_low_conf_words": true,
     "redact_noisy_blocks": true,
+    "adaptive_confidence_threshold": true,
     "extra_tesseract_params": {
       "preserve_interword_spaces": "1",
       "tessedit_do_invert": "0"

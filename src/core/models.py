@@ -244,6 +244,24 @@ class OCRConfig:
     #: keep behaviour byte-exact for profiles that haven't opted in;
     #: ``quick_reliable`` turns it on.
     redact_noisy_blocks: bool = False
+    #: When True, :class:`confidence_threshold` becomes a *nominal*
+    #: value that is adapted per page based on that page's mean
+    #: confidence:
+    #:
+    #:   * page mean_conf ≥ 90 % → effective threshold lowered to
+    #:     ``min(nominal, 40)`` — the page is clean, keep borderline
+    #:     words that the user clearly wants surfaced.
+    #:   * page mean_conf < 70 % → effective threshold raised to
+    #:     ``max(nominal, 70)`` — the page is noisy, filter harder so
+    #:     the user-facing text doesn't drown in low-conf guesses.
+    #:   * otherwise → nominal threshold.
+    #:
+    #: Fixes the "I have to re-tune ``confidence_threshold`` in the
+    #: profile for every different document" workflow: the number now
+    #: auto-shifts with the page's actual OCR quality. Off by default
+    #: for backwards-compatibility; profiles that want the behaviour
+    #: opt in explicitly.
+    adaptive_confidence_threshold: bool = False
     #: Freeform ``-c key=value`` Tesseract parameters passed through
     #: OCRmyPDF's ``tesseract_config`` kwarg. Profile authors use this
     #: to toggle internal Tesseract behaviour that isn't exposed as a
@@ -465,16 +483,21 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         data["schema_version"] = 3
         version = 3
 
-    # v3 → v4: add ``auto_rotate`` to preprocessing. Old profiles get
-    # the enabled-by-default config so they pick up the fix without
-    # user action; users who disabled it explicitly (there was no
-    # way to before v4 so this branch is for safety) keep their
-    # preference via setdefault.
+    # v3 → v4: add ``auto_rotate`` to preprocessing AND the
+    # ``adaptive_confidence_threshold`` flag to OCR. Old profiles
+    # get ``auto_rotate.enabled=True`` (opt-in by default — cheap
+    # OSD call, fixes sideways pages) and
+    # ``adaptive_confidence_threshold=False`` (opt-OUT by default,
+    # preserving the exact filter behaviour pre-v4 profiles saw).
+    # Builtin profile builders still set ``True`` on the opinionated
+    # presets (``universal_accurate``, ``quick_reliable``).
     if version < 4:
         pre = data.setdefault("preprocess", {})
         pre.setdefault(
             "auto_rotate", {"enabled": True, "min_confidence": 1.0}
         )
+        ocr = data.setdefault("ocr", {})
+        ocr.setdefault("adaptive_confidence_threshold", False)
         data["schema_version"] = 4
         version = 4
 
