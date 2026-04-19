@@ -20,6 +20,7 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -930,7 +931,9 @@ class OCRPipeline:
         from src.shared.types import OCREngineKind
 
         if self.compute_confidence and job.profile.ocr.engine is OCREngineKind.TESSERACT:
-            self._compute_confidences(page_results, job, png_paths)
+            self._compute_confidences(
+                page_results, job, png_paths, output_pdf=ocrd_pdf,
+            )
 
     def _autosave_partial_txt(
         self, partial_pages: list[PageResult], job: OCRJobConfig
@@ -983,8 +986,17 @@ class OCRPipeline:
         page_results: list[PageResult],
         job: OCRJobConfig,
         png_paths: list[Path],
+        *,
+        output_pdf: Path | None = None,
     ) -> None:
-        """Compute per-page confidence using ``pytesseract.image_to_data``."""
+        """Compute per-page confidence using ``pytesseract.image_to_data``.
+
+        When ``output_pdf`` is supplied AND ``drop_low_conf_words`` is
+        enabled, the PDF's invisible text layer is also filtered (low-
+        conf word regions are redacted in place). Passing ``None`` keeps
+        the behaviour backwards-compatible for any caller that still
+        invokes this method on PageResults alone.
+        """
         try:
             import cv2
             import pytesseract
@@ -1008,8 +1020,20 @@ class OCRPipeline:
         tess_cfg = " ".join(cfg_parts)
 
         threshold = float(job.profile.ocr.confidence_threshold)
+        # Collected per-page, used by the PDF text-layer filter at the
+        # end of the loop (if enabled). Parallel lists keep the page
+        # index intact even if a page errors out mid-loop.
+        tsv_per_page: list[dict[str, Any]] = []
+        image_sizes_px: list[tuple[int, int]] = []
 
         for pr, png_path in zip(page_results, png_paths, strict=False):
+            # Pre-seed placeholders for THIS page so the PDF-filter
+            # pass below keeps page-index alignment even when the
+            # image read or the Tesseract call below bails out. An
+            # empty-dict entry redacts nothing, which is the safe
+            # no-op we want for unavailable-data pages.
+            tsv_per_page.append({})
+            image_sizes_px.append((0, 0))
             if pr.error is not None:
                 continue
             try:
@@ -1027,6 +1051,12 @@ class OCRPipeline:
                     config=tess_cfg,
                     output_type=pytesseract.Output.DICT,
                 )
+                # Populate the page's slot with the real data — the
+                # placeholder appended above is overwritten so the
+                # downstream PDF filter sees the correct TSV + image
+                # dimensions for this page.
+                tsv_per_page[-1] = data
+                image_sizes_px[-1] = (int(img.shape[1]), int(img.shape[0]))
                 confidences: list[float] = []
                 low_words: list[str] = []
                 for conf, word in zip(
@@ -1087,6 +1117,44 @@ class OCRPipeline:
                     "Confidence computation failed for page %d: %s",
                     pr.page_number,
                     exc,
+                )
+
+        # PDF text-layer filter (Step C). After every page's TSV is
+        # collected, redact low-conf word regions from the searchable
+        # PDF so Ctrl-F / copy-paste / downstream DMS ingestion only
+        # hit the same high-conf words the results panel shows. Gated
+        # on ``drop_low_conf_words`` so profiles that haven't opted in
+        # keep the old full-union text layer. Best-effort: any error
+        # inside the filter is logged but doesn't fail the job — the
+        # searchable PDF still exists, it just has the original
+        # (unfiltered) text layer.
+        if (
+            job.profile.ocr.drop_low_conf_words
+            and output_pdf is not None
+            and output_pdf.exists()
+            and tsv_per_page
+        ):
+            try:
+                from src.core.pdf_text_filter import filter_pdf_text_layer
+
+                redacted = filter_pdf_text_layer(
+                    output_pdf,
+                    tsv_per_page=tsv_per_page,
+                    image_sizes_px=image_sizes_px,
+                    min_confidence=threshold,
+                )
+                logger.info(
+                    "PDF text-layer filter: redacted %d word region(s) "
+                    "across %d page(s) of %s",
+                    redacted, len(tsv_per_page), output_pdf,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "PDF text-layer filter failed on %s: %s — the "
+                    "searchable PDF is still usable but its text "
+                    "layer may contain low-conf words the UI filter "
+                    "hid.",
+                    output_pdf, exc, exc_info=True,
                 )
 
     def _cleanup(self, workdir: Path) -> None:
