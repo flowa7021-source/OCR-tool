@@ -56,6 +56,14 @@ resources/tessdata/*.bin
 resources/tesseract/*
 !resources/tesseract/.gitkeep
 
+# GOT-OCR 2.0 model weights + trust_remote_code scripts. Downloaded
+# to ``resources/models/got_ocr2/`` by ``.github/scripts/download_got_ocr2.py``
+# in the CI installer workflow and by the in-app "Download GOT-OCR 2.0"
+# action at runtime. Too big for git (~1.4 GB for model.safetensors
+# alone). The manifest + download script is the single source of truth;
+# regeneration is a one-command operation.
+resources/models/
+
 # Generated Windows icon
 resources/icons/app.ico
 

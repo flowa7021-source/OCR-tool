@@ -50,7 +50,15 @@ dev = [
 htr = [
     "torch>=2.1",
     "torchvision>=0.16",
-    "transformers>=4.40",
+    # GOT-OCR 2.0's ``trust_remote_code`` ``modeling_GOT.py`` uses the
+    # transformers ≤4.45 DynamicCache API (``past_key_values.seen_tokens``).
+    # transformers 4.46+ removed that attribute; loading GOT under
+    # newer transformers crashes mid-inference with:
+    #     'DynamicCache' object has no attribute 'seen_tokens'
+    # Upstream Stepfun hasn't refreshed the model card since 2024-09,
+    # so pinning is the tractable fix. Lower bound matches what
+    # Stepfun's own README validates against.
+    "transformers>=4.37,<4.46",
     "tiktoken>=0.5",
     "safetensors>=0.4",
     "einops>=0.7",

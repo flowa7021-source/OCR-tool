@@ -366,6 +366,83 @@ class GOTOCREngine(OCREngine):
         return results
 
     # ----------------------------------------------------------- internal
+    def _cpu_compat_guard(self):
+        """Temporarily patch torch to tolerate the upstream Stepfun
+        ``modeling_GOT.py`` hard-coded ``.cuda()`` / ``.half()`` calls.
+
+        The HuggingFace-published GOT-OCR 2.0 weights ship with a
+        ``trust_remote_code`` ``modeling_GOT.py`` whose ``chat`` method
+        contains literal calls like::
+
+            input_ids = torch.as_tensor(inputs.input_ids).cuda()
+            images=[image_tensor_1.unsqueeze(0).half().cuda()]
+
+        On a host without CUDA those raise ``RuntimeError: Torch not
+        compiled with CUDA enabled``. Every Windows machine without a
+        discrete GPU — which is the MAJORITY of the app's target user
+        base — hits this.
+
+        We can't monkey-patch the .py file (it ships with the model
+        weights and is validated on download). We can't subclass the
+        chat method (it's instance-level, not cleanly overridable).
+        The tractable option is: while ``self._device == 'cpu'``,
+        stub ``torch.Tensor.cuda`` to ``.to('cpu')`` and
+        ``torch.Tensor.half`` to a pass-through — but ONLY for the
+        duration of the ``chat()`` call. Outside the context manager
+        torch behaves exactly as before.
+
+        On a CUDA host this context manager is a no-op: the original
+        methods run verbatim, fp16 / .cuda() work as designed.
+
+        Returns:
+            A context manager. Use as::
+
+                with self._cpu_compat_guard():
+                    text = self._model.chat(...)
+        """
+        import contextlib
+
+        engine = self
+
+        @contextlib.contextmanager
+        def _guard():
+            if engine._device == "cuda":
+                # GPU path — let upstream's .cuda() / .half() run as-is.
+                yield
+                return
+
+            # CPU path: try to install the shim. When torch is a
+            # stubbed test double (SimpleNamespace with no ``Tensor``),
+            # the guard degrades to a pure no-op — we can't monkey-
+            # patch something that isn't there, and the test isn't
+            # going to call real torch methods anyway.
+            try:
+                import torch
+
+                orig_cuda = torch.Tensor.cuda
+                orig_half = torch.Tensor.half
+            except (ImportError, AttributeError):
+                yield
+                return
+
+            def _cpu_cuda(self, *args, **kwargs):  # noqa: ARG001
+                return self.to("cpu")
+
+            def _cpu_half(self, *args, **kwargs):  # noqa: ARG001
+                # fp16 on CPU is slower than fp32 in stock PyTorch
+                # without AMP; keep fp32 for correctness + speed.
+                return self
+
+            torch.Tensor.cuda = _cpu_cuda  # type: ignore[assignment]
+            torch.Tensor.half = _cpu_half  # type: ignore[assignment]
+            try:
+                yield
+            finally:
+                torch.Tensor.cuda = orig_cuda  # type: ignore[assignment]
+                torch.Tensor.half = orig_half  # type: ignore[assignment]
+
+        return _guard()
+
     def _recognize_page(self, page: Any) -> tuple[str, float]:
         """Run GOT-OCR2 on a single PyMuPDF page.
 
@@ -382,15 +459,24 @@ class GOTOCREngine(OCREngine):
         pix = page.get_pixmap(dpi=150, alpha=False)
         img = Image.open(io.BytesIO(pix.tobytes("png")))
 
-        # GOT-OCR2 expects the image as a PIL.Image and supports two
-        # ocr_types: 'ocr' (plain text) and 'format' (LaTeX/Markdown).
-        # We use plain 'ocr' for plain documents.
+        # GOT-OCR2's ``chat`` accepts either a file-path STRING (it
+        # calls ``image_file.startswith('http')`` internally) OR a
+        # PIL.Image — but only when ``gradio_input=True``. Without
+        # that flag, passing a PIL.Image straight in crashes with
+        # ``'PngImageFile' object has no attribute 'startswith'``
+        # because the default code path assumes the string branch.
+        # ``gradio_input=True`` is the in-memory route documented
+        # by upstream Stepfun — no temp file, no I/O round-trip.
+        # Two ocr_types supported: 'ocr' (plain text, default) and
+        # 'format' (LaTeX/Markdown). Plain documents use 'ocr'.
         try:
-            text = self._model.chat(
-                self._tokenizer,
-                img,
-                ocr_type="ocr",
-            )
+            with self._cpu_compat_guard():
+                text = self._model.chat(
+                    self._tokenizer,
+                    img,
+                    ocr_type="ocr",
+                    gradio_input=True,
+                )
         except MemoryError as exc:
             # Running out of system RAM is a hard stop — nothing we can
             # recover on this page, and the next page would fail too.

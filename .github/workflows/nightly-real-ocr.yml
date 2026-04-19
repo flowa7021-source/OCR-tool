@@ -361,16 +361,19 @@ jobs:
         shell: pwsh
         run: |
           # CPU-only torch wheel keeps the install under 1 GB —
-          # the Windows CI runner has no GPU anyway. Pinning to
-          # torch 2.6+ (released 2025) for the bf16 / fp16 CPU
-          # fallback that earlier builds miss. transformers 4.45+
-          # is required by the GOT-OCR ``trust_remote_code``
-          # ``modeling_GOT.py`` — older transformers crash on
-          # ``AutoModel.from_pretrained`` with a cryptic
-          # ``RotaryEmbedding`` error.
+          # the Windows CI runner has no GPU anyway.
+          #
+          # transformers MUST be <4.46: upstream Stepfun's
+          # ``modeling_GOT.py`` uses the pre-4.46 DynamicCache API
+          # (``past_key_values.seen_tokens``) which the 4.46+
+          # release removed. Loading GOT on newer transformers
+          # crashes mid-inference with:
+          #   'DynamicCache' object has no attribute 'seen_tokens'
+          # 4.37 is the lower bound Stepfun's own README validates
+          # against. Match the ``pyproject [htr]`` extras pin.
           pip install --index-url https://download.pytorch.org/whl/cpu `
                       torch torchvision
-          pip install "transformers>=4.45" tiktoken safetensors `
+          pip install "transformers>=4.37,<4.46" tiktoken safetensors `
                       "einops>=0.7" "accelerate>=0.25" "verovio>=4.0"
 
       - name: Cache GOT-OCR 2.0 weights
