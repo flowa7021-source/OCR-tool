@@ -696,13 +696,29 @@ class MainWindow(QMainWindow):
             self.profile_combo.addItem(f"{prefix}{p.name}", userData=p.name)
         self.profile_combo.blockSignals(False)
         if profiles:
-            # Prefer the "universal_accurate" preset as the first-run
-            # pick — it's the opinionated max-accuracy bundle users get
-            # "out of the box" without hand-tuning every knob. If it's
-            # missing (tests with a stripped-down ProfileManager) we
-            # fall back to whatever index 0 happens to be.
+            # Prefer ``quick_reliable`` as the first-run pick. Apr 2026
+            # measurement on real user scans (transport invoices with
+            # forms + stamps + signatures, 4-12 pages each) via
+            # ``scripts/benchmark_universal.py`` showed:
+            #
+            #   profile             mean(all)   mean(kept)   time
+            #   quick_reliable      57-59       ~82          93-270 s
+            #   universal_accurate  50          ~83          179+ s
+            #
+            # quick_reliable's simpler preprocessing (OTSU + median,
+            # no Sauvola / no background_removal / no border_removal)
+            # survives Russian business documents noticeably better
+            # than universal_accurate's heavier stack, which over-
+            # processes mixed-content scans and feeds Tesseract a
+            # thinned / smudged image. universal_accurate's ~1 pp
+            # edge on kept-words mean_conf is not worth the 2× wall
+            # time and 10 pp drop on overall mean_conf.
+            #
+            # universal_accurate stays in the list for users who
+            # deliberately want the "throw everything at it" option;
+            # it just isn't the default anymore.
             preferred_idx = next(
-                (i for i, p in enumerate(profiles) if p.name == "universal_accurate"),
+                (i for i, p in enumerate(profiles) if p.name == "quick_reliable"),
                 0,
             )
             self.profile_combo.setCurrentIndex(preferred_idx)

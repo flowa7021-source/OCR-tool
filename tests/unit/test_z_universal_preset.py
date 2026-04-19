@@ -10,7 +10,10 @@ Covers:
   that silently disables, say, deskew or autocorrect).
 * The ``universal_accurate`` builtin profile is created by
   ``ProfileManager.initialize_builtins()`` with the correct settings.
-* MainWindow selects ``universal_accurate`` on first launch.
+* MainWindow selects ``quick_reliable`` on first launch (previously
+  ``universal_accurate``; changed Apr 2026 after real-document
+  benchmarking showed quick_reliable wins on mean_confidence by 7-10
+  percentage points on mixed-content Russian business scans).
 """
 
 from __future__ import annotations
@@ -234,9 +237,24 @@ class TestMainWindowDefaultProfile:
         monkeypatch.setattr(QMessageBox, "warning", lambda *a, **kw: None)
         monkeypatch.setattr(QMessageBox, "critical", lambda *a, **kw: None)
 
-    def test_universal_accurate_selected_by_default(
+    def test_quick_reliable_selected_by_default(
         self, monkeypatch, tmp_path: Path
     ) -> None:
+        """First-launch default is ``quick_reliable``.
+
+        Changed Apr 2026 from ``universal_accurate`` based on
+        per-document benchmark numbers on real Russian transport
+        invoices. ``quick_reliable`` gave:
+          * mean conf (all words)  57-59 vs 50 for universal_accurate
+          * mean conf (kept words) ~82 vs ~83 — statistically the
+            same post-filter quality
+          * wall time 93-270 s vs 179+ s — 2× faster
+
+        universal_accurate's heavy preprocessing stack (Sauvola +
+        background_removal + border_removal + CLAHE clip 3.0) over-
+        processes mixed-content scans. quick_reliable's simple OTSU
+        + median chain survives real documents better.
+        """
         from PySide6.QtWidgets import QApplication
 
         self._stub_heavy(monkeypatch, tmp_path)
@@ -246,7 +264,7 @@ class TestMainWindowDefaultProfile:
         _, window = create_application([])
         try:
             # The combobox stores profile name in userData.
-            assert window.profile_combo.currentData() == "universal_accurate"
+            assert window.profile_combo.currentData() == "quick_reliable"
         finally:
             window.close()
             window.deleteLater()
@@ -254,8 +272,8 @@ class TestMainWindowDefaultProfile:
     def test_falls_back_to_index_zero_when_preset_missing(
         self, monkeypatch, tmp_path: Path
     ) -> None:
-        """If someone strips universal_accurate from BUILTIN_NAMES the UI
-        must still pick something sane, not crash with IndexError."""
+        """If someone strips ``quick_reliable`` from BUILTIN_NAMES the
+        UI must still pick something sane, not crash with IndexError."""
         from PySide6.QtWidgets import QApplication
 
         self._stub_heavy(monkeypatch, tmp_path)
@@ -265,7 +283,7 @@ class TestMainWindowDefaultProfile:
         import src.application.profile_manager as pm
 
         monkeypatch.setattr(pm, "BUILTIN_NAMES", tuple(
-            n for n in pm.BUILTIN_NAMES if n != "universal_accurate"
+            n for n in pm.BUILTIN_NAMES if n != "quick_reliable"
         ))
 
         original_init = pm.ProfileManager.initialize_builtins
@@ -273,7 +291,7 @@ class TestMainWindowDefaultProfile:
         def stripped_init(self) -> None:
             original_init(self)
             # Also remove the file if it was seeded before patch applied.
-            path = self.storage.profiles_dir / "universal_accurate.json"
+            path = self.storage.profiles_dir / "quick_reliable.json"
             if path.exists():
                 path.unlink()
 
