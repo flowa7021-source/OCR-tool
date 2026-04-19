@@ -1,6 +1,6 @@
 {
   "name": "handwritten_mixed",
-  "description": "GOT-OCR 2.0 для рукописного и печатного текста (требует отдельной модели)",
+  "description": "GOT-OCR 2.0 для рукописного и печатного текста. Требует скачивания модели (~580 МБ) через меню «Движок OCR». Рекомендуется когда в документе есть рукописные заметки, штампы с текстом или нестандартные шрифты — Tesseract на них сдаётся. Для чистых печатных сканов используйте quick_reliable.",
   "schema_version": 2,
   "preprocess": {
     "deskew": {
@@ -65,6 +65,7 @@
     "normalize_whitespace": true,
     "normalize_unicode": true,
     "remove_artifacts": true,
+    "validate_identifiers": true,
     "custom_rules": []
   },
   "builtin": true,

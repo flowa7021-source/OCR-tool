@@ -537,11 +537,42 @@ class ProfileManager:
         )
 
     def _build_handwritten_mixed(self) -> ProfileData:
-        """GOT-OCR 2.0 для рукописного и печатного текста.
+        """GOT-OCR 2.0 for scans with handwriting, stamps, and mixed fonts.
 
-        Требует отдельного скачивания модели через меню «Движок OCR».
-        Бинаризация отключена — modern transformer-OCR работает лучше
-        на серых полутонах. Лёгкий CLAHE сохраняем для контраста.
+        When to use (vs. ``quick_reliable``):
+
+          * Documents with **handwritten** notes, signatures, or
+            stamp text — Tesseract's LSTM is printed-font-only and
+            returns 5-25 % conf on handwriting. GOT-OCR 2.0 is a
+            transformer trained on mixed print + handwriting; it
+            routinely reads handwriting at 70-90 %.
+          * **Non-standard fonts** — stylised invoice headers, fancy
+            company logos, decorative stamps. Tesseract guesses at
+            10-40 %; GOT-OCR handles them directly.
+          * **Acceptable trade-offs**: ~580 MB model download, CPU
+            inference 3-5× slower than Tesseract at 300 DPI, GPU
+            (when available) comparable-to-faster.
+
+        When NOT to use:
+
+          * Pure printed-text scans at 300 DPI or better —
+            Tesseract via ``quick_reliable`` is faster and the
+            accuracy delta is not worth the wall-time cost.
+          * When the bundled model file isn't downloaded yet — the
+            first run surfaces a clear "model missing" error and
+            bails. Use the in-app "Download GOT-OCR 2.0" action
+            from the engine menu.
+
+        Preprocessing is deliberately MINIMAL — transformer OCR
+        prefers greyscale input over binarised. CLAHE stays on
+        (cheap, lifts contrast on faded pages). Deskew stays on
+        (angled input wastes the model's positional encoding).
+        Everything else is off.
+
+        Postprocess shares the ``quick_reliable`` identifier-fixup
+        path: even though GOT-OCR reads ИНН / ОГРН more cleanly than
+        Tesseract, a single-digit miss still happens on faded print,
+        and the catalog-assisted rewrite fixes it transparently.
         """
         preprocess = PreprocessConfig(
             deskew=DeskewConfig(enabled=True, auto_detect=True),
@@ -558,14 +589,33 @@ class ProfileManager:
             dpi=300,
             confidence_threshold=50.0,
             optimize_level=OptimizeLevel.LOSSLESS,
+            # The word-level / block-level filters (Steps 1 + 2) are
+            # Tesseract-only — they read the pytesseract TSV that
+            # GOT-OCR doesn't produce. Leaving the flags off here
+            # makes the intent explicit; the pipeline already gates
+            # those steps on ``engine == TESSERACT``, so setting
+            # them to True here would be a silent no-op anyway.
+            drop_low_conf_words=False,
+            redact_noisy_blocks=False,
         )
+        # Postprocess IS engine-agnostic — it operates on the
+        # extracted text after OCR is done, regardless of which
+        # engine produced it. Sharing the ИНН/ОГРН catalog fixup
+        # between quick_reliable and handwritten_mixed means a
+        # corrupt ИНН in GOT-OCR output also gets rewritten to the
+        # canonical form.
+        postprocess = PostprocessConfig(validate_identifiers=True)
         return ProfileData(
             name="handwritten_mixed",
             description=(
-                "GOT-OCR 2.0 для рукописного и печатного текста "
-                "(требует отдельной модели)"
+                "GOT-OCR 2.0 для рукописного и печатного текста. "
+                "Требует скачивания модели (~580 МБ) через меню "
+                "«Движок OCR». Рекомендуется когда в документе "
+                "есть рукописные заметки, штампы с текстом или "
+                "нестандартные шрифты — Tesseract на них сдаётся. "
+                "Для чистых печатных сканов используйте quick_reliable."
             ),
             preprocess=preprocess,
             ocr=ocr,
-            postprocess=PostprocessConfig(),
+            postprocess=postprocess,
         )
