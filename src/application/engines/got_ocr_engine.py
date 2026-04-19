@@ -108,11 +108,19 @@ class GOTOCREngine(OCREngine):
         #   - ``einops`` / ``accelerate``: used by the model architecture
         #   - ``torchvision``: used by the vision encoder (got_vision_b.py)
         #   - ``verovio``: used by render_tools.py for music/math OCR mode
+        #   - ``tiktoken``: imported by tokenization_qwen.py to decode the
+        #     bundled ``qwen.tiktoken`` BPE file
+        #   - ``safetensors``: used by transformers to mmap model.safetensors
+        #     — its absence lets ``AutoModel.from_pretrained`` fail with a
+        #     cryptic "NoBackendError" instead of a clean install hint
         # Missing any of these lets ``is_available`` return True but then
         # ``_load_model`` crashes with an ImportError from HF's
         # ``check_imports`` — the user sees a raw traceback instead of a
         # clean "install X" hint.
-        for dep in ("einops", "accelerate", "torchvision", "verovio"):
+        for dep in (
+            "einops", "accelerate", "torchvision", "verovio",
+            "tiktoken", "safetensors",
+        ):
             try:
                 __import__(dep)
             except ImportError:

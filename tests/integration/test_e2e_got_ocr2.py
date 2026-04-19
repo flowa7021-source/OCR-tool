@@ -82,8 +82,12 @@ def _fake_got_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     fake_transformers.__name__ = "transformers"
 
-    # Stub every transitive dep that is_available probes for.
-    for dep_name in ("einops", "accelerate", "torchvision", "verovio"):
+    # Stub every transitive dep that is_available probes for. Keep
+    # in sync with the probe list in got_ocr_engine.is_available().
+    for dep_name in (
+        "einops", "accelerate", "torchvision", "verovio",
+        "tiktoken", "safetensors",
+    ):
         fake = types.SimpleNamespace()
         fake.__name__ = dep_name
         monkeypatch.setitem(sys.modules, dep_name, fake)
@@ -275,8 +279,10 @@ class TestGOTMissingModel:
         # Install the minimal fake torch/transformers/einops so the
         # engine's is_available passes its ML-stack probes — we want
         # the MODEL-missing message, not the torch-missing one.
-        for dep in ("torch", "transformers", "einops", "accelerate",
-                    "torchvision", "verovio"):
+        for dep in (
+            "torch", "transformers", "einops", "accelerate",
+            "torchvision", "verovio", "tiktoken", "safetensors",
+        ):
             fake = types.SimpleNamespace(
                 __name__=dep,
                 cuda=types.SimpleNamespace(is_available=lambda: False),

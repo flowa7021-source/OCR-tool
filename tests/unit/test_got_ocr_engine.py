@@ -61,8 +61,18 @@ def _stub_torch_transformers(monkeypatch) -> None:
         AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda *a, **kw: MagicMock()),
     )
     fake_transformers.__name__ = "transformers"
-    # Stub every transitive dep that is_available probes for.
-    for dep_name in ("einops", "accelerate", "torchvision", "verovio"):
+    # Stub every transitive dep that is_available probes for. The
+    # ``tiktoken`` / ``safetensors`` entries were added Apr 2026
+    # after auditing the ``[htr]`` extras: they are imported by the
+    # HuggingFace ``trust_remote_code`` modules but the probe list
+    # originally missed them, letting ``is_available`` return True
+    # on an env where ``from_pretrained`` would fail with a cryptic
+    # error. Keep the list in sync with the probe in
+    # ``got_ocr_engine.is_available``.
+    for dep_name in (
+        "einops", "accelerate", "torchvision", "verovio",
+        "tiktoken", "safetensors",
+    ):
         fake = types.SimpleNamespace()
         fake.__name__ = dep_name
         monkeypatch.setitem(sys.modules, dep_name, fake)
@@ -113,6 +123,43 @@ class TestAvailability:
         ok, msg = e.is_available()
         assert ok is True
         assert msg == ""
+
+    @pytest.mark.parametrize(
+        "missing_dep",
+        [
+            "einops", "accelerate", "torchvision", "verovio",
+            "tiktoken", "safetensors",
+        ],
+    )
+    def test_each_transitive_dep_triggers_actionable_error(
+        self, manager: ModelManager, monkeypatch, missing_dep: str,
+    ) -> None:
+        """Removing any one of the transitive HTR deps must surface
+        an actionable install hint rather than letting ``is_available``
+        return True and then crash during ``from_pretrained``.
+
+        The ``tiktoken`` / ``safetensors`` cases were added Apr 2026
+        after auditing the ``[htr]`` extras: they were in the
+        installed extras but NOT in the engine probe list, so a user
+        whose env was missing one of them saw a cryptic transformers
+        traceback instead of a clean "install X" message.
+        """
+        _stub_torch_transformers(monkeypatch)
+        _seed_manifest(manager)
+        # Remove the one dep under test. Use ``None`` so the import
+        # machinery raises ``ImportError`` in a way
+        # ``__import__(dep_name)`` inside the probe catches.
+        monkeypatch.setitem(sys.modules, missing_dep, None)
+        e = GOTOCREngine(model_manager=manager)
+        ok, msg = e.is_available()
+        assert ok is False, (
+            f"is_available returned True with {missing_dep} missing — "
+            "the probe list is out of sync with the runtime imports."
+        )
+        assert missing_dep in msg, (
+            f"Error message must name the missing dep ({missing_dep!r}) "
+            f"so the user knows what to install. Got: {msg!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
