@@ -148,24 +148,63 @@ class OCRPipeline:
 
         workdir: Path | None = None
         try:
+            logger.info("Job %s stage=init: configuring Tesseract", job_id)
             self._ensure_tesseract_configured()
 
+            # 0. Pre-flight. Runs in ~1 second and fails fast if the
+            #    selected engine is not actually usable — missing
+            #    Tesseract binary, missing GOT-OCR 2.0 manifest file,
+            #    stale HTR weights directory. Without this check a
+            #    600 DPI / 4-page job used to spend ~30 seconds on
+            #    preprocessing BEFORE discovering the engine was
+            #    misconfigured. Now the user finds out immediately.
+            engine_kind = job.profile.ocr.engine
+            self._report(0, 1, "preflight")
+            try:
+                from src.application.engines import get_engine
+                from src.application.engines.base import EngineNotAvailableError
+
+                engine = get_engine(engine_kind)
+                ok, msg = engine.is_available()
+                if not ok:
+                    logger.error(
+                        "Job %s preflight FAILED: engine=%s not available: %s",
+                        job_id, engine_kind, msg,
+                    )
+                    result.status = JobStatus.FAILED
+                    result.error = msg
+                    result.total_time_sec = time.time() - started
+                    return result
+                logger.info(
+                    "Job %s preflight OK: engine=%s is_available", job_id, engine_kind
+                )
+            except (EngineNotAvailableError, KeyError) as exc:
+                logger.error(
+                    "Job %s preflight FAILED: %s", job_id, exc, exc_info=True
+                )
+                result.status = JobStatus.FAILED
+                result.error = str(exc)
+                result.total_time_sec = time.time() - started
+                return result
+
+            # Advisory: DPI × tesseract_timeout sanity. At 600 DPI a
+            # complex Russian-contract page legitimately takes 2-3 min;
+            # if the user pinned a sub-300s timeout they're almost
+            # certainly about to hit the auto-retry path. Log a
+            # WARNING so the field-support log makes the root cause
+            # visible before the failure happens.
+            self._check_dpi_timeout_sanity(job, job_id)
+
             workdir = create_temp_workdir(prefix="ocrjob_")
-            logger.debug("Workdir for job %s: %s", job_id, workdir)
+            logger.info("Job %s workdir: %s", job_id, workdir)
 
             # 1. Analyze
+            logger.info("Job %s stage=analyze: opening PDF", job_id)
+            t_stage = time.time()
             page_infos = self._analyze_pdf(input_path)
             full_page_count = len(page_infos)
-            # Preview mode: truncate to the first N pages when the
-            # user asked for it, so running a trial profile on a huge
-            # PDF is measured in seconds rather than hours.
             max_pages = int(getattr(job.profile.ocr, "max_pages", 0) or 0)
             if max_pages > 0 and full_page_count > max_pages:
-                # WARNING, not INFO: this is the only signal CLI users get
-                # that a 500-page scan is being silently truncated to
-                # `max_pages`. The GUI also shows a preflight QMessageBox,
-                # but the CLI defaults to logging.WARNING and silent data
-                # loss is worse than a little extra noise.
                 logger.warning(
                     "Job %s: preview mode — processing first %d of %d pages "
                     "(profile has max_pages=%d). Set max_pages=0 in the "
@@ -175,25 +214,49 @@ class OCRPipeline:
                 page_infos = page_infos[:max_pages]
             total_pages = len(page_infos)
             logger.info(
-                "Job %s: %d page(s) to process (document has %d)",
-                job_id, total_pages, full_page_count,
+                "Job %s stage=analyze done in %.2fs: %d page(s) to process "
+                "(document has %d total)",
+                job_id, time.time() - t_stage, total_pages, full_page_count,
             )
+
+            # Advisory: if skip_text=True and EVERY page already has text,
+            # OCRmyPDF will skip every page and produce a PDF with no new
+            # text layer — the user gets back their own file unchanged.
+            # This isn't a bug but it's deeply confusing; warn up front.
+            skip_text = getattr(job.profile.ocr, "skip_text", True)
+            if skip_text and page_infos:
+                pages_with_text = sum(
+                    1 for p in page_infos if p.get("has_text", False)
+                )
+                if pages_with_text == total_pages:
+                    logger.warning(
+                        "Job %s: все %d страниц уже содержат текстовый "
+                        "слой, а skip_text=True в профиле. OCRmyPDF "
+                        "пропустит все страницы и вернёт исходный PDF. "
+                        "Если нужно перераспознать — установите "
+                        "skip_text=False в настройках профиля.",
+                        job_id, total_pages,
+                    )
+
             self._report(0, total_pages, "analyze")
 
             # 2. Preprocess pages -> PNGs (parallel across pages).
-            # PyMuPDF releases the GIL during `get_pixmap`, and our
-            # preprocessor is stateless — so threading the per-page work
-            # gives a ~3-4× speedup on multicore hardware for the
-            # otherwise-sequential rasterise+preprocess bottleneck.
-            #
-            # Each worker opens its own `fitz.Document` (see
-            # ``_rasterize_page``), so there's no shared mutable state.
-            # Results go into pre-allocated slots to preserve page order.
+            logger.info(
+                "Job %s stage=preprocess: rasterising + cleaning %d page(s) "
+                "at %d DPI",
+                job_id, total_pages,
+                int(getattr(job.profile.ocr, "dpi", 300)),
+            )
+            t_stage = time.time()
             page_results, png_paths = self._preprocess_pages_parallel(
                 input_path=input_path,
                 workdir=workdir,
                 page_count=total_pages,
                 profile=job.profile,
+            )
+            logger.info(
+                "Job %s stage=preprocess done in %.2fs: %d/%d page(s) ready",
+                job_id, time.time() - t_stage, len(png_paths), total_pages,
             )
 
             if not png_paths:
@@ -201,22 +264,84 @@ class OCRPipeline:
 
             # 3. Assemble preprocessed PDF
             preprocessed_pdf = workdir / "preprocessed.pdf"
-            self._assemble_pdf(png_paths, preprocessed_pdf)
+            logger.info(
+                "Job %s stage=assemble: building %s from %d PNG(s)",
+                job_id, preprocessed_pdf.name, len(png_paths),
+            )
+            t_stage = time.time()
+            self._assemble_pdf(
+                png_paths,
+                preprocessed_pdf,
+                dpi=int(getattr(job.profile.ocr, "dpi", 300) or 300),
+            )
+            logger.info(
+                "Job %s stage=assemble done in %.2fs (preprocessed.pdf = %d bytes)",
+                job_id, time.time() - t_stage,
+                preprocessed_pdf.stat().st_size if preprocessed_pdf.exists() else -1,
+            )
             self._report(total_pages, total_pages, "assemble")
 
             # 4. OCR — dispatch to the engine selected by profile.ocr.engine.
             from src.application.engines import get_engine
             from src.application.engines.base import EngineNotAvailableError
 
-            output_path.parent.mkdir(parents=True, exist_ok=True)
+            # Pre-flight: verify every external binary OCRmyPDF spawns
+            # actually exists. Without this, failure surfaces as a long
+            # OCRmyPDF traceback with a cryptic line like "Could not
+            # find program 'tesseract' on the PATH" — even when
+            # tesseract.exe is sitting right there in our bundle
+            # (OCRmyPDF doesn't know about ``pytesseract.tesseract_cmd``,
+            # it uses shutil.which only). We've already called
+            # ``ensure_on_path`` in worker startup, so if a tool is
+            # still missing here it really is absent from the install.
+            engine_kind = job.profile.ocr.engine
             try:
-                engine = get_engine(job.profile.ocr.engine)
+                from src.shared.types import OCREngineKind
+
+                if engine_kind is OCREngineKind.TESSERACT:
+                    from src.infrastructure.external_tools import (
+                        verify_required_for_ocrmypdf,
+                    )
+
+                    missing = verify_required_for_ocrmypdf()
+                    if missing:
+                        msg = (
+                            "Не найдены внешние программы, необходимые "
+                            "для OCRmyPDF: "
+                            + ", ".join(missing)
+                            + ". Переустановите OCR Studio — в сборке "
+                            "отсутствуют бандленные бинарники "
+                            "(tesseract / ghostscript)."
+                        )
+                        logger.error(
+                            "Job %s stage=ocr pre-flight FAILED: %s",
+                            job_id, msg,
+                        )
+                        result.status = JobStatus.FAILED
+                        result.error = msg
+                        result.pages = page_results
+                        result.total_time_sec = time.time() - started
+                        return result
+            except Exception as exc:  # noqa: BLE001 - pre-flight is advisory
+                logger.debug("Pre-flight check raised, continuing: %s", exc)
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            logger.info(
+                "Job %s stage=ocr: engine=%s lang=%s psm=%s oem=%s optimize=%s",
+                job_id, engine_kind,
+                job.profile.ocr.tesseract_language_string,
+                job.profile.ocr.psm,
+                job.profile.ocr.oem,
+                job.profile.ocr.optimize_level,
+            )
+            t_stage = time.time()
+            try:
+                engine = get_engine(engine_kind)
                 engine_results = engine.run(
                     preprocessed_pdf=preprocessed_pdf,
                     output_pdf=output_path,
                     config=job.profile.ocr,
                     progress_callback=lambda c, t, s: self._report(
-                        # Keep page-level progress monotonic across stages.
                         total_pages * c // max(1, t), total_pages, s
                     ),
                 )
@@ -225,12 +350,17 @@ class OCRPipeline:
                 result.error = str(exc)
                 result.pages = page_results
                 result.total_time_sec = time.time() - started
-                logger.error("Job %s failed during OCR engine: %s", job_id, exc)
+                logger.error(
+                    "Job %s stage=ocr FAILED after %.2fs: %s",
+                    job_id, time.time() - t_stage, exc, exc_info=True,
+                )
                 return result
+            logger.info(
+                "Job %s stage=ocr done in %.2fs; output %s (%d bytes)",
+                job_id, time.time() - t_stage, output_path.name,
+                output_path.stat().st_size if output_path.exists() else -1,
+            )
 
-            # Engines may pre-populate text/word_boxes (e.g. GOT-OCR2);
-            # for Tesseract these stubs stay empty and step 5 fills them
-            # by reading the produced searchable PDF.
             if engine_results:
                 for stub, page_result in zip(
                     engine_results, page_results, strict=False
@@ -242,33 +372,67 @@ class OCRPipeline:
             self._report(total_pages, total_pages, "ocr")
 
             # 5. Extract per-page text, postprocess
+            logger.info(
+                "Job %s stage=postprocess: extracting text + applying "
+                "post-filters to %d page(s)",
+                job_id, len(page_results),
+            )
+            t_stage = time.time()
             self._extract_and_postprocess(
                 output_path, page_results, job, png_paths
+            )
+            logger.info(
+                "Job %s stage=postprocess done in %.2fs",
+                job_id, time.time() - t_stage,
             )
             self._report(total_pages, total_pages, "postprocess")
 
             result.pages = page_results
             result.status = JobStatus.COMPLETED
             result.total_time_sec = time.time() - started
+
+            # Detect "COMPLETED but nothing recognised" — surface a
+            # clear warning so the user isn't left staring at an empty
+            # searchable PDF wondering if the app is broken.
+            all_empty = all(
+                not (p.text or "").strip() for p in result.pages
+            ) if result.pages else True
+            if all_empty:
+                logger.warning(
+                    "Job %s COMPLETED but NO text was recognised on any "
+                    "page. Likely causes: wrong DPI for this scan, "
+                    "Tesseract timed out silently, or preprocessing "
+                    "destroyed the glyphs. Try the 'quick_reliable' "
+                    "profile or lower DPI.",
+                    job_id,
+                )
+                result.error = (
+                    "Документ обработан, но текст не был распознан "
+                    "ни на одной странице. Попробуйте профиль "
+                    "«quick_reliable» или уменьшите DPI."
+                )
+
             logger.info(
-                "Job %s completed in %.2fs (avg conf=%.1f)",
+                "Job %s COMPLETED in %.2fs (avg conf=%.1f, pages=%d, out=%s)",
                 job_id,
                 result.total_time_sec,
                 result.average_confidence,
+                len(result.pages),
+                output_path,
             )
-            # Persist the successful run so a re-invocation with the
-            # same input+profile skips the whole pipeline.
             self._try_cache_store(input_path, job.profile, output_path, result)
             return result
 
         except (CorruptPdfError, EncryptedPdfError, EmptyPdfError) as exc:
-            logger.warning("Job %s aborted: %s", job_id, exc)
+            logger.warning(
+                "Job %s aborted (typed PDF error): %s", job_id, exc
+            )
             result.status = JobStatus.FAILED
             result.error = str(exc)
             result.total_time_sec = time.time() - started
             return result
         except Exception as exc:  # noqa: BLE001 - top-level failure
-            logger.exception("Job %s failed", job_id)
+            logger.exception("Job %s FAILED with unexpected error", job_id)
             result.status = JobStatus.FAILED
             result.error = str(exc)
             result.total_time_sec = time.time() - started
@@ -280,6 +444,33 @@ class OCRPipeline:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _check_dpi_timeout_sanity(self, job: OCRJobConfig, job_id: str) -> None:
+        """Warn when DPI is high AND tesseract_timeout is below the safe floor.
+
+        At 600 DPI, complex Russian-contract pages routinely take
+        2-3 minutes in Tesseract. The default timeout is now 300s
+        and the wrapper auto-retries once with 600s + single-threaded,
+        so sub-300 configurations very likely fall through to the
+        (user-visible) "не успели распознаться" error. Log a WARNING
+        so a technician looking at the log sees the root cause up
+        front rather than piecing it together from timestamps.
+        """
+        try:
+            dpi = int(getattr(job.profile.ocr, "dpi", 300) or 300)
+            timeout = int(
+                getattr(job.profile.ocr, "tesseract_timeout", 300) or 300
+            )
+        except (TypeError, ValueError):
+            return
+        if dpi >= 600 and timeout < 300:
+            logger.warning(
+                "Job %s: DPI=%d + tesseract_timeout=%ds is a known risky "
+                "combination. Expect to hit the auto-retry path. "
+                "Recommendation: use the 'quick_reliable' profile, or "
+                "raise tesseract_timeout to 300+ in the active profile.",
+                job_id, dpi, timeout,
+            )
 
     def _ensure_tesseract_configured(self) -> None:
         """Configure pytesseract if not already configured."""
@@ -427,6 +618,17 @@ class OCRPipeline:
         caching outright (for users on tight disk budgets); any other
         value caps the total cache size at that many megabytes with
         LRU eviction.
+
+        We **refuse to cache a result where every page came back with
+        zero recognised characters** — that's almost always a broken
+        configuration (wrong DPI reporting, missing tessdata, a
+        corrupted preprocessed image) rather than a genuinely empty
+        document, and caching it poisons every subsequent attempt on
+        the same input: the cache short-circuits before we can fix
+        the root cause, the user re-runs and gets the same "empty"
+        output forever. Letting the empty result skip the cache means
+        a fix to the underlying problem immediately takes effect on
+        the next run.
         """
         try:
             from src.infrastructure import ocr_cache
@@ -439,6 +641,22 @@ class OCRPipeline:
             if cap_mb <= 0:
                 logger.debug("OCR cache disabled (max_mb=0) — skipping store")
                 return
+
+            # Refuse to cache a "recognized nothing" result. Every page
+            # with no text AND no confidence indicates a pipeline
+            # failure rather than a legitimately blank document.
+            if result.pages and all(
+                not (p.text or "").strip() and p.mean_confidence <= 0
+                for p in result.pages
+            ):
+                logger.warning(
+                    "Cache SKIPPED: every page is empty with zero "
+                    "confidence — treating as a broken run rather than "
+                    "a legitimate blank document. Not poisoning the "
+                    "cache for subsequent attempts on the same input."
+                )
+                return
+
             ocr_cache.store(
                 input_path,
                 profile,
@@ -570,22 +788,53 @@ class OCRPipeline:
             doc.close()
 
     def _save_png(self, image: np.ndarray, path: Path) -> None:
-        """Write a numpy image to PNG on disk."""
+        """Write a numpy image to PNG on disk.
+
+        Uses ``cv2.imencode`` + :meth:`Path.write_bytes` instead of the
+        more obvious ``cv2.imwrite`` because the latter goes through
+        ``fopen`` on Windows, which takes an ANSI-encoded path and
+        silently fails for any character outside the active code page.
+        In practice that means users whose Windows profile contains
+        Cyrillic characters (e.g. ``C:\\Users\\Т.Н. 020\\...``) get
+        ``Не удалось сохранить PNG: ...`` for every page, every job.
+        Piping the encoded bytes through Python's own filesystem layer
+        bypasses the issue — :meth:`Path.write_bytes` honours Unicode
+        paths natively on every platform.
+        """
         import cv2
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        ok = cv2.imwrite(str(path), image)
-        if not ok:
-            raise RuntimeError(f"Не удалось сохранить PNG: {path}")
+        ok, buf = cv2.imencode(".png", image)
+        if not ok or buf is None:
+            raise RuntimeError(f"Не удалось закодировать PNG: {path}")
+        path.write_bytes(buf.tobytes())
 
-    def _assemble_pdf(self, png_paths: list[Path], output_pdf: Path) -> None:
+    def _assemble_pdf(
+        self, png_paths: list[Path], output_pdf: Path, *, dpi: int = 300
+    ) -> None:
         """Assemble a PDF from a list of PNGs (one page per image).
+
+        PDF page dimensions are stored in **points** (1/72 inch), not
+        pixels. A 300 DPI scan of an A4 page is ~2480x3508 pixels but
+        the page must be 595x842 points (A4 in points) so downstream
+        tooling — most importantly OCRmyPDF's rasterisation-for-Tesseract
+        step — infers the correct DPI. If we use the pixel dimensions
+        directly as points, the page claims to be 34×48 inches at
+        72 DPI, and Tesseract's layout analysis decides the text is
+        sub-glyph-size and silently recognises nothing.
+
+        Convert from pixels to points using the DPI that was used to
+        rasterise from the original PDF (``profile.ocr.dpi``).
 
         Args:
             png_paths: Ordered list of PNG files.
             output_pdf: Output PDF path.
+            dpi: Rasterisation DPI used in :meth:`_rasterize_page` —
+                determines the pixels→points conversion.
         """
         import fitz
+
+        dpi_factor = 72.0 / float(dpi)
 
         doc = fitz.open()
         try:
@@ -593,12 +842,23 @@ class OCRPipeline:
                 # Probe image dimensions via a temporary pixmap.
                 pix = fitz.Pixmap(str(png_path))
                 try:
-                    width = float(pix.width)
-                    height = float(pix.height)
+                    pixel_width = int(pix.width)
+                    pixel_height = int(pix.height)
                 finally:
                     pix = None  # noqa: F841 - release native resource
 
-                page = doc.new_page(width=width, height=height)
+                # Convert pixels → points so the embedded image is
+                # reported at the correct DPI. OCRmyPDF uses page
+                # dimensions + image dimensions to pick the DPI for
+                # Tesseract, and ~72 DPI was producing empty hOCR on
+                # synthetic English/Russian text because layout
+                # analysis ignored the glyphs.
+                page_width_points = pixel_width * dpi_factor
+                page_height_points = pixel_height * dpi_factor
+
+                page = doc.new_page(
+                    width=page_width_points, height=page_height_points
+                )
                 rect = page.rect
                 page.insert_image(rect, filename=str(png_path))
             output_pdf.parent.mkdir(parents=True, exist_ok=True)
@@ -753,7 +1013,12 @@ class OCRPipeline:
             if pr.error is not None:
                 continue
             try:
-                img = cv2.imread(str(png_path), cv2.IMREAD_UNCHANGED)
+                # Unicode-safe read — ``cv2.imread`` fails on non-ASCII
+                # Windows paths the same way ``cv2.imwrite`` does (see
+                # :meth:`_save_png`). Read the bytes via Python and let
+                # ``cv2.imdecode`` parse them.
+                raw = np.frombuffer(png_path.read_bytes(), dtype=np.uint8)
+                img = cv2.imdecode(raw, cv2.IMREAD_UNCHANGED) if raw.size else None
                 if img is None:
                     continue
                 data = pytesseract.image_to_data(
@@ -781,6 +1046,42 @@ class OCRPipeline:
                 if confidences:
                     pr.mean_confidence = sum(confidences) / len(confidences)
                     pr.low_confidence_words = low_words
+
+                # Word-level drop: rebuild pr.text from the same TSV,
+                # dropping every word below ``confidence_threshold``. The
+                # searchable-PDF text layer is still the OCRmyPDF union
+                # (see :mod:`src.core.confidence_filter` module docstring),
+                # but the user-facing text — results panel, TXT/DOCX
+                # export — is now the cleaner filtered version. Empty
+                # reconstructions leave ``pr.text`` untouched so we never
+                # blank out a result just because confidence scoring
+                # itself was noisy. Mean-conf is also recomputed over
+                # the KEPT words so the UI doesn't flash a lower number
+                # than what the user is actually looking at.
+                if job.profile.ocr.drop_low_conf_words:
+                    from src.core.confidence_filter import (
+                        reconstruct_text_from_tsv,
+                    )
+
+                    filtered = reconstruct_text_from_tsv(
+                        data, min_confidence=threshold,
+                    )
+                    if filtered.strip():
+                        pr.text = self._postprocess_text(
+                            filtered, job.profile.postprocess,
+                        )
+                        kept = [c for c in confidences if c >= threshold]
+                        if kept:
+                            pr.mean_confidence = sum(kept) / len(kept)
+                        logger.info(
+                            "Page %d: word-conf filter dropped %d/%d "
+                            "words (threshold=%.1f), kept mean_conf=%.1f",
+                            pr.page_number,
+                            len(confidences) - len(kept),
+                            len(confidences),
+                            threshold,
+                            pr.mean_confidence,
+                        )
             except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "Confidence computation failed for page %d: %s",

@@ -25,6 +25,7 @@ pipeline.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -66,7 +67,20 @@ class GOTOCREngine(OCREngine):
 
     # ----------------------------------------------------------- probes
     def is_available(self) -> tuple[bool, str]:
-        """Verify both Python deps and on-disk weights are present."""
+        """Verify Python deps, on-disk weights, AND transitive imports.
+
+        We've seen two footguns in production:
+
+        * A bundled ``torch`` that silently missed one of its DLLs
+          (``VCOMP140.DLL`` on older Windows) — ``import torch``
+          succeeded but the first ``torch.zeros(1)`` blew up. The
+          smoke test below catches that.
+        * GOT-OCR 2.0's ``trust_remote_code`` scripts pull in niche
+          packages like ``einops`` / ``accelerate`` that aren't part
+          of a minimal ``transformers`` install. Importing them here
+          lets us return a clear error instead of a cryptic
+          ``ModuleNotFoundError`` at inference time.
+        """
         try:
             import torch  # noqa: F401
             import transformers  # noqa: F401
@@ -76,6 +90,37 @@ class GOTOCREngine(OCREngine):
                 "`pip install ocr-studio[htr]` или скачайте torch + "
                 f"transformers вручную. Ошибка: {exc.name}"
             )
+        # torch + transformers ran the import hook — now exercise them
+        # once to catch DLL / shared-object load failures that only
+        # surface on first use.
+        try:
+            import torch
+
+            _ = torch.zeros(1)
+        except Exception as exc:  # noqa: BLE001
+            return False, (
+                "torch установлен, но базовая операция "
+                f"(torch.zeros) падает: {exc}. Скорее всего "
+                "отсутствует рантайм VC++ или CUDA DLL."
+            )
+        # Transitive deps GOT-OCR 2.0's trust_remote_code scripts need.
+        # The list grew over time as upstream Stepfun added imports:
+        #   - ``einops`` / ``accelerate``: used by the model architecture
+        #   - ``torchvision``: used by the vision encoder (got_vision_b.py)
+        #   - ``verovio``: used by render_tools.py for music/math OCR mode
+        # Missing any of these lets ``is_available`` return True but then
+        # ``_load_model`` crashes with an ImportError from HF's
+        # ``check_imports`` — the user sees a raw traceback instead of a
+        # clean "install X" hint.
+        for dep in ("einops", "accelerate", "torchvision", "verovio"):
+            try:
+                __import__(dep)
+            except ImportError:
+                return False, (
+                    f"Для GOT-OCR 2.0 требуется пакет '{dep}'. "
+                    f"Установите его (pip install {dep}) или "
+                    "обратитесь к сборщику сборки."
+                )
         if not self._model_manager.is_available(GOT_OCR2_SPEC.model_id):
             return False, (
                 f"Модель {GOT_OCR2_SPEC.label} не скачана. Откройте "
@@ -84,6 +129,58 @@ class GOTOCREngine(OCREngine):
         return True, ""
 
     # ----------------------------------------------------------- loading
+    @staticmethod
+    def _safe_model_path(path: Path) -> str:
+        """Return a path safe to hand to HuggingFace loaders.
+
+        Some HuggingFace plumbing (safetensors' mmap path, older
+        tokenizers builds) uses C++/Rust I/O that has historically
+        choked on non-ASCII Windows paths — exactly the scenario a
+        Cyrillic user profile ("``C:\\Users\\Т.Н. 020\\...``") lands
+        us in. On Windows we attempt to resolve the path to its
+        8.3 short form via ``GetShortPathNameW``, which is always
+        pure ASCII. If the short form isn't available (e.g. 8.3 names
+        disabled on NTFS, which is the default on Win10+) we fall
+        back to the original path — Python-level HF code still works
+        with Unicode, and the failure mode here would only be a
+        diagnostic warning rather than a hard crash.
+        """
+        p_str = str(path)
+        if os.name != "nt":
+            return p_str
+        # Only bother if the path contains characters above ASCII.
+        if p_str.isascii():
+            return p_str
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            get_short = ctypes.windll.kernel32.GetShortPathNameW  # type: ignore[attr-defined]
+            get_short.argtypes = [
+                wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD,
+            ]
+            get_short.restype = wintypes.DWORD
+
+            buf = ctypes.create_unicode_buffer(1024)
+            needed = get_short(p_str, buf, len(buf))
+            if needed == 0:
+                return p_str  # API failed (permission / not a real path)
+            if needed > len(buf):
+                buf = ctypes.create_unicode_buffer(needed)
+                if get_short(p_str, buf, needed) == 0:
+                    return p_str
+            short = buf.value
+            if short and short != p_str:
+                logger.info(
+                    "Using short path for HuggingFace loader: %s -> %s",
+                    p_str, short,
+                )
+                return short
+            return p_str
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("GetShortPathNameW fallback failed: %s", exc)
+            return p_str
+
     def _load_model(self) -> None:
         """Lazily load weights into memory; idempotent."""
         if self._model is not None:
@@ -92,24 +189,45 @@ class GOTOCREngine(OCREngine):
         from transformers import AutoModel, AutoTokenizer  # type: ignore[import-not-found]
 
         model_dir = self._model_manager.model_dir(GOT_OCR2_SPEC.model_id)
-        logger.info("Loading GOT-OCR2 weights from %s", model_dir)
-        t0 = time.time()
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            str(model_dir), trust_remote_code=True
+        hf_path = self._safe_model_path(model_dir)
+        logger.info(
+            "Loading GOT-OCR2 weights from %s (hf_path=%s)", model_dir, hf_path
         )
+        t0 = time.time()
+        try:
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                hf_path, trust_remote_code=True
+            )
+        except (OSError, ImportError) as exc:
+            # OSError: HuggingFace can't find a custom ``.py`` module
+            #   on disk (``tokenization_qwen.py`` etc.). Its message
+            #   interpolates our local path into a fake HF URL.
+            # ImportError: HF's ``check_imports`` found that the custom
+            #   module references packages not installed in the env
+            #   (``torchvision``, ``verovio``). The ``is_available``
+            #   probe SHOULD have caught this, but if the user's env
+            #   changed between the probe and the actual load (or the
+            #   dep list in ``is_available`` wasn't exhaustive) this is
+            #   the backstop.
+            self._raise_stale_model_error(model_dir, exc)
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         # fp16 on CUDA halves VRAM and gives a 2-3× inference speedup on
         # modern GPUs (T4, A10, RTX 30xx+) with no measurable accuracy
         # loss for GOT-OCR2. CPU-only path stays float32 — bf16/fp16 on
         # CPU is slower than fp32 in PyTorch without explicit AMP.
         torch_dtype = torch.float16 if self._device == "cuda" else torch.float32
-        self._model = AutoModel.from_pretrained(
-            str(model_dir),
-            trust_remote_code=True,
-            low_cpu_mem_usage=True,
-            device_map=self._device,
-            torch_dtype=torch_dtype,
-        )
+        try:
+            self._model = AutoModel.from_pretrained(
+                hf_path,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+                device_map=self._device,
+                torch_dtype=torch_dtype,
+            )
+        except (OSError, ImportError) as exc:
+            # Same failure mode but surfacing from the model class
+            # rather than the tokenizer. Treat identically.
+            self._raise_stale_model_error(model_dir, exc)
         self._model.eval()
         logger.info(
             "GOT-OCR2 ready on %s (%s) in %.1fs",
@@ -117,6 +235,49 @@ class GOTOCREngine(OCREngine):
             torch_dtype,
             time.time() - t0,
         )
+
+    def _raise_stale_model_error(self, model_dir: Path, cause: BaseException) -> None:
+        """Translate HF ``OSError`` / ``ImportError`` into actionable text.
+
+        Invalidates the ``ModelManager`` availability cache first so
+        the next ``is_available()`` call re-checks the filesystem
+        against the current manifest — that way the UI's "Скачать
+        модель" button is enabled again without the user having to
+        restart the app.
+
+        Two distinct cause types reach here:
+
+        * ``OSError`` — a ``.py`` module listed in ``trust_remote_code``
+          is physically missing from the model directory.
+        * ``ImportError`` — the ``.py`` module IS present but its own
+          ``import`` statement references a package not installed in
+          the current environment (e.g. ``torchvision``, ``verovio``).
+          The ``is_available`` probe is supposed to catch these, but
+          if the dep list drifts or the user's env changes between
+          probe and load, this is the backstop.
+        """
+        try:
+            self._model_manager.invalidate_availability(GOT_OCR2_SPEC.model_id)
+        except Exception:  # noqa: BLE001 — diagnostic only
+            logger.debug("invalidate_availability raised", exc_info=True)
+        logger.error(
+            "GOT-OCR2 model load failed (model_dir=%s): %s: %s",
+            model_dir, type(cause).__name__, cause,
+        )
+        if isinstance(cause, ImportError):
+            raise EngineNotAvailableError(
+                f"GOT-OCR 2.0 требует дополнительные пакеты: {cause}. "
+                "Установите недостающие зависимости через "
+                "pip install torchvision verovio или переустановите "
+                "OCR Studio с расширением [htr]."
+            ) from cause
+        raise EngineNotAvailableError(
+            "Файлы модели GOT-OCR 2.0 устарели или неполные — отсутствует "
+            "один из Python-модулей trust_remote_code "
+            "(например, tokenization_qwen.py или modeling_GOT.py). "
+            "Откройте Настройки → OCR-движок → Скачать модель, чтобы "
+            "докачать недостающие файлы, и повторите распознавание."
+        ) from cause
 
     def unload(self) -> None:
         """Release GOT-OCR 2.0 weights (~580 MB RAM / GPU memory).

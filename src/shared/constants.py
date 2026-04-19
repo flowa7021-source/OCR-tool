@@ -8,7 +8,7 @@ from pathlib import Path
 
 # --- Application identity ---
 APP_NAME: str = "OCR Studio"
-APP_VERSION: str = "1.0.0"
+APP_VERSION: str = "1.1.0"
 APP_ORGANIZATION: str = "OCRStudio"
 APP_ID: str = "com.ocrstudio.app"
 
@@ -67,6 +67,12 @@ APP_ROOT: Path = get_app_root()
 RESOURCES_DIR: Path = APP_ROOT / "resources"
 TESSDATA_DIR: Path = RESOURCES_DIR / "tessdata"
 TESSERACT_BIN_DIR: Path = RESOURCES_DIR / "tesseract"
+# Ghostscript is a hard runtime dependency of OCRmyPDF. Even with
+# ``clean=False, remove_background=False, deskew=False`` OCRmyPDF still
+# invokes ``gs`` to merge the hOCR layer onto the PDF and to produce the
+# PDF/A output. If we don't bundle it, users see a cryptic
+# ``MissingDependencyError: Could not find program 'gs'`` at OCR time.
+GHOSTSCRIPT_BIN_DIR: Path = RESOURCES_DIR / "ghostscript"
 ICONS_DIR: Path = RESOURCES_DIR / "icons"
 STYLES_DIR: Path = RESOURCES_DIR / "styles"
 BUNDLED_PROFILES_DIR: Path = APP_ROOT / "profiles"
@@ -78,7 +84,12 @@ BUNDLED_PROFILES_DIR: Path = APP_ROOT / "profiles"
 BUNDLED_MODELS_DIR: Path = RESOURCES_DIR / "models"
 
 # --- Tesseract ---
-TESSERACT_VERSION: str = "5.5.0"
+# Accept any Tesseract 5.x — the app works with 5.3, 5.4, and 5.5.
+# The version check in ``TesseractWrapper.verify`` compares major.minor;
+# keeping this at "5.3.0" means we log a WARNING only for truly
+# incompatible versions (4.x, 6.x), not for every user who has the
+# Ubuntu-packaged 5.3.4 or the UB Mannheim 5.4.0.
+TESSERACT_VERSION: str = "5.3.0"
 TESSERACT_EXE_NAME: str = "tesseract.exe" if sys.platform == "win32" else "tesseract"
 
 # --- OCR defaults ---
@@ -88,7 +99,14 @@ MIN_DPI: int = 150
 MAX_DPI: int = 600
 DPI_CHOICES: tuple[int, ...] = (150, 200, 300, 400, 600)
 DEFAULT_CONFIDENCE_THRESHOLD: float = 60.0
-DEFAULT_TESSERACT_TIMEOUT_SEC: int = 120
+# 5 minutes. Covers complex Russian contracts rasterised at 600 DPI on
+# mid-tier hardware, where pages with dense diacritics + graphics legit-
+# imately take 2-3 minutes per page. The old default of 120s was too
+# tight: OCRmyPDF aborted the whole job with ``FileNotFoundError`` in
+# its graft phase because Tesseract skipped the page and never produced
+# the expected HOCR. 300s leaves headroom while still catching genuinely
+# stuck Tesseract processes that would otherwise hang indefinitely.
+DEFAULT_TESSERACT_TIMEOUT_SEC: int = 300
 
 # --- Parallel processing ---
 DEFAULT_PARALLEL_WORKERS: int = 2

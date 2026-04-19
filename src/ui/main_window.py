@@ -106,6 +106,37 @@ class _TesseractVerifySignals(QObject):
     result = Signal(bool, str)  # (ok, message)
 
 
+class _JobBridge(QObject):
+    """Marshal ParallelProcessor callbacks onto the GUI thread.
+
+    ``ParallelProcessor`` fires ``on_progress`` from its internal drain
+    thread (``ocr-progress-drain``) and ``on_complete`` / ``on_error``
+    from the ``concurrent.futures`` result-dispatcher thread. Neither
+    owns a Qt event loop, so ``QTimer.singleShot(0, callable)`` invoked
+    from them silently drops the callable — the UI then never sees any
+    progress or completion, which surfaces to the user as "I pressed
+    Start OCR and nothing happens, the file just hangs".
+
+    Emitting a ``Signal`` on a QObject living in the GUI thread and
+    connecting it with ``Qt.QueuedConnection`` is the supported Qt
+    cross-thread handoff: the signal's payload is queued into the
+    main-thread event loop regardless of which thread called ``emit``.
+
+    ``update_info`` rides the same bridge so the background
+    update-checker thread can deliver its payload safely. Earlier
+    revisions used ``QMetaObject.invokeMethod`` with ``Q_ARG(object,
+    ...)`` for that, which raised ``RuntimeError: qArgDataFromPyType:
+    Unable to find a QMetaType for "object"`` on PySide6 — Q_ARG only
+    accepts Qt-registered types, not arbitrary Python objects.
+    Signals, by contrast, carry Python objects natively.
+    """
+
+    progress = Signal(str, int, int, str)  # job_id, current, total, stage
+    completed = Signal(str, object)  # job_id, JobResult
+    failed = Signal(str, object)  # job_id, Exception
+    update_info = Signal(object, bool)  # UpdateInfo | None, quiet
+
+
 class _TempCleanupRunnable(QRunnable):
     """Walk ``TEMP_DIR`` in a worker thread and delete stale workdirs.
 
@@ -293,6 +324,23 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             logger.debug("Tray notifier unavailable", exc_info=True)
             self._tray = None
+
+        # Cross-thread bridge for ParallelProcessor callbacks. Must be
+        # created before ``_build_*`` / ``_wire_signals`` so any early
+        # job submission (e.g. crash-recovery prompt) marshals safely.
+        self._job_bridge = _JobBridge(self)
+        self._job_bridge.progress.connect(
+            self._apply_job_progress, Qt.ConnectionType.QueuedConnection
+        )
+        self._job_bridge.completed.connect(
+            self._apply_job_result, Qt.ConnectionType.QueuedConnection
+        )
+        self._job_bridge.failed.connect(
+            self._apply_job_failure, Qt.ConnectionType.QueuedConnection
+        )
+        self._job_bridge.update_info.connect(
+            self._show_update_info_slot, Qt.ConnectionType.QueuedConnection
+        )
 
         self._build_widgets()
         self._build_docks()
@@ -850,11 +898,17 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_NAME, f"Ошибка запуска обработки:\n{exc}")
 
     def _on_job_progress(self, job_id: str, current: int, total: int, stage: str) -> None:
-        """Progress callback — runs on a non-UI thread. Marshal into GUI thread."""
-        QTimer.singleShot(
-            0, lambda: self._apply_job_progress(job_id, current, total, stage)
-        )
+        """Progress callback — runs on a non-UI thread. Marshal into GUI thread.
 
+        NOTE: ``QTimer.singleShot(0, lambda)`` was used here historically
+        and silently failed because the caller (the ParallelProcessor
+        drain thread) has no Qt event loop, so the timer never fired
+        and the user saw no progress at all. The QueuedConnection-based
+        signal bridge is the only safe cross-thread dispatch.
+        """
+        self._job_bridge.progress.emit(job_id, int(current), int(total), str(stage))
+
+    @Slot(str, int, int, str)
     def _apply_job_progress(self, job_id: str, current: int, total: int, stage: str) -> None:
         try:
             self._queue_manager.update_progress(job_id, current, total)
@@ -873,16 +927,24 @@ class MainWindow(QMainWindow):
             self._schedule_recovery_snapshot(item)
 
     def _on_job_complete(self, job_id: str, result: object) -> None:
-        # Called from worker thread — marshal into GUI thread
-        QTimer.singleShot(0, lambda: self._apply_job_result(job_id, result))
+        # Called from the concurrent.futures result-dispatcher thread,
+        # which has no Qt event loop. Use the signal bridge — see
+        # ``_on_job_progress`` for the full explanation.
+        self._job_bridge.completed.emit(job_id, result)
 
     def _on_job_failed(self, job_id: str, exc: BaseException) -> None:
-        QTimer.singleShot(
-            0,
-            lambda: self._queue_manager.update_status(
+        # Same cross-thread situation as _on_job_complete.
+        self._job_bridge.failed.emit(job_id, exc)
+
+    @Slot(str, object)
+    def _apply_job_failure(self, job_id: str, exc: object) -> None:
+        """GUI-thread handler for worker failures."""
+        try:
+            self._queue_manager.update_status(
                 job_id, JobStatus.FAILED, str(exc)
-            ),
-        )
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to mark job %s FAILED", job_id, exc_info=True)
 
     # ---- Queue-panel context-menu actions -----------------------------
 
@@ -923,6 +985,7 @@ class MainWindow(QMainWindow):
             logger.exception("Failed to open job output: %s", exc)
             QMessageBox.critical(self, APP_NAME, f"Не удалось открыть файл: {exc}")
 
+    @Slot(str, object)
     def _apply_job_result(self, job_id: str, result: object) -> None:
         self._last_result = result
         self.results_panel.set_result(result)  # type: ignore[arg-type]
@@ -1754,12 +1817,25 @@ class MainWindow(QMainWindow):
         'you are up-to-date' dialog (used for the automatic startup
         check, where we only want to bug the user about real upgrades).
         """
+        # ``check_async`` spawns a plain ``threading.Thread`` to hit
+        # GitHub; its callback lands on that non-Qt thread. Route the
+        # result through the ``_job_bridge.update_info`` signal — a
+        # QueuedConnection signal carries Python objects natively and
+        # avoids the ``qArgDataFromPyType: Unable to find a QMetaType
+        # for 'object'`` error that ``QMetaObject.invokeMethod`` with
+        # ``Q_ARG(object, ...)`` raises on PySide6 for arbitrary Python
+        # payloads.
         from src.application.update_checker import check_async
 
         def _report(info) -> None:  # noqa: ANN001
-            QTimer.singleShot(0, lambda: self._show_update_info(info, quiet=quiet))
+            self._job_bridge.update_info.emit(info, quiet)
 
         check_async(_report)
+
+    @Slot(object, bool)
+    def _show_update_info_slot(self, info: object, quiet: bool) -> None:
+        """Queued wrapper so ``check_async`` callbacks reach the GUI thread."""
+        self._show_update_info(info, quiet=quiet)
 
     def _show_update_info(self, info, *, quiet: bool) -> None:  # noqa: ANN001
         if info is None:

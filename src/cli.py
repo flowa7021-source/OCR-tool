@@ -89,6 +89,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Показать доступные профили и завершить работу",
     )
     p.add_argument(
+        "--check-engine",
+        metavar="KIND",
+        help=(
+            "Проверить доступность OCR-движка (``tesseract`` или "
+            "``got_ocr2``) и завершить работу. Exit 0 — движок готов, "
+            "exit 1 — недоступен (причина выводится в stderr). "
+            "Используется CI-smoke тестом, чтобы поймать сломанный "
+            "HTR-бандл до релиза."
+        ),
+    )
+    p.add_argument(
         "--verbose",
         "-v",
         action="count",
@@ -210,7 +221,20 @@ def process_single(
     )
 
     t0 = time.time()
-    logger.info("Обработка: %s → %s (профиль: %s)", input_path, output_path, profile.name)
+    logger.info(
+        "Обработка: %s → %s\n"
+        "  Профиль: %s | Движок: %s | DPI: %s | Языки: %s\n"
+        "  Бинаризация: %s | Deskew: %s | CLAHE: %s | Timeout: %s с",
+        input_path, output_path,
+        profile.name,
+        profile.ocr.engine.value,
+        profile.ocr.dpi,
+        profile.ocr.tesseract_language_string,
+        profile.preprocess.binarization.method.value,
+        "вкл" if profile.preprocess.deskew.enabled else "выкл",
+        "вкл" if profile.preprocess.contrast.clahe_enabled else "выкл",
+        profile.ocr.tesseract_timeout,
+    )
     result = pipeline.run(job)
     elapsed = time.time() - t0
 
@@ -222,6 +246,11 @@ def process_single(
         "✅ Готово за %.1f с (страниц: %d, средний confidence: %.1f%%)",
         elapsed, result.page_count, result.average_confidence,
     )
+
+    # Surface the "completed but empty" advisory so the CLI user
+    # sees the same hint the GUI user would see in the status bar.
+    if result.error:
+        logger.warning("⚠ %s", result.error)
 
     exporter = ExportManager()
     try:
@@ -313,6 +342,40 @@ def process_batch(
 # ---------------------------------------------------------------------------
 
 
+def check_engine(kind_name: str) -> int:
+    """Probe an OCR engine's availability and exit accordingly.
+
+    Stage-gate hook for the build-installer smoke test: catches the
+    "bundle is missing a transitive dep" class of bugs (torchvision,
+    verovio, einops, accelerate) BEFORE the installer ships, rather
+    than at first user launch. Returns 0 on success, 1 on failure;
+    the reason is written to stderr so CI logs capture it.
+    """
+    from src.application.engines.registry import get_engine
+    from src.shared.types import OCREngineKind
+
+    try:
+        kind = OCREngineKind(kind_name)
+    except ValueError:
+        valid = ", ".join(k.value for k in OCREngineKind)
+        print(
+            f"Неизвестный движок '{kind_name}'. Допустимые: {valid}",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        engine = get_engine(kind)
+    except KeyError as exc:
+        print(f"Движок '{kind.value}' не зарегистрирован: {exc}", file=sys.stderr)
+        return 1
+    ok, msg = engine.is_available()
+    if ok:
+        print(f"OK: {engine.name} готов к использованию")
+        return 0
+    print(f"FAIL: {engine.name} недоступен — {msg}", file=sys.stderr)
+    return 1
+
+
 def list_profiles() -> int:
     """Print available profiles and return 0."""
     from src.application.profile_manager import ProfileManager
@@ -371,6 +434,39 @@ def _force_utf8_stdio() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI. Returns the process exit code."""
+    # Must happen BEFORE any subprocess-spawning code runs (Tesseract,
+    # Ghostscript, OCRmyPDF all fork children). Without this, CLI users
+    # on Windows see transient console windows flash every time a page
+    # is OCR'd — same problem ``src/main.py`` guards the GUI path with.
+    from src.infrastructure.subprocess_hygiene import (
+        install_windows_console_hide,
+    )
+
+    install_windows_console_hide()
+
+    # Register bundled Tesseract + Ghostscript on ``PATH`` so OCRmyPDF's
+    # ``shutil.which("gswin64c")`` finds the installer-shipped copy.
+    # The parallel-processing path does this at worker startup, but the
+    # single-worker CLI path (``--workers 1 -o out.pdf``) calls
+    # ``process_single`` directly and previously never registered the
+    # bundled binaries — causing the installer smoke test to fail with
+    # "The program 'gs' could not be executed or was not found on your
+    # system PATH" even though the executables sit under
+    # ``resources/ghostscript/bin/``. Done here (in ``main()``) so every
+    # CLI invocation — batch or single — benefits, not just the
+    # parallel branch.
+    try:
+        from src.infrastructure.external_tools import ensure_on_path
+
+        ensure_on_path()
+    except Exception:  # noqa: BLE001
+        # External-tools registration is best-effort: if it blows up
+        # (missing bundle dir in a dev checkout, exotic packaging) we
+        # still want the CLI to start and fall back to system PATH. Any
+        # real "required binary missing" case surfaces later as a clear
+        # pre-flight error instead of an import-time crash here.
+        pass
+
     _force_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -378,6 +474,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list_profiles:
         return list_profiles()
+
+    if args.check_engine:
+        return check_engine(args.check_engine)
 
     if not args.inputs:
         parser.error("укажите хотя бы один PDF-файл или директорию")

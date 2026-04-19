@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -37,9 +38,22 @@ logger = logging.getLogger(__name__)
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     """Atomically persist ``data`` as JSON to ``path``.
 
+    On Windows, ``os.replace`` can raise ``PermissionError`` if another
+    process has the destination file briefly open — commonly a backup
+    agent, antivirus real-time scanner, OneDrive sync client, or a file
+    indexer that latched onto the previous version of the profile. The
+    file lock is almost always released within a few dozen milliseconds,
+    so we retry the replace with exponential backoff instead of leaking
+    the error up to the UI, where it would surface as "не удалось
+    сохранить профиль" and leave the user staring at a ``.tmp`` sibling.
+
     Args:
         path: Destination file path.
         data: JSON-serializable dictionary.
+
+    Raises:
+        OSError: If all retry attempts are exhausted. The ``.tmp`` is
+            NOT cleaned up so the user can inspect it for manual recovery.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -48,7 +62,33 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
         fh.flush()
         with contextlib.suppress(OSError):  # pragma: no cover - some FS lack fsync
             os.fsync(fh.fileno())
-    os.replace(tmp, path)
+
+    # 5 attempts spaced 50 / 100 / 200 / 400 / 800 ms = ~1.5 s total.
+    # Longer than any real AV / indexer hold that users report; short
+    # enough that a genuinely permanent lock (broken ACL, read-only FS)
+    # surfaces within the same click.
+    delay = 0.05
+    last_err: BaseException | None = None
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as exc:
+            last_err = exc
+            logger.debug(
+                "_atomic_write_json: os.replace PermissionError on %s "
+                "(attempt %d/5); retrying in %.3fs",
+                path, attempt + 1, delay,
+            )
+            time.sleep(delay)
+            delay *= 2
+    logger.error(
+        "_atomic_write_json: giving up after 5 PermissionError retries on %s. "
+        "The partial write remains at %s for manual recovery.",
+        path, tmp,
+    )
+    assert last_err is not None  # noqa: S101 — invariant
+    raise last_err
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -74,22 +114,51 @@ class ProfileStorage:
         """
         self.profiles_dir: Path = profiles_dir if profiles_dir is not None else PROFILES_DIR
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
+        # Populated by :meth:`list_profiles` with ``(path, reason)`` pairs
+        # for every JSON that failed to load. A future UI can check this
+        # and show "N profiles skipped" without needing a second API.
+        self.rejected_profiles: tuple[tuple[Path, str], ...] = ()
         self._seed_from_bundled_if_empty()
 
     # -- seeding -----------------------------------------------------------
     def _seed_from_bundled_if_empty(self) -> None:
-        """Copy bundled profiles into the user dir on first launch."""
+        """Copy bundled profiles into the user dir on first launch.
+
+        If any copy fails partway through, roll back every file we
+        already wrote so the user dir is left in its original empty
+        state. Without this, a partial copy (copied 2 of 7 profiles
+        before disk filled) would leave the dir non-empty on next
+        launch → ``_seed_from_bundled_if_empty`` short-circuits on
+        line 127 ("already has json") → user permanently misses the
+        5 skipped builtins and has no way to recover except deleting
+        the profiles dir manually.
+        """
         try:
             if any(self.profiles_dir.glob("*.json")):
                 return
             if not BUNDLED_PROFILES_DIR.exists():
                 return
+        except OSError as exc:
+            logger.warning("Unable to inspect profiles dir for seeding: %s", exc)
+            return
+
+        written: list[Path] = []
+        try:
             for src in BUNDLED_PROFILES_DIR.glob("*.json"):
                 dst = self.profiles_dir / src.name
                 shutil.copy2(str(src), str(dst))
+                written.append(dst)
                 logger.info("Seeded profile from bundle: %s", dst.name)
         except OSError as exc:
-            logger.warning("Unable to seed profiles from bundle: %s", exc)
+            logger.warning(
+                "Unable to seed profiles from bundle (%d/%d copied before "
+                "failure: %s). Rolling back partial copy.",
+                len(written), len(list(BUNDLED_PROFILES_DIR.glob("*.json"))),
+                exc,
+            )
+            for dst in written:
+                with contextlib.suppress(OSError):
+                    dst.unlink(missing_ok=True)
 
     # -- path helpers ------------------------------------------------------
     def _path_for(self, name: str) -> Path:
@@ -110,6 +179,13 @@ class ProfileStorage:
         profiles: dict[str, ProfileData] = {}
         builtin_names: set[str] = set()
 
+        # Collect rejections so the UI / support channel can tell the
+        # user exactly which file was skipped and why. Without this,
+        # malformed JSON dropped into ``profiles/`` silently vanishes
+        # from the dropdown and the user is left wondering where their
+        # profile went. Exposed via :attr:`rejected_profiles`.
+        rejected: list[tuple[Path, str]] = []
+
         if BUNDLED_PROFILES_DIR.exists():
             for file in sorted(BUNDLED_PROFILES_DIR.glob("*.json")):
                 try:
@@ -119,8 +195,13 @@ class ProfileStorage:
                     profile.builtin = True
                     profiles[profile.name] = profile
                     builtin_names.add(profile.name)
-                except (OSError, json.JSONDecodeError, TypeError) as exc:
-                    logger.error("Failed to load builtin profile %s: %s", file, exc)
+                except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+                    logger.error(
+                        "Пропускаю повреждённый встроенный профиль %s "
+                        "(%s: %s)",
+                        file.name, type(exc).__name__, exc,
+                    )
+                    rejected.append((file, f"{type(exc).__name__}: {exc}"))
 
         for file in sorted(self.profiles_dir.glob("*.json")):
             try:
@@ -131,8 +212,19 @@ class ProfileStorage:
                 if profile.name not in builtin_names:
                     profile.builtin = bool(data.get("builtin", False))
                 profiles[profile.name] = profile
-            except (OSError, json.JSONDecodeError, TypeError) as exc:
-                logger.error("Failed to load profile %s: %s", file, exc)
+            except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+                logger.error(
+                    "Пропускаю повреждённый пользовательский профиль %s "
+                    "(%s: %s). Восстановите файл или удалите его, "
+                    "чтобы профиль исчез из списка.",
+                    file.name, type(exc).__name__, exc,
+                )
+                rejected.append((file, f"{type(exc).__name__}: {exc}"))
+
+        # Expose rejections as an instance attribute so a future UI
+        # can show "N profiles skipped — click to see" without needing
+        # a separate API. Callers that don't look at it see no change.
+        self.rejected_profiles = tuple(rejected)
 
         builtins = sorted(
             (p for p in profiles.values() if p.builtin), key=lambda p: p.name

@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import logging.handlers
+import os
 from pathlib import Path
 
 from src.shared.constants import (
@@ -32,14 +33,40 @@ def setup_logging(level: int = logging.INFO, log_to_console: bool = True) -> Pat
 
     Args:
         level: Logging level for the root logger (e.g. ``logging.DEBUG``).
+            Overridden by the ``OCRSTUDIO_LOG_LEVEL`` environment variable
+            when set — lets users request DEBUG logs for diagnosing an
+            issue without editing code.
         log_to_console: When True a :class:`logging.StreamHandler` is also
             attached to stderr.
 
     Returns:
         Absolute path to the active rotating log file.
     """
+    env_level = os.environ.get("OCRSTUDIO_LOG_LEVEL", "").upper()
+    if env_level:
+        resolved = getattr(logging, env_level, None)
+        if isinstance(resolved, int):
+            level = resolved
+
     ensure_user_dirs()
     log_file: Path = LOGS_DIR / LOG_FILE_NAME
+
+    # Export the logs directory so worker subprocesses (which can't import
+    # our constants cheaply and run under PyInstaller --windowed where
+    # stderr is closed) write their own log files next to this one.
+    os.environ.setdefault("OCRSTUDIO_LOGS_DIR", str(LOGS_DIR))
+
+    # HuggingFace / transformers runtime: offline, redirected cache,
+    # no telemetry. See ``hf_runtime`` for the rationale. Env vars
+    # propagate to worker subprocesses automatically. Safe to call
+    # unconditionally — if the user never loads GOT-OCR 2.0 these vars
+    # are simply never read.
+    try:
+        from src.infrastructure.hf_runtime import configure_huggingface_runtime
+
+        configure_huggingface_runtime()
+    except Exception:  # noqa: BLE001 - logging setup must never fail
+        pass
 
     root_logger = logging.getLogger()
     # Idempotent setup: clear previous handlers so re-calling is safe.

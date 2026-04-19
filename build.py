@@ -67,11 +67,78 @@ def ensure_resources() -> None:
             "Place them in resources/tessdata/ before shipping."
         )
 
+    # Stage D of Initiative 1: user-words + user-patterns. These are
+    # checked into the repo under ``resources/tessdata/`` and picked
+    # up automatically by the ``--add-data=resources/tessdata`` hook
+    # below, but someone deleting them would silently regress Russian
+    # accuracy (ИНН / КПП / dates / entity abbreviations) with no
+    # visible error. Refuse to build so the regression is caught at
+    # packaging time rather than after release.
+    required_user_dicts = ("user-words.rus", "user-patterns.rus")
+    missing_user_dicts = [
+        f for f in required_user_dicts if not (tessdata / f).exists()
+    ]
+    if missing_user_dicts:
+        raise SystemExit(
+            f"[build] ERROR: tessdata/ missing required user-dict files: "
+            f"{missing_user_dicts}.\n"
+            "These files hold Russian business vocabulary and regex "
+            "patterns (ИНН / КПП / dates) that Tesseract loads at OCR "
+            "time to improve accuracy. They live in the repo under "
+            "resources/tessdata/ and are bundled automatically by the "
+            "--add-data hook; only a manual delete or a broken checkout "
+            "would remove them. Restore them from git (``git checkout "
+            "-- resources/tessdata/user-words.rus "
+            "resources/tessdata/user-patterns.rus``) and re-run."
+        )
+
+    # The ``configs/`` subdirectory of tessdata holds Tesseract's
+    # output-format params (``hocr``, ``txt``, ``pdf``, etc.). Without
+    # these the bundled Tesseract runs but cannot emit hOCR — every
+    # OCRmyPDF call ends in the dreaded
+    # ``FileNotFoundError: ..._ocr_hocr.hocr`` graft crash. Refuse to
+    # build (rather than warn) because shipping without them produces
+    # a binary that fails on every page of every document.
+    configs = tessdata / "configs"
+    required_configs = ("hocr", "txt", "pdf")
+    missing_configs = [
+        c for c in required_configs if not (configs / c).exists()
+    ]
+    if missing_configs:
+        raise SystemExit(
+            f"[build] ERROR: tessdata/configs/ missing required files: "
+            f"{missing_configs}.\n"
+            "These are tiny text files from "
+            "github.com/tesseract-ocr/tesseract/tree/main/tessdata/configs "
+            "that tell Tesseract which output formats to produce. Without "
+            "them OCRmyPDF crashes on every page with "
+            "'_ocr_hocr.hocr not found'.\n"
+            "The CI workflow downloads them automatically; if you're "
+            "building locally, run:\n"
+            f"  mkdir -p {configs}\n"
+            "  for f in hocr txt pdf; do\n"
+            "    curl -fsSL "
+            "https://github.com/tesseract-ocr/tesseract/raw/main/tessdata/configs/$f "
+            f"-o {configs}/$f\n"
+            "  done"
+        )
+
     tess_bin = PROJECT_ROOT / "resources" / "tesseract" / "tesseract.exe"
     if os.name == "nt" and not tess_bin.exists():
         print(
             f"[build] WARNING: Tesseract binary not found at {tess_bin}. "
             "Application will fall back to system PATH."
+        )
+
+    # Ghostscript is a HARD dependency of OCRmyPDF; a missing bundle
+    # means every OCR job fails with "Could not find program 'gs'".
+    gs_bin = PROJECT_ROOT / "resources" / "ghostscript" / "gswin64c.exe"
+    if os.name == "nt" and not gs_bin.exists():
+        print(
+            f"[build] WARNING: Ghostscript binary not found at {gs_bin}. "
+            "OCRmyPDF will fail at runtime unless Ghostscript is on the "
+            "system PATH. Build the CI workflow or run the Ghostscript "
+            "download step manually before packaging for end users."
         )
 
 
@@ -104,6 +171,15 @@ def build_pyinstaller(onefile: bool = False, with_htr: bool = False) -> int:
         f"--add-data=resources/icons{sep}resources/icons",
         f"--add-data=resources/styles{sep}resources/styles",
         f"--add-data=profiles{sep}profiles",
+        # Ghostscript is optional on developer machines (the CI workflow
+        # downloads + drops it into resources/ghostscript/; source checkouts
+        # typically don't have it). Adding --add-data for a missing source
+        # makes PyInstaller fail the entire build, so gate on existence.
+        *(
+            [f"--add-data=resources/ghostscript{sep}resources/ghostscript"]
+            if (PROJECT_ROOT / "resources" / "ghostscript").is_dir()
+            else []
+        ),
         # Hidden imports that PyInstaller sometimes misses
         "--collect-submodules=ocrmypdf",
         "--collect-submodules=pikepdf",
@@ -117,15 +193,28 @@ def build_pyinstaller(onefile: bool = False, with_htr: bool = False) -> int:
         # GOT-OCR 2.0 needs the entire torch + transformers + tokenizer
         # stack. PyInstaller's static analyser can't follow `from_pretrained`
         # dynamic loading, so we collect everything explicitly.
+        #
+        # ``--collect-all`` for torchvision / einops / accelerate / verovio
+        # is CRITICAL: these are only imported from inside the HF
+        # ``trust_remote_code`` modeling_*.py scripts that get ``exec()``ed
+        # at ``from_pretrained`` time — PyInstaller's static analyser never
+        # visits them. A plain ``--hidden-import=torchvision`` also misses
+        # torchvision's native C++ ops (``torchvision/_C.*.pyd``), which
+        # are loaded via ``torch.ops.load_library`` at import time; without
+        # the data-collection pass, ``import torchvision`` succeeds but
+        # any vision-encoder forward pass dies with "operator X not found".
         args.extend(
             [
                 "--collect-all=torch",
+                "--collect-all=torchvision",
                 "--collect-all=transformers",
                 "--collect-all=tokenizers",
                 "--collect-all=tiktoken",
+                "--collect-all=safetensors",
+                "--collect-all=einops",
+                "--collect-all=accelerate",
+                "--collect-all=verovio",
                 "--collect-all=PIL",
-                "--collect-data=safetensors",
-                "--collect-submodules=safetensors",
                 # GOT-OCR 2.0 weights ship with `trust_remote_code=True`
                 # Python files, so transformers will exec() them at runtime.
                 # The hidden-imports below cover the symbols those files
@@ -133,7 +222,6 @@ def build_pyinstaller(onefile: bool = False, with_htr: bool = False) -> int:
                 "--hidden-import=torch._dynamo",
                 "--hidden-import=torch._dynamo.config",
                 "--hidden-import=torch._inductor",
-                "--hidden-import=torchvision",
                 "--hidden-import=transformers.models.auto",
                 "--hidden-import=transformers.modeling_utils",
                 "--hidden-import=transformers.generation",

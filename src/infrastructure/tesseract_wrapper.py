@@ -41,7 +41,17 @@ else:
     _CREATE_NO_WINDOW = 0
 
 
-_VERSION_RE = re.compile(r"tesseract\s+([\d.]+)", re.IGNORECASE)
+# Accepts every documented Tesseract ``--version`` output variant we've
+# seen in the wild:
+#   * ``tesseract 5.3.4``            — Linux apt / macOS brew (no ``v``)
+#   * ``tesseract v5.5.0.20241111``  — UB Mannheim Windows build
+#   * ``tesseract 4.1.1-rc3``        — release-candidate tags from source
+# The UB Mannheim format bit us: the pre-fix regex only accepted
+# ``\s+[\d.]+`` so the ``v`` prefix made it bail out and every packaged
+# Windows install logged ``Tesseract version detected: <unknown>`` —
+# harmless but alarming in end-user logs. Making the ``v`` optional
+# and allowing an RC suffix handles all current variants.
+_VERSION_RE = re.compile(r"tesseract\s+v?(\d+(?:\.\d+)+)", re.IGNORECASE)
 
 
 class TesseractWrapper:
@@ -75,13 +85,31 @@ class TesseractWrapper:
 
         candidates: list[Path] = []
 
+        # 1. PyInstaller-bundled binary — takes precedence in a real
+        #    frozen build (``APP_ROOT`` points at ``_internal`` there).
         bundled = TESSERACT_BIN_DIR / TESSERACT_EXE_NAME
         candidates.append(bundled)
 
+        # 2. Explicit override from the environment.
         env_cmd = os.environ.get("TESSERACT_CMD", "").strip()
         if env_cmd:
             candidates.append(Path(env_cmd))
 
+        # 3. An already-installed OCR Studio on the same Windows machine.
+        #    Lets ``python -m src.cli`` in a source checkout "just work"
+        #    without the dev having to install Tesseract system-wide —
+        #    the user already has the bundled binary sitting inside the
+        #    installed app's ``_internal/resources/``.
+        from src.infrastructure.installed_app import (
+            find_installed_ocr_studio_resources,
+        )
+
+        installed = find_installed_ocr_studio_resources()
+        if installed is not None:
+            candidates.append(installed / "tesseract" / TESSERACT_EXE_NAME)
+
+        # 4. Whatever ``shutil.which`` finds on PATH — last resort for
+        #    Chocolatey / apt-installed Tesseracts.
         system = shutil.which("tesseract")
         if system:
             candidates.append(Path(system))
@@ -94,7 +122,13 @@ class TesseractWrapper:
 
         searched = ", ".join(str(c) for c in candidates) or "<none>"
         raise TesseractNotFoundError(
-            f"Tesseract executable not found. Searched: {searched}"
+            f"Tesseract executable not found. Searched: {searched}. "
+            "Варианты: 1) установить OCR Studio и запускать CLI из "
+            "dev-checkout — бандленный Tesseract подхватится "
+            "автоматически; 2) установить Tesseract в систему "
+            "(choco install tesseract на Windows, apt install "
+            "tesseract-ocr на Linux); 3) задать путь явно через "
+            "переменную окружения TESSERACT_CMD."
         )
 
     def find_tessdata_dir(self) -> Path:
@@ -123,11 +157,47 @@ class TesseractWrapper:
             # TESSDATA_PREFIX sometimes points to parent of tessdata/.
             candidates.append(env_path / "tessdata")
 
+        # Installed-app fallback — same rationale as in
+        # :meth:`find_tesseract_binary`: let a dev checkout reuse the
+        # tessdata shipped with an already-installed OCR Studio.
+        try:
+            from src.infrastructure.installed_app import (
+                find_installed_ocr_studio_resources,
+            )
+
+            installed = find_installed_ocr_studio_resources()
+            if installed is not None:
+                candidates.append(installed / "tessdata")
+        except Exception:  # noqa: BLE001 — fallback is best-effort
+            logger.debug("installed_app lookup raised", exc_info=True)
+
         try:
             binary = self.find_tesseract_binary()
             candidates.append(binary.parent / "tessdata")
         except TesseractNotFoundError:
             logger.debug("Binary missing while searching tessdata; continuing")
+
+        # Standard POSIX install locations. ``apt install tesseract-ocr``
+        # puts tessdata at ``/usr/share/tesseract-ocr/<ver>/tessdata``;
+        # Homebrew uses ``/opt/homebrew/share/tessdata`` (arm64) or
+        # ``/usr/local/share/tessdata`` (x86_64). Adding these means a
+        # dev checkout against a system Tesseract install works without
+        # manually exporting ``TESSDATA_PREFIX``. The directory layouts
+        # are stable across releases of each distro.
+        if sys.platform != "win32":
+            posix_roots = [
+                Path("/usr/share/tessdata"),
+                Path("/usr/local/share/tessdata"),
+                Path("/opt/homebrew/share/tessdata"),
+            ]
+            # /usr/share/tesseract-ocr/<major>/tessdata — Debian / Ubuntu.
+            # We probe a few likely major versions rather than globbing
+            # so this stays importable without touching the filesystem.
+            for major in ("5", "4.00", "4"):
+                posix_roots.append(
+                    Path(f"/usr/share/tesseract-ocr/{major}/tessdata")
+                )
+            candidates.extend(posix_roots)
 
         for candidate in candidates:
             if (
@@ -206,12 +276,24 @@ class TesseractWrapper:
         try:
             binary = self.find_tesseract_binary()
         except TesseractNotFoundError as exc:
-            return False, f"Tesseract не найден: {exc}"
+            # Log the raw exception (with searched paths) for diagnostics,
+            # but hand the user a clean actionable Russian message —
+            # don't dump internal search paths into GUI dialogs.
+            logger.error("Tesseract probe failed: %s", exc)
+            return False, (
+                "Tesseract не найден. Переустановите OCR Studio или "
+                "установите Tesseract в систему (choco install tesseract)."
+            )
 
         try:
             tessdata = self.find_tessdata_dir()
         except TessdataNotFoundError as exc:
-            return False, f"Tessdata не найдена: {exc}"
+            logger.error("Tessdata probe failed: %s", exc)
+            return False, (
+                "Tessdata не найдена. Переустановите OCR Studio или "
+                "укажите путь к tessdata через переменную окружения "
+                "TESSDATA_PREFIX."
+            )
 
         version = self.get_version()
         messages: list[str] = [
@@ -220,14 +302,18 @@ class TesseractWrapper:
             f"Версия: {version or '<не определено>'}",
         ]
 
-        # Major.minor comparison only; patch differences are tolerated.
+        # Major-version comparison: any 5.x.y is fine. Only warn if
+        # the major version differs (e.g. 4.x or 6.x), which would
+        # indicate a genuinely different Tesseract generation.
         if version:
-            expected_parts = TESSERACT_VERSION.split(".")[:2]
-            actual_parts = version.split(".")[:2]
-            if expected_parts != actual_parts:
+            expected_major = TESSERACT_VERSION.split(".")[0]
+            actual_major = version.split(".")[0]
+            if expected_major != actual_major:
                 warn = (
-                    f"Версия Tesseract {version} отличается от ожидаемой "
-                    f"{TESSERACT_VERSION} (major.minor)"
+                    f"Версия Tesseract {version}: мажорная версия "
+                    f"({actual_major}) отличается от ожидаемой "
+                    f"({expected_major}). Работоспособность не "
+                    "гарантирована."
                 )
                 logger.warning(warn)
                 messages.append(f"Предупреждение: {warn}")
@@ -241,6 +327,37 @@ class TesseractWrapper:
 
         messages.append(f"Языки: {', '.join(langs)}")
 
+        # tessdata/configs/ holds Tesseract's output-format params.
+        # ``hocr`` flips ``tessedit_create_hocr`` so Tesseract writes
+        # the per-page hOCR file OCRmyPDF needs to graft. Without
+        # these tiny config files, every OCR call appears to "succeed"
+        # at the binary level but Tesseract emits nothing — OCRmyPDF
+        # then crashes in graft with a misleading
+        # ``FileNotFoundError: ..._ocr_hocr.hocr``. We refuse to
+        # report ``ok=True`` from this probe so the engine can surface
+        # a clear, actionable error before processing user data.
+        configs_dir = tessdata / "configs"
+        required_configs = ("hocr", "txt", "pdf")
+        missing_configs = [
+            c for c in required_configs
+            if not (configs_dir / c).exists()
+        ]
+        if missing_configs:
+            hint = (
+                f"В bundled tessdata отсутствуют файлы конфигурации "
+                f"вывода: configs/{', configs/'.join(missing_configs)}. "
+                "Без них Tesseract не сможет сформировать hOCR — "
+                "OCRmyPDF будет падать на каждой странице с "
+                "'_ocr_hocr.hocr not found'. "
+                "Это бэйг сборки инсталлера; переустановите свежий билд "
+                "или вручную скопируйте файлы из "
+                "github.com/tesseract-ocr/tesseract/tree/main/tessdata/configs "
+                f"в {configs_dir}."
+            )
+            logger.error(hint)
+            messages.append(hint)
+            return False, " | ".join(messages)
+
         try:
             self.configure_pytesseract()
         except Exception as exc:  # pragma: no cover - pytesseract optional at import
@@ -251,7 +368,23 @@ class TesseractWrapper:
         return True, " | ".join(messages)
 
     def configure_pytesseract(self) -> None:
-        """Set ``pytesseract.tesseract_cmd`` and ``TESSDATA_PREFIX`` env var."""
+        """Set ``pytesseract.tesseract_cmd``, ``TESSDATA_PREFIX`` and ``PATH``.
+
+        ``pytesseract.tesseract_cmd`` only helps code that goes through
+        the ``pytesseract`` library. OCRmyPDF — which is the actual OCR
+        engine we run — uses its own ``shutil.which("tesseract")`` to
+        locate the binary. If the bundled ``tesseract.exe`` isn't on
+        ``PATH``, OCRmyPDF raises::
+
+            MissingDependencyError: Could not find program 'tesseract'
+
+        even though we just "configured" it for pytesseract. Prepending
+        the bundled binary's directory to ``PATH`` makes it visible to
+        every subprocess — pytesseract, ocrmypdf's subprocess module,
+        ghostscript spawning tesseract, all uniformly.
+
+        Idempotent: re-running it doesn't stack duplicate entries on PATH.
+        """
         binary = self.find_tesseract_binary()
         tessdata = self.find_tessdata_dir()
 
@@ -261,6 +394,15 @@ class TesseractWrapper:
 
         pytesseract.pytesseract.tesseract_cmd = str(binary)
         os.environ["TESSDATA_PREFIX"] = str(tessdata)
+
+        bin_dir = str(binary.parent)
+        path_entries = os.environ.get("PATH", "").split(os.pathsep)
+        if bin_dir not in path_entries:
+            os.environ["PATH"] = (
+                bin_dir + os.pathsep + os.environ.get("PATH", "")
+            )
+            logger.info("Prepended Tesseract bin dir to PATH: %s", bin_dir)
+
         TesseractWrapper._configured = True
         logger.info(
             "pytesseract configured (cmd=%s, TESSDATA_PREFIX=%s)", binary, tessdata

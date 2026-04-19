@@ -21,6 +21,34 @@ pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+@pytest.fixture(autouse=True)
+def _flush_qt_events():
+    """Flush pending Qt events after each test.
+
+    Several tests in this file create PySide6 widgets WITHOUT going
+    through ``qtbot.addWidget()`` — they construct a ``QApplication``
+    manually and let the widgets be garbage-collected. When pytest-qt's
+    ``_process_events`` hook runs between tests, it can hit a dangling
+    C++ pointer and segfault (observed on both Linux 3.11 and 3.12 CI).
+
+    Flushing events + collecting garbage BEFORE pytest-qt's hook runs
+    ensures all deferred deletions complete while the C++ backing is
+    still alive.
+    """
+    yield
+    import gc
+
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+    except Exception:  # noqa: BLE001
+        pass
+    gc.collect()
+
+
 # ---------------------------------------------------------------------------
 # ProgressWidget ETA
 # ---------------------------------------------------------------------------

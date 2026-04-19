@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +117,22 @@ class BackgroundConfig:
 
 
 @dataclass
+class BorderRemovalConfig:
+    """Table-border / ruler-line removal before OCR.
+
+    Erases long horizontal and vertical runs (table borders, form
+    rules, underlines) that Tesseract tends to misread as letters,
+    fuse into adjacent text, or emit as spurious ``|`` / ``_``
+    sequences.
+    """
+
+    enabled: bool = False
+    #: Minimum run length in pixels. Scale with DPI — 50 is right
+    #: for 300 DPI; universal_accurate at 500 DPI uses 75.
+    min_line_length: int = 50
+
+
+@dataclass
 class PreprocessConfig:
     """Complete preprocessing pipeline configuration."""
 
@@ -126,6 +142,9 @@ class PreprocessConfig:
     denoise: DenoiseConfig = field(default_factory=DenoiseConfig)
     contrast: ContrastConfig = field(default_factory=ContrastConfig)
     background: BackgroundConfig = field(default_factory=BackgroundConfig)
+    border_removal: BorderRemovalConfig = field(
+        default_factory=BorderRemovalConfig,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +178,35 @@ class OCRConfig:
     #: default) disables the limit and means "OCR the whole document".
     #: Useful for previewing a profile before running a full 500-page job.
     max_pages: int = 0
+    #: Forward bundled ``resources/tessdata/user-words.{lang}`` and
+    #: ``user-patterns.{lang}`` to Tesseract via OCRmyPDF's ``user_words=``
+    #: and ``user_patterns=`` kwargs. OCRmyPDF / Tesseract accept only
+    #: ONE of each per run, so :mod:`src.application.ocrmypdf_integration`
+    #: picks the pair matching ``primary_language`` (typically ``"rus"``
+    #: for this app's Russian-first audience). Enabled by default: the
+    #: files are tiny, the accuracy win on ИНН / КПП / dates / entity
+    #: abbreviations is consistent, and if the files happen to be
+    #: missing the integration degrades gracefully with a WARNING.
+    use_user_dictionaries: bool = True
+    #: When True, rebuild the per-page extracted text from Tesseract's
+    #: ``image_to_data`` TSV output, keeping ONLY words whose confidence
+    #: meets or exceeds :attr:`confidence_threshold`. Without this, the
+    #: text surfaced to the user (results panel, TXT/DOCX exports) is
+    #: exactly what OCRmyPDF stamped into the PDF — including every
+    #: stamp, signature, logo and table-border artefact Tesseract
+    #: guessed at with 10–40 % confidence. Dropping those words lifts
+    #: the PERCEIVED accuracy of a mixed-content scan far more than
+    #: any amount of preprocessing re-tuning: a 51 %-mean document
+    #: typically presents as 80–90 % once the sub-threshold noise is
+    #: gone. Off by default for backwards-compatibility with existing
+    #: profiles / tests; the ``universal_accurate`` profile opts in.
+    #:
+    #: Caveat: this affects only the text exposed through ``PageResult
+    #: .text`` (what the user sees and exports). The searchable text
+    #: layer inside the OCRmyPDF output PDF is still the union of every
+    #: word Tesseract emitted — regenerating THAT requires rewriting
+    #: the hOCR stream and is a larger, separate piece of work.
+    drop_low_conf_words: bool = False
 
     @property
     def tesseract_language_string(self) -> str:
@@ -176,7 +224,16 @@ class OCRConfig:
 
 @dataclass
 class RegexRule:
-    """A single user-defined find/replace rule."""
+    """A single user-defined find/replace rule.
+
+    Validation is eager: an invalid regex is detected and the rule is
+    auto-disabled at construction time (on profile load) rather than
+    waiting until the first OCR run to log a ``re.error`` and silently
+    skip it. ``invalid_reason`` records the compile error so the UI can
+    surface ``Правило #N отключено: <причина>`` next to the rule row
+    instead of leaving the user wondering why their substitution has
+    no effect.
+    """
 
     pattern: str
     replacement: str
@@ -184,6 +241,34 @@ class RegexRule:
     description: str = ""
     is_regex: bool = True
     case_sensitive: bool = True
+    #: Populated with a non-empty string when ``__post_init__`` rejects
+    #: the pattern. A non-empty value always implies ``enabled=False``.
+    invalid_reason: str = ""
+
+    def __post_init__(self) -> None:
+        """Validate the pattern up front and auto-disable on compile error.
+
+        Only runs the validation when the rule is both marked as a
+        regex and currently ``enabled=True`` — a disabled rule with a
+        bad pattern is the user's business, not ours to flag. Literal
+        (non-regex) rules never go through ``re.compile`` at runtime,
+        so they always validate.
+        """
+        if not self.is_regex or not self.enabled:
+            return
+        import re as _re
+
+        try:
+            _re.compile(self.pattern)
+        except _re.error as exc:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "Правило %r отключено: неверный regex (%s)",
+                self.pattern, exc,
+            )
+            self.enabled = False
+            self.invalid_reason = f"{type(exc).__name__}: {exc}"
 
 
 @dataclass
@@ -196,6 +281,21 @@ class PostprocessConfig:
     normalize_whitespace: bool = True
     normalize_unicode: bool = True
     remove_artifacts: bool = True
+    #: Word-level Latin↔Cyrillic look-alike normalisation. Tesseract
+    #: mixes ``O/О``, ``A/А``, ``E/Е``, ``K/К``, ``H/Н``, ``P/Р`` etc.
+    #: at word boundaries where the in-context regex autocorrect can't
+    #: fire. Enabled by default — on pure-Latin / pure-Cyrillic words
+    #: the fixup is a no-op, and on genuinely-mixed content (emails,
+    #: URLs, product codes) the classifier bails out rather than
+    #: corrupt anything.
+    fix_cyrillic_latin_confusion: bool = True
+    #: Strictness level for :mod:`src.core.garbage_filter`. The filter
+    #: drops line-level OCR garbage — symbol walls, ruler lines, and
+    #: (on strict) orphan single-letter lines / low-letter-ratio
+    #: runs. Stored as a string so JSON profiles round-trip cleanly
+    #: without a custom encoder. Accepted values: ``"disabled"``,
+    #: ``"lenient"`` (default), ``"strict"``.
+    garbage_filter_strictness: str = "lenient"
     custom_rules: list[RegexRule] = field(default_factory=list)
 
 
@@ -208,7 +308,7 @@ class PostprocessConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 1
+PROFILE_SCHEMA_VERSION: int = 2
 
 
 @dataclass
@@ -222,7 +322,9 @@ class ProfileData:
     ocr: OCRConfig = field(default_factory=OCRConfig)
     postprocess: PostprocessConfig = field(default_factory=PostprocessConfig)
     builtin: bool = False
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(
+        default_factory=lambda: datetime.now(UTC).isoformat()
+    )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dict."""
@@ -267,7 +369,24 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         version = 1
         log.info("Migrated profile '%s' to schema v1", data.get("name", "?"))
 
-    # Future migrations go here: `if version < 2: ...`
+    # v1 → v2: bump tesseract_timeout from 120 → 300. The old default
+    # was too low for 600 DPI on complex pages — users hit timeout
+    # crashes (FileNotFoundError in OCRmyPDF's graft phase) on every
+    # dense Russian contract. Also add ``max_pages: 0`` if absent.
+    if version < 2:
+        ocr = data.setdefault("ocr", {})
+        old_timeout = ocr.get("tesseract_timeout", 0)
+        if old_timeout and old_timeout < 300:
+            ocr["tesseract_timeout"] = 300
+            log.info(
+                "Migrated profile '%s' tesseract_timeout %d → 300",
+                data.get("name", "?"), old_timeout,
+            )
+        ocr.setdefault("max_pages", 0)
+        data["schema_version"] = 2
+        version = 2
+
+    # Future migrations go here: `if version < 3: ...`
 
     return data
 
@@ -383,6 +502,16 @@ def _coerce_enums(value: Any) -> Any:
     return value
 
 
+# Sentinel returned by ``_convert_value`` when the raw JSON value was
+# present but could not be interpreted as the target type (unknown enum
+# member, legacy shape, etc.). The caller drops the key from ``kwargs``
+# so the dataclass field keeps its own default — equivalent to the JSON
+# never having mentioned the field. Using an object() instead of None
+# matters because ``None`` is a legitimate value for ``Optional`` fields
+# and conflating the two would silently reset unrelated data.
+_USE_DATACLASS_DEFAULT: Any = object()
+
+
 def _dict_to_dataclass(cls: type, data: dict[str, Any]) -> Any:
     """Reconstruct a dataclass (possibly nested) from a dict.
 
@@ -403,7 +532,14 @@ def _dict_to_dataclass(cls: type, data: dict[str, Any]) -> Any:
             continue
         raw_value = data[name]
         field_type = type_hints.get(name, f.type)
-        kwargs[name] = _convert_value(raw_value, field_type)
+        converted = _convert_value(raw_value, field_type)
+        if converted is _USE_DATACLASS_DEFAULT:
+            # The stored value was uninterpretable (e.g. enum member
+            # removed in a schema change). Skip the kwarg so the
+            # dataclass falls back to its default value instead of
+            # blowing up on construction.
+            continue
+        kwargs[name] = converted
     return cls(**kwargs)
 
 
@@ -411,6 +547,7 @@ def _convert_value(value: Any, target_type: Any) -> Any:
     """Convert a raw JSON value to the target type (dataclass, Enum, or primitive)."""
     import dataclasses
     import enum
+    import logging as _logging
     import typing
 
     if value is None:
@@ -431,12 +568,28 @@ def _convert_value(value: Any, target_type: Any) -> Any:
             return _convert_value(value, non_none[0])
         return value
 
-    # Enum
-    try:
-        if isinstance(target_type, type) and issubclass(target_type, enum.Enum):
+    # Enum. Catch BOTH TypeError (passed a non-hashable) and ValueError
+    # (value is hashable but not a member of the enum). A stored profile
+    # that references an enum member the current build no longer knows —
+    # for example, a downgraded binary or a hand-edited JSON with
+    # ``"engine": "got_ocr3"`` — would otherwise raise and leave the
+    # entire profile unloadable, dragging every user-saved config with
+    # it. Falling back to ``None`` lets the surrounding
+    # :class:`dataclasses` default kick in (e.g. ``OCRConfig.engine``
+    # reverts to ``OCREngineKind.TESSERACT``), which is the behaviour a
+    # user expects from "my one odd field got reset" rather than "my
+    # whole profile is gone".
+    if isinstance(target_type, type) and issubclass(target_type, enum.Enum):
+        try:
             return target_type(value)
-    except TypeError:
-        pass
+        except (TypeError, ValueError):
+            _logging.getLogger(__name__).warning(
+                "Unknown %s value %r in profile JSON; falling back to "
+                "dataclass default",
+                getattr(target_type, "__name__", target_type),
+                value,
+            )
+            return _USE_DATACLASS_DEFAULT
 
     # Nested dataclass
     if dataclasses.is_dataclass(target_type) and isinstance(value, dict):

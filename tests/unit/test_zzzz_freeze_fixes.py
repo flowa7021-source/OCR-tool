@@ -256,3 +256,146 @@ class TestNoSyncDiskIoInProgressHandler:
         import pytest as _pytest
 
         _pytest.fail("_apply_job_progress not found")
+
+
+# --------------------------------------------------------------------------
+# Cross-thread marshaling of ParallelProcessor callbacks
+# --------------------------------------------------------------------------
+
+
+class TestJobBridgeMarshalsToGuiThread:
+    """``_on_job_progress`` / ``_on_job_complete`` / ``_on_job_failed`` are
+    fired from non-Qt threads (drain thread, concurrent.futures result
+    dispatcher). Historically they used ``QTimer.singleShot(0, lambda)``,
+    which silently dropped the callable because those threads have no Qt
+    event loop — surfacing to the user as "I pressed Start OCR and
+    nothing happens, the file just hangs". This test locks in the fix:
+    regardless of the emitting thread, the ``_apply_*`` slots must run
+    on the GUI thread.
+    """
+
+    def test_on_job_progress_ast_uses_signal_not_timer(self) -> None:
+        """AST guard: _on_job_progress must NOT use QTimer.singleShot."""
+        import ast
+
+        src = (Path(__file__).parent.parent.parent / "src" / "ui" / "main_window.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(src)
+
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.FunctionDef)
+                and node.name in {"_on_job_progress", "_on_job_complete", "_on_job_failed"}
+            ):
+                continue
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Attribute) and inner.attr == "singleShot":
+                    base = inner.value
+                    if isinstance(base, ast.Name) and base.id == "QTimer":
+                        import pytest as _pytest
+
+                        _pytest.fail(
+                            f"{node.name} still uses QTimer.singleShot — "
+                            "this silently drops callables when invoked "
+                            "from a non-Qt thread. Use the _job_bridge "
+                            "signal (QueuedConnection) instead."
+                        )
+
+    def test_on_check_updates_ast_avoids_q_arg_object(self) -> None:
+        """AST guard: _on_check_updates must NOT use Q_ARG(object, ...).
+
+        PySide6 raises ``RuntimeError: qArgDataFromPyType: Unable to
+        find a QMetaType for 'object'`` at runtime — Q_ARG only accepts
+        Qt-registered types. Use a Signal (QueuedConnection) instead;
+        signals carry Python objects natively.
+        """
+        import ast
+
+        src = (Path(__file__).parent.parent.parent / "src" / "ui" / "main_window.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(src)
+
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.FunctionDef) and node.name == "_on_check_updates"
+            ):
+                continue
+            for inner in ast.walk(node):
+                if not (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)):
+                    continue
+                if inner.func.id != "Q_ARG":
+                    continue
+                # First arg is the type; reject if it's the bare ``object`` name.
+                if inner.args and isinstance(inner.args[0], ast.Name) and inner.args[0].id == "object":
+                    import pytest as _pytest
+
+                    _pytest.fail(
+                        "_on_check_updates uses Q_ARG(object, ...) — "
+                        "PySide6 rejects this at runtime with "
+                        "qArgDataFromPyType. Use a Signal instead."
+                    )
+
+    def test_progress_from_background_thread_reaches_gui_thread(
+        self, qtbot, tmp_path: Path
+    ) -> None:
+        """Simulate the drain thread emitting progress and verify the
+        slot runs on the GUI thread rather than being silently dropped.
+        """
+        import threading
+
+        import src.shared.constants as constants
+
+        for name in ("USER_DATA_DIR", "CONFIG_DIR", "PROFILES_DIR", "TEMP_DIR",
+                     "LOGS_DIR", "RECOVERY_DIR", "OCR_CACHE_DIR"):
+            setattr(constants, name, tmp_path / name.lower())
+            (tmp_path / name.lower()).mkdir(exist_ok=True)
+
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        QApplication.instance() or QApplication([])
+        from src.infrastructure.tesseract_wrapper import TesseractWrapper
+
+        with patch.object(QMessageBox, "warning", return_value=0), patch.object(
+            QMessageBox, "critical", return_value=0
+        ), patch.object(TesseractWrapper, "verify", return_value=(True, "ok")):
+            from src.app import create_application
+
+            _, window = create_application([])
+            try:
+                seen_threads: list[int] = []
+
+                original = window._apply_job_progress
+
+                def _spy(job_id, current, total, stage):
+                    seen_threads.append(threading.get_ident())
+                    # Don't invoke original — avoids needing a real queue item.
+
+                window._apply_job_progress = _spy  # type: ignore[assignment]
+                # Rewire the signal to the spy.
+                window._job_bridge.progress.disconnect()
+                from PySide6.QtCore import Qt as _Qt
+
+                window._job_bridge.progress.connect(
+                    _spy, _Qt.ConnectionType.QueuedConnection
+                )
+
+                main_thread_id = threading.get_ident()
+
+                def _worker():
+                    window._on_job_progress("job-1", 3, 10, "ocr")
+
+                t = threading.Thread(target=_worker)
+                t.start()
+                t.join()
+
+                qtbot.waitUntil(lambda: len(seen_threads) == 1, timeout=2000)
+                assert seen_threads[0] == main_thread_id, (
+                    "progress slot ran on the background thread — "
+                    "cross-thread marshaling regressed"
+                )
+                _ = original  # keep a reference for clarity
+            finally:
+                window.close()
+                window.deleteLater()

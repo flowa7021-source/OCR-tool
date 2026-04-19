@@ -191,21 +191,58 @@ def _dir_size(path: Path) -> int:
     return total
 
 
+def _entry_stats(entry: Path) -> tuple[int, float] | None:
+    """Return ``(size_bytes, mtime)`` for ``entry``, or None on any OSError.
+
+    Robustness: another process may delete the entry between iterdir
+    and stat, and the user may manually ``rm -rf`` an entry while we
+    iterate. Returning None lets callers transparently skip such
+    entries rather than aborting the whole prune pass with an OSError.
+    """
+    try:
+        return _dir_size(entry), entry.stat().st_mtime
+    except OSError as exc:
+        logger.debug("_entry_stats skipping %s: %s", entry.name, exc)
+        return None
+
+
 def _prune(base: Path, max_bytes: int) -> None:
     if not base.exists():
         return
-    entries = [p for p in base.iterdir() if p.is_dir()]
+    try:
+        entries = [p for p in base.iterdir() if p.is_dir()]
+    except OSError as exc:
+        logger.debug("_prune: base dir iterdir failed: %s", exc)
+        return
     if not entries:
         return
-    total = sum(_dir_size(e) for e in entries)
+
+    # Snapshot size + mtime per entry atomically. If an entry disappears
+    # (concurrent manual cleanup, second worker finishing a store), skip
+    # it — don't let its absence corrupt the running total or crash the
+    # sort comparator on a missing ``stat`` call.
+    stats: dict[Path, tuple[int, float]] = {}
+    total = 0
+    for entry in entries:
+        got = _entry_stats(entry)
+        if got is None:
+            continue
+        stats[entry] = got
+        total += got[0]
+
     if total <= max_bytes:
         return
-    # Sort oldest-first and evict until under budget.
-    entries.sort(key=lambda p: p.stat().st_mtime)
-    for entry in entries:
+
+    # Sort oldest-first from the snapshot so concurrent writes to
+    # entry.mtime don't destabilise the comparison mid-sort.
+    ordered = sorted(stats.items(), key=lambda kv: kv[1][1])
+    for entry, (size, _mtime) in ordered:
         if total <= max_bytes:
             break
-        size = _dir_size(entry)
-        shutil.rmtree(entry, ignore_errors=True)
+        try:
+            shutil.rmtree(entry, ignore_errors=True)
+        except Exception as exc:  # noqa: BLE001 — prune is best-effort
+            logger.debug("_prune rmtree failed for %s: %s", entry, exc)
+            continue
         total -= size
         logger.info("Cache evicted %s (%.1f MB)", entry.name, size / 1024 / 1024)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ocr-studio"
-version = "1.0.0"
+version = "1.1.0"
 description = "Professional OCR desktop application for Windows with advanced preprocessing and searchable PDF generation"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,7 @@ authors = [{ name = "OCR Studio Team" }]
 license = { text = "MIT" }
 dependencies = [
     "PySide6>=6.6",
-    "ocrmypdf>=16.0",
+    "ocrmypdf>=16.0,<17.0",
     "pytesseract>=0.3.10",
     "opencv-python>=4.9",
     "PyMuPDF>=1.24",
@@ -36,6 +36,12 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
     "pyinstaller>=6.6",
+    # OCR accuracy benchmark. ``jiwer`` computes CER/WER via Levenshtein
+    # distance — the industry-standard quantitative metric for OCR
+    # regression testing. Keeps the test corpus honest: if a
+    # preprocessing tweak improves one document and silently regresses
+    # another, the benchmark flags it before merge.
+    "jiwer>=3.0",
 ]
 # Optional handwriting / transformer-OCR back-ends. Adds GOT-OCR 2.0
 # support (Apache-2.0). The model weights themselves (~580 MB) are
@@ -43,9 +49,13 @@ dev = [
 # Pillow is already a base dependency so we don't list it again.
 htr = [
     "torch>=2.1",
+    "torchvision>=0.16",
     "transformers>=4.40",
     "tiktoken>=0.5",
     "safetensors>=0.4",
+    "einops>=0.7",
+    "accelerate>=0.25",
+    "verovio>=4.0",
 ]
 
 [project.scripts]
@@ -81,4 +91,17 @@ python_files = "test_*.py"
 addopts = "-v --tb=short"
 markers = [
     "benchmark: explicit performance benchmark (run via tests/benchmarks)",
+    "exercise_preflight: test wants real external-tools check, not the autouse mock",
+]
+filterwarnings = [
+    # Python 3.12+ warns about fork() in multithreaded processes.
+    # Our progress-bridge tests create multiprocessing.Manager() inside
+    # a pytest session that already has threads from PySide6/Qt. The
+    # production code uses spawn on Windows (where it matters); on
+    # Linux the fork is safe in practice because the forked child
+    # immediately execs. Suppress the noise so CI stays clean.
+    "ignore::DeprecationWarning:multiprocessing",
+    # datetime.utcnow() — we've fixed our own code but some deps
+    # (ocrmypdf, transformers) may still emit this.
+    "ignore:datetime.datetime.utcnow:DeprecationWarning",
 ]

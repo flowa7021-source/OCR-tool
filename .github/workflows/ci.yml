@@ -29,7 +29,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # Windows is the app's only shipping target — the installer
+        # is Windows-only, tessdata/ghostscript are bundled from
+        # Windows paths, and every user-reported bug has come from
+        # a Windows host. We drop Ubuntu from the per-PR tests to
+        # halve CI time; nightly-real-ocr.yml still runs on Ubuntu
+        # for cheap-and-fast cron coverage of the real-OCR suite.
+        os: [windows-latest]
         python-version: ["3.11", "3.12"]
 
     steps:
@@ -40,8 +46,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      # PySide6 on Linux needs these at runtime even in offscreen mode
-      - name: Install Linux Qt runtime libs
+      # PySide6 on Linux needs these at runtime even in offscreen mode.
+      # Tesseract + Ghostscript + Russian tessdata + Cyrillic-capable
+      # fonts are required so the 65+ real-OCR integration tests
+      # actually RUN instead of being silently skipped. Without them,
+      # the CI "passes" but never exercises the code path where every
+      # production bug we've seen this session lived.
+      - name: Install Linux system deps (Qt + Tesseract + Ghostscript)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -49,14 +60,115 @@ jobs:
             libegl1 libxkbcommon0 libdbus-1-3 libfontconfig1 \
             libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
             libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
-            libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1
+            libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 \
+            tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng \
+            ghostscript fonts-dejavu-core
+
+      # Windows: install Tesseract via Chocolatey so real-OCR tests
+      # run on the Windows matrix leg too (closest to production).
+      - name: Install Windows Tesseract + Ghostscript
+        if: runner.os == 'Windows'
+        run: |
+          choco install tesseract --no-progress -y
+          choco install ghostscript --no-progress -y
+
+      # Chocolatey puts tessdata in a non-standard location; point
+      # the env var so TesseractWrapper.find_tessdata_dir picks it up.
+      #
+      # Chocolatey updates system PATH during install, but subsequent
+      # pytest subprocesses on Windows occasionally miss Ghostscript via
+      # ``shutil.which("gswin64c")`` because GitHub Actions' env
+      # propagation races with Choco's PATH update on fresh runners. The
+      # nightly workflow had exactly the same symptom (``REAL_OCR_AVAILABLE``
+      # false → every real-OCR test skipped). Explicitly append the
+      # canonical install directories to ``GITHUB_PATH`` so every later
+      # step — and every ``subprocess.Popen`` they spawn — sees the
+      # binaries deterministically.
+      - name: Set TESSDATA_PREFIX + explicit PATH for Windows
+        if: runner.os == 'Windows'
+        run: |
+          $tessInstall = "C:\Program Files\Tesseract-OCR"
+          if (Test-Path (Join-Path $tessInstall "tesseract.exe")) {
+            echo "$tessInstall" >> $env:GITHUB_PATH
+            $tessdata = Join-Path $tessInstall "tessdata"
+            if (Test-Path $tessdata) {
+              echo "TESSDATA_PREFIX=$tessdata" >> $env:GITHUB_ENV
+              Write-Host "TESSDATA_PREFIX=$tessdata"
+            }
+          }
+
+          # Ghostscript: Artifex's Windows distribution ships
+          # ``gswin64c.exe`` — never a plain ``gs.exe`` — so bare
+          # ``shutil.which("gs")`` returns None on every Windows host.
+          # ``_real_ocr_helpers._find_ghostscript`` probes both names,
+          # but only after we make the directory visible on PATH.
+          $gsRoot = "C:\Program Files\gs"
+          if (Test-Path $gsRoot) {
+            $gsBin = Get-ChildItem $gsRoot -Directory |
+                     ForEach-Object { Join-Path $_.FullName "bin" } |
+                     Where-Object { Test-Path (Join-Path $_ "gswin64c.exe") } |
+                     Select-Object -First 1
+            if ($gsBin) {
+              echo "$gsBin" >> $env:GITHUB_PATH
+              Write-Host "Ghostscript bin added to PATH: $gsBin"
+            } else {
+              Write-Warning "No gswin64c.exe found under $gsRoot"
+            }
+          } else {
+            Write-Warning "Ghostscript install root $gsRoot not found"
+          }
+        shell: pwsh
+
+      # Chocolatey's ``tesseract`` package ships ONLY ``eng.traineddata``.
+      # Real-OCR tests that exercise Russian documents (which is the
+      # app's primary language) fail with "Отсутствуют языки: rus" at
+      # the pipeline preflight step. Fetch ``rus`` + ``osd`` from the
+      # official ``tessdata_best`` repo and drop them next to eng.
+      # Same mechanism as the nightly workflow.
+      - name: Download rus + osd traineddata for Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tessdata = "C:\Program Files\Tesseract-OCR\tessdata"
+          if (-not (Test-Path $tessdata)) {
+            New-Item -ItemType Directory -Force -Path $tessdata | Out-Null
+          }
+          $base = "https://github.com/tesseract-ocr/tessdata_best/raw/main"
+          foreach ($lang in @("rus", "osd")) {
+            $out = Join-Path $tessdata "$lang.traineddata"
+            if (Test-Path $out) {
+              Write-Host "Already present: $lang.traineddata"
+              continue
+            }
+            Write-Host "Downloading $lang.traineddata"
+            $tries = 0
+            while ($tries -lt 3) {
+              try {
+                Invoke-WebRequest -Uri "$base/$lang.traineddata" `
+                    -OutFile $out -UseBasicParsing
+                break
+              } catch {
+                $tries++
+                if ($tries -ge 3) { throw }
+                Start-Sleep -Seconds (2 * $tries)
+              }
+            }
+          }
+          Get-ChildItem $tessdata -Filter "*.traineddata" |
+              Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}}
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install PySide6 numpy opencv-python-headless scikit-image Pillow
-          pip install python-docx PyMuPDF psutil
+          pip install python-docx PyMuPDF psutil deskew cffi
+          pip install ocrmypdf pytesseract
           pip install pytest pytest-mock pytest-cov pytest-qt pytest-benchmark
+          # PyYAML unlocks the workflow-structure tests in
+          # tests/unit/test_p3_followup.py and test_p3_improvements.py
+          # — without it those 6 tests silently ``pytest.importorskip``
+          # and the "no skips" invariant breaks.
+          pip install PyYAML
 
       - name: Compile-check all sources
         run: python -m compileall -q src tests build.py dev_run.py

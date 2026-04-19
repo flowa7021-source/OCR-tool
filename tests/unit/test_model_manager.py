@@ -55,10 +55,150 @@ class TestSpec:
         assert GOT_OCR2_SPEC.files
         assert any(f.name == "model.safetensors" for f in GOT_OCR2_SPEC.files)
 
+    def test_got_ocr2_spec_includes_trust_remote_code_modules(self) -> None:
+        """GOT-OCR 2.0 needs 4 Python modules to load via trust_remote_code.
+
+        Regression: a production build shipped a manifest that was missing
+        ``tokenization_qwen.py`` + siblings. AutoTokenizer then failed with
+        ``OSError: ... does not appear to have a file named
+        tokenization_qwen.py`` and the job crashed with a message pointing
+        at the temp path under ``huggingface.co/C:\\Users\\...``. Each of
+        these four modules lives at the HF repo root and is executed by
+        ``trust_remote_code=True`` at load time, so every one MUST be in
+        the manifest — otherwise the installer / runtime downloader skips
+        it and the model directory is "complete" per is_available() but
+        broken at inference time.
+        """
+        required_py_modules = {
+            "tokenization_qwen.py",  # custom Qwen tokenizer class
+            "modeling_GOT.py",       # main GOT model architecture
+            "got_vision_b.py",       # vision encoder backbone
+            "render_tools.py",       # helpers used by ocr_type='format'
+        }
+        manifest_names = {f.name for f in GOT_OCR2_SPEC.files}
+        missing = required_py_modules - manifest_names
+        assert not missing, (
+            f"GOT-OCR 2.0 manifest is missing trust_remote_code modules: "
+            f"{sorted(missing)}. Every .py file at the HF repo root must "
+            "be listed or AutoTokenizer/AutoModel.from_pretrained crashes."
+        )
+
+    def test_got_ocr2_spec_urls_point_at_huggingface(self) -> None:
+        """Every manifest URL must resolve to the stepfun-ai HF repo.
+
+        A regression where a copy-paste accident pointed one entry at a
+        different repo would produce a subtle corrupt-download failure
+        (size check passes, hash fails at load time). Easier to catch
+        at manifest-definition time with a URL prefix assertion.
+        """
+        expected_prefix = "https://huggingface.co/stepfun-ai/GOT-OCR2_0/resolve/main/"
+        for f in GOT_OCR2_SPEC.files:
+            assert f.url.startswith(expected_prefix), (
+                f"{f.name!r} points at {f.url!r} — expected prefix "
+                f"{expected_prefix!r}"
+            )
+
     def test_unknown_id_raises(self, tmp_path: Path) -> None:
         mgr = ModelManager(models_dir=tmp_path)
         with pytest.raises(KeyError):
             mgr.spec_for("does-not-exist")
+
+    def test_py_modules_have_min_size_floor(self) -> None:
+        """The trust_remote_code .py modules must carry a ``min_size_bytes``
+        floor — otherwise a truncated 200-byte download (HTTP 206
+        interrupted, disk full mid-write, or an HTML error page
+        accidentally served by a proxy) passes the default ``1024``
+        floor AND the ``size_bytes==0 → no check`` path, leaving a
+        corrupt module on disk that crashes the engine at load.
+
+        Regression for the Log 3 failure class: the user hit an
+        uncaught OSError from ``AutoTokenizer.from_pretrained`` because
+        ``tokenization_qwen.py`` was missing; the NEXT shape of that
+        same failure class would be a present-but-truncated file. This
+        test guards against that NEXT shape.
+        """
+        py_modules = {
+            f.name: f
+            for f in GOT_OCR2_SPEC.files
+            if f.name.endswith(".py")
+        }
+        assert py_modules, "expected trust_remote_code .py files in manifest"
+        for name, spec in py_modules.items():
+            assert spec.min_size_bytes > 0, (
+                f"{name} has no min_size_bytes — truncated downloads "
+                "would silently pass validation"
+            )
+            # Sanity: floor must NOT exceed the actual file on disk
+            # (known from the HF listing). Otherwise validation would
+            # reject all legitimate downloads.
+            known_max = {
+                "tokenization_qwen.py": 9_700,
+                "modeling_GOT.py": 34_600,
+                "got_vision_b.py": 16_500,
+                "render_tools.py": 2_040,
+            }
+            if name in known_max:
+                assert spec.min_size_bytes <= known_max[name], (
+                    f"{name} min_size_bytes {spec.min_size_bytes} > "
+                    f"actual {known_max[name]} — would reject a real download"
+                )
+
+
+class TestValidateFile:
+    """Regression tests for the three-layer validation in _validate_file."""
+
+    def test_tiny_file_below_min_size_floor_is_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        """A .py file truncated to 300 bytes fails the min_size_bytes floor
+        even though ``size_bytes=0`` would skip the exact-size check."""
+        from src.infrastructure.model_manager import ModelFile, ModelManager
+
+        spec = ModelFile(
+            name="tokenization_qwen.py",
+            url="file:///ignored",
+            size_bytes=0,  # no exact-size check
+            min_size_bytes=5 * 1024,  # 5 KB floor
+        )
+        truncated = tmp_path / "tokenization_qwen.py"
+        truncated.write_bytes(b"# truncated by proxy\n" * 10)  # ~210 B
+        assert ModelManager._validate_file(truncated, spec) is False
+
+    def test_file_at_or_above_min_size_floor_is_accepted(
+        self, tmp_path: Path
+    ) -> None:
+        from src.infrastructure.model_manager import ModelFile, ModelManager
+
+        spec = ModelFile(
+            name="tokenization_qwen.py",
+            url="file:///ignored",
+            size_bytes=0,
+            min_size_bytes=5 * 1024,
+        )
+        ok = tmp_path / "tokenization_qwen.py"
+        ok.write_bytes(b"x" * (6 * 1024))
+        assert ModelManager._validate_file(ok, spec) is True
+
+    def test_legacy_no_min_size_bytes_uses_1kb_default(
+        self, tmp_path: Path
+    ) -> None:
+        """``min_size_bytes=0`` keeps the original 1 KB default floor."""
+        from src.infrastructure.model_manager import ModelFile, ModelManager
+
+        spec = ModelFile(
+            name="config.json",
+            url="file:///ignored",
+            size_bytes=0,
+            min_size_bytes=0,  # use default
+        )
+        # 900 bytes is below the default 1024 floor.
+        small = tmp_path / "small.json"
+        small.write_bytes(b"x" * 900)
+        assert ModelManager._validate_file(small, spec) is False
+        # 1100 bytes passes.
+        big = tmp_path / "big.json"
+        big.write_bytes(b"x" * 1100)
+        assert ModelManager._validate_file(big, spec) is True
 
 
 # ---------------------------------------------------------------------------

@@ -42,9 +42,18 @@ def _seed_manifest(manager: ModelManager) -> None:
 
 
 def _stub_torch_transformers(monkeypatch) -> None:
-    """Inject minimal torch + transformers modules so import succeeds."""
+    """Inject minimal torch + transformers modules so import succeeds.
+
+    Also stubs ``einops`` and ``accelerate`` — these are transitive
+    deps of GOT-OCR 2.0's ``trust_remote_code`` scripts that the
+    engine's ``is_available`` probes for. And stubs ``torch.zeros``
+    so the DLL-load smoke test (``torch.zeros(1)``) in ``is_available``
+    doesn't fail on the mock.
+    """
     fake_torch = types.SimpleNamespace(
         cuda=types.SimpleNamespace(is_available=lambda: False),
+        # Smoke test calls torch.zeros(1) to catch bundled-DLL failures.
+        zeros=lambda *a, **kw: object(),
     )
     fake_torch.__name__ = "torch"
     fake_transformers = types.SimpleNamespace(
@@ -52,6 +61,11 @@ def _stub_torch_transformers(monkeypatch) -> None:
         AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda *a, **kw: MagicMock()),
     )
     fake_transformers.__name__ = "transformers"
+    # Stub every transitive dep that is_available probes for.
+    for dep_name in ("einops", "accelerate", "torchvision", "verovio"):
+        fake = types.SimpleNamespace()
+        fake.__name__ = dep_name
+        monkeypatch.setitem(sys.modules, dep_name, fake)
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
 
@@ -163,3 +177,175 @@ class TestRun:
         # Output document was saved + closed
         fake_out.save.assert_called_once()
         fake_out.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Stale-model detection: HF OSError → EngineNotAvailableError
+# ---------------------------------------------------------------------------
+
+
+class TestStaleModelDirectory:
+    """If the on-disk model dir is missing a trust_remote_code .py module.
+
+    OCR Studio 1.x shipped a GOT_OCR2_SPEC that omitted
+    ``tokenization_qwen.py`` / ``modeling_GOT.py`` / ``got_vision_b.py``
+    / ``render_tools.py``. Existing installs look "complete" per the
+    old manifest but crash in ``AutoTokenizer.from_pretrained`` with::
+
+        OSError: <local_path> does not appear to have a file named
+        tokenization_qwen.py. Checkout 'https://huggingface.co/<local_path>/tree/main'
+
+    The path interpolated into that URL is the user's Windows temp
+    directory, which is confusing and un-actionable. The engine must
+    catch that OSError shape and raise ``EngineNotAvailableError``
+    with a Russian message pointing at the download UI.
+    """
+
+    def _engine_that_passes_availability(
+        self, manager: ModelManager, monkeypatch
+    ) -> GOTOCREngine:
+        """Build a GOTOCREngine whose is_available returns True.
+
+        We want to reach ``_load_model`` — so we bypass the manifest
+        check (which would correctly reject the new manifest on a
+        pre-fix install). The point of these tests is the fallback
+        inside ``_load_model`` for the race / stale-cache case, not
+        the availability probe itself.
+        """
+        _stub_torch_transformers(monkeypatch)
+        _seed_manifest(manager)  # old files present
+        engine = GOTOCREngine(model_manager=manager)
+        return engine
+
+    def test_tokenizer_oserror_becomes_engine_not_available(
+        self, manager: ModelManager, monkeypatch, tmp_path: Path
+    ) -> None:
+        """AutoTokenizer OSError → EngineNotAvailableError with re-download hint."""
+        _stub_torch_transformers(monkeypatch)
+        _seed_manifest(manager)
+
+        # Rebuild the fake transformers with an AutoTokenizer that
+        # fails like HuggingFace does when trust_remote_code can't
+        # resolve tokenization_qwen.py.
+        hf_error = OSError(
+            "C:/Users/450D~1.020/.../got_ocr2 does not appear to have a "
+            "file named tokenization_qwen.py. Checkout "
+            "'https://huggingface.co/C:/Users/450D~1.020/.../got_ocr2/tree/main'"
+        )
+
+        def _failing_tokenizer(*_a, **_kw):
+            raise hf_error
+
+        fake_transformers = types.SimpleNamespace(
+            AutoModel=types.SimpleNamespace(from_pretrained=lambda *a, **kw: MagicMock()),
+            AutoTokenizer=types.SimpleNamespace(from_pretrained=_failing_tokenizer),
+        )
+        fake_transformers.__name__ = "transformers"
+        monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+        engine = GOTOCREngine(model_manager=manager)
+
+        # Pre-populate the availability cache as True so we can
+        # observe the engine invalidating it on failure.
+        manager._availability_cache[GOT_OCR2_SPEC.model_id] = (0.0, True)
+
+        with pytest.raises(EngineNotAvailableError) as excinfo:
+            engine._load_model()
+
+        message = str(excinfo.value)
+        # Points at the download UI path, not the temp dir.
+        assert "Скачать модель" in message
+        assert "tokenization_qwen" in message or "trust_remote_code" in message
+        # Does NOT leak the surreal ``huggingface.co/C:\Users\...`` URL.
+        assert "huggingface.co/C:" not in message
+        # Preserves the underlying cause for diagnostic logs.
+        assert excinfo.value.__cause__ is hf_error
+        # Availability cache was invalidated so the "Скачать модель"
+        # action can see the real state again.
+        assert GOT_OCR2_SPEC.model_id not in manager._availability_cache
+
+    def test_model_oserror_becomes_engine_not_available(
+        self, manager: ModelManager, monkeypatch, tmp_path: Path
+    ) -> None:
+        """Same mapping applies when the OSError surfaces from AutoModel."""
+        _stub_torch_transformers(monkeypatch)
+        _seed_manifest(manager)
+
+        # This test reaches PAST the tokenizer call, so the engine's
+        # dtype-selection code path runs before AutoModel raises. Give
+        # the fake torch real dtype sentinels so the selection works.
+        fake_torch = sys.modules["torch"]
+        fake_torch.float16 = object()  # type: ignore[attr-defined]
+        fake_torch.float32 = object()  # type: ignore[attr-defined]
+
+        hf_error = OSError(
+            "model dir does not appear to have a file named modeling_GOT.py"
+        )
+
+        def _failing_model(*_a, **_kw):
+            raise hf_error
+
+        fake_transformers = types.SimpleNamespace(
+            AutoModel=types.SimpleNamespace(from_pretrained=_failing_model),
+            AutoTokenizer=types.SimpleNamespace(
+                from_pretrained=lambda *a, **kw: MagicMock()
+            ),
+        )
+        fake_transformers.__name__ = "transformers"
+        monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+        engine = GOTOCREngine(model_manager=manager)
+
+        with pytest.raises(EngineNotAvailableError) as excinfo:
+            engine._load_model()
+
+        message = str(excinfo.value)
+        assert "Скачать модель" in message
+        assert excinfo.value.__cause__ is hf_error
+
+    def test_importerror_from_check_imports_becomes_engine_not_available(
+        self, manager: ModelManager, monkeypatch, tmp_path: Path
+    ) -> None:
+        """HF ``check_imports`` raises ImportError when the model's .py
+        files reference packages not installed (torchvision, verovio).
+
+        Regression: the user's log showed this exact traceback —
+        ``is_available`` returned True (missing deps not in its list),
+        then ``_load_model`` crashed with an uncaught ImportError."""
+        _stub_torch_transformers(monkeypatch)
+        _seed_manifest(manager)
+
+        fake_torch = sys.modules["torch"]
+        fake_torch.float16 = object()  # type: ignore[attr-defined]
+        fake_torch.float32 = object()  # type: ignore[attr-defined]
+
+        import_err = ImportError(
+            "This modeling file requires the following packages that "
+            "were not found in your environment: torchvision, verovio. "
+            "Run `pip install torchvision verovio`"
+        )
+
+        def _failing_tokenizer(*_a, **_kw):
+            raise import_err
+
+        fake_transformers = types.SimpleNamespace(
+            AutoModel=types.SimpleNamespace(
+                from_pretrained=lambda *a, **kw: MagicMock()
+            ),
+            AutoTokenizer=types.SimpleNamespace(
+                from_pretrained=_failing_tokenizer
+            ),
+        )
+        fake_transformers.__name__ = "transformers"
+        monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+        engine = GOTOCREngine(model_manager=manager)
+
+        with pytest.raises(EngineNotAvailableError) as excinfo:
+            engine._load_model()
+
+        message = str(excinfo.value)
+        # Must mention the missing packages so the user knows what
+        # to install — not just "Скачать модель".
+        assert "torchvision" in message or "pip install" in message
+        assert excinfo.value.__cause__ is import_err

@@ -1,0 +1,16 @@
+# Enforce LF for Tesseract user dictionaries and patterns.
+# Tesseract's user-words and user-patterns parsers require LF-only
+# line endings (documented in tesseract/src/dict/trie.h); CRLF makes
+# Tesseract silently skip entries on Windows.
+# Without this directive, git's ``core.autocrlf`` on Windows checkouts
+# would convert LF → CRLF on checkout and break the files at install
+# time.
+resources/tessdata/user-words.*   text eol=lf
+resources/tessdata/user-patterns.* text eol=lf
+
+# Also force LF on tessdata/configs/* (same parser, same issue).
+resources/tessdata/configs/* text eol=lf
+
+# Ground-truth .txt files in the accuracy corpus must round-trip
+# byte-for-byte so CER/WER is stable across OSes.
+tests/fixtures/accuracy_corpus/*.txt text eol=lf
