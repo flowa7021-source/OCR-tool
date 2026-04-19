@@ -170,45 +170,64 @@ def map_ocr_config(
     )
 
 
-def _build_tesseract_config(options: OCRmyPDFOptions) -> list[str] | None:
-    """Assemble the ``tesseract_config`` list for whitelist/blacklist.
+def _build_tesseract_config_file(
+    options: OCRmyPDFOptions, workdir: Path,
+) -> Path | None:
+    """Materialise a Tesseract configuration file with the OCRConfig's
+    ``extra_tesseract_params`` and return its absolute path.
 
-    Also emits ``-c key=value`` entries for every pair in
-    :attr:`OCRmyPDFOptions.extra_tesseract_params`. Key names are
-    validated against a minimal safe-char regex so a stray newline or
-    shell metacharacter in a hand-edited profile can't break out of the
-    ``-c`` argument (OCRmyPDF hands the list straight to Tesseract's
-    CLI). Invalid keys are dropped with a warning.
+    Tesseract's CLI accepts ``-c key=value`` only in the options slot
+    BEFORE the input file. OCRmyPDF forwards its ``tesseract_config``
+    argument as positional configfile names AFTER the input file —
+    so passing ``-c preserve_interword_spaces=1`` there makes
+    Tesseract try to open a file called ``-c preserve_interword_spaces=1``
+    and log ``Can't open -c preserve_interword_spaces=1`` before
+    ignoring the option.
+
+    The fix is to write a real Tesseract config file (space-separated
+    ``key value`` pairs, one per line, no ``=``) in our own workdir
+    and pass its absolute path. Tesseract resolves absolute paths in
+    the configfile slot correctly.
+
+    Args:
+        options: OCR options (we read ``extra_tesseract_params`` only).
+        workdir: Directory to write the config file into. Caller owns
+            cleanup; we don't attempt ``unlink`` here so the file
+            survives OCRmyPDF's fork into Tesseract.
 
     Returns:
-        List of config strings, or ``None`` if nothing was set.
+        Path to the written configuration file, or ``None`` when no
+        ``-c`` parameters are set.
     """
-    extras: list[str] = []
-    if options.char_whitelist:
-        extras.append(f"-c tessedit_char_whitelist={options.char_whitelist}")
-    if options.char_blacklist:
-        extras.append(f"-c tessedit_char_blacklist={options.char_blacklist}")
+    if not options.extra_tesseract_params:
+        return None
 
     import re as _re
 
-    _key_re = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    key_re = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    lines: list[str] = []
     for key, value in options.extra_tesseract_params.items():
-        if not _key_re.fullmatch(str(key)):
+        if not key_re.fullmatch(str(key)):
             logger.warning(
                 "Ignoring Tesseract -c parameter with invalid key %r", key,
             )
             continue
-        # Reject values containing control chars or embedded newlines —
-        # harmless Tesseract values are "0"/"1"/numbers/plain strings.
         value_str = str(value)
         if any(ch in value_str for ch in "\n\r\x00"):
             logger.warning(
                 "Ignoring Tesseract -c %s with control characters in value", key,
             )
             continue
-        extras.append(f"-c {key}={value_str}")
+        # Tesseract config-file grammar: ``key value`` separated by a
+        # single space, one rule per line. No ``=``.
+        lines.append(f"{key} {value_str}")
 
-    return extras or None
+    if not lines:
+        return None
+
+    config_path = workdir / "extra_tesseract_params.cfg"
+    config_path.write_text("\n".join(lines) + "\n", encoding="ascii")
+    return config_path
 
 
 # Cap on the escalated retry timeout. We multiply the base by 3 and
@@ -400,9 +419,28 @@ def run_ocrmypdf(options: OCRmyPDFOptions) -> None:
         "use_threads": True,
     }
 
-    tess_config = _build_tesseract_config(options)
-    if tess_config is not None:
-        kwargs["tesseract_config"] = tess_config
+    # Collect EVERY ``-c key=value`` pair (extra_tesseract_params +
+    # char whitelist/blacklist) into a single temp config file that
+    # OCRmyPDF forwards to Tesseract via ``tesseract_config``. See
+    # :func:`_build_tesseract_config_file` for why we can't pass
+    # bare ``-c`` strings through that slot.
+    tess_config_dir = options.output_file.parent
+    tess_config_dir.mkdir(parents=True, exist_ok=True)
+    combined_params = dict(options.extra_tesseract_params)
+    if options.char_whitelist:
+        combined_params["tessedit_char_whitelist"] = options.char_whitelist
+    if options.char_blacklist:
+        combined_params["tessedit_char_blacklist"] = options.char_blacklist
+    # Swap in the merged param set just for the helper call; restore
+    # after so the caller's OCRmyPDFOptions stays immutable-ish.
+    original_extra = options.extra_tesseract_params
+    options.extra_tesseract_params = combined_params
+    try:
+        config_file = _build_tesseract_config_file(options, tess_config_dir)
+    finally:
+        options.extra_tesseract_params = original_extra
+    if config_file is not None:
+        kwargs["tesseract_config"] = [str(config_file)]
 
     # User-words / user-patterns forwarding. Only pass each kwarg if we
     # have a resolved path; if the file was missing,

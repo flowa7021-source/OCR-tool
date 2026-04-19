@@ -145,12 +145,19 @@ class TestUniversalAccurateProfile:
         # Key preprocessing toggles match the universal preset.
         assert profile.preprocess.deskew.enabled
         assert profile.preprocess.contrast.clahe_enabled
-        # Background removal is ON by design — it flattens scanner-
-        # lamp gradients before CLAHE + binarisation, which gives
-        # measurable accuracy wins on real scans. The ~500 ms per
-        # page cost is acceptable for the "max accuracy" preset.
-        assert profile.preprocess.background.enabled
-        assert len(profile.preprocess.denoise.steps) >= 2
+        # Background removal is OFF as of the Apr 2026 benchmark
+        # retune: measurement on the clean synthetic corpus showed
+        # the blur-division pass added ~5 % CER on text-heavy scans
+        # without any gain on moderately-noisy ones. Phone snaps with
+        # heavy gradients still benefit from it — users pick
+        # ``low_quality_scan`` for those, or toggle background on
+        # manually in the UI.
+        assert not profile.preprocess.background.enabled
+        # One denoise step (median) — Sauvola + morph_close + high
+        # CLAHE was tried and regressed CER by 6-29 % on the Apr
+        # 2026 benchmark due to "lots of diacritics" from over-
+        # sharpened local contrast.
+        assert len(profile.preprocess.denoise.steps) >= 1
         # Every postprocess step on — including the word-level
         # Cyrillic/Latin look-alike fixup, which is critical for
         # Russian documents Tesseract OCRs with rus+eng.

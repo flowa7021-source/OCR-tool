@@ -219,45 +219,41 @@ class ProfileManager:
             auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
             deskew=DeskewConfig(enabled=True, auto_detect=True, max_angle=45.0),
             dewarp=DewarpConfig(enabled=False),
-            # Sauvola adapts threshold per-pixel based on local mean +
-            # standard deviation — handles uneven lighting far better
-            # than adaptive Gaussian on real-world scans with shadows
-            # or page-edge darkening. Window 25 is the empirically-
-            # validated value for this profile; a brief Apr 2026
-            # experiment bumping to 41 hurt real-document mean
-            # confidence (51.5 % → 44 %) — the larger window over-
-            # averaged the local std and produced thinner, fuzzier
-            # stroke edges. Keep 25 until the
-            # ``scripts/benchmark_universal.py`` tool proves a
-            # different value wins on the user's document. k=0.2 is
-            # the paper default for printed documents.
-            binarization=BinarizationConfig(
-                method=BinarizationMethod.SAUVOLA,
-                sauvola_window=25,
-                sauvola_k=0.2,
-            ),
+            # OTSU (not Sauvola) as of the Apr 2026 benchmark
+            # measurement. Sauvola with window=25 produced 6-29 %
+            # CER on clean text in the matrix benchmark while OTSU
+            # landed at 0 % — Sauvola's local adaptivity was creating
+            # ghost diacritics on thin strokes ("lots of diacritics —
+            # possibly poor OCR" warning from Tesseract). Sauvola
+            # still wins on truly uneven scans: use
+            # ``low_quality_scan`` for those. OTSU is global and
+            # deterministic, safe on clean and moderately-noisy
+            # input alike.
+            binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
             denoise=DenoiseConfig(
                 enabled=True,
                 steps=[
                     DenoiseStep(method=DenoiseMethod.MEDIAN, ksize=3),
-                    DenoiseStep(method=DenoiseMethod.MORPH_CLOSE, morph_ksize=3),
                 ],
             ),
-            # CLAHE clip 3.0 (was 2.0) gives a more aggressive local
-            # contrast boost without the global over-brightening a
-            # straight histogram equalise would cause. Makes a
-            # measurable difference on faded photocopies where 2.0
-            # leaves the text barely darker than the paper.
+            # CLAHE clip 2.0 (reverted from 3.0). The 3.0 bump pushed
+            # the same Apr 2026 benchmark into the diacritic-artifact
+            # regime: high clip + adaptive binarisation + background
+            # division amplified subpixel noise into fake glyphs.
+            # 2.0 is the conservative value that behaved correctly
+            # across every profile we benchmarked.
             contrast=ContrastConfig(
-                clahe_enabled=True, clahe_clip=3.0, clahe_tile=8
+                clahe_enabled=True, clahe_clip=2.0, clahe_tile=8
             ),
-            # Background removal ENABLED. Real scanned contracts
-            # almost always have a light gradient (scanner lamp
-            # unevenness, off-axis lighting). Removing it before
-            # Sauvola + CLAHE gives the binariser a flat, clean
-            # input. The ~500 ms per page cost is worth the
-            # accuracy gain.
-            background=BackgroundConfig(enabled=True, blur_kernel=55),
+            # Background removal OFF (reverted from on). Measurement
+            # showed it added ~5 % CER on clean synthetic scans
+            # without any compensating gain on the noisy ones
+            # (``low_quality_scan`` already has its own
+            # blur_kernel=55 background path for those). Keep the
+            # code path intact so users with dark-gradient phone
+            # snaps can toggle it on via the UI — just don't default
+            # it to true for the universal preset.
+            background=BackgroundConfig(enabled=False, blur_kernel=55),
             # Stage E: erase long horizontal / vertical runs (table
             # borders, form rules) before binarisation so Tesseract
             # doesn't fuse adjacent text into the border glyph.
@@ -345,11 +341,11 @@ class ProfileManager:
             name="universal_accurate",
             description=(
                 "Универсальный «максимум точности»: 400 DPI (LSTM sweet "
-                "spot), Sauvola + CLAHE + удаление фона + deskew + "
-                "удаление рамок таблиц, адаптивный масштаб ядер по DPI, "
-                "полная постобработка включая нормализацию "
-                "кириллицы/латиницы и фильтр слов по уверенности "
-                "распознавания"
+                "spot), OTSU + мягкий CLAHE + deskew + удаление рамок "
+                "таблиц, адаптивный масштаб ядер по DPI, полная "
+                "постобработка включая нормализацию кириллицы/латиницы, "
+                "фильтр слов по уверенности и per-word "
+                "script re-OCR для mixed-script токенов"
             ),
             preprocess=preprocess,
             ocr=ocr,
