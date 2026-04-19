@@ -882,6 +882,159 @@ class TestPipelinePreflight:
             "would poison the cache"
         )
 
+    def test_text_layer_bypass_skips_ocr_on_digital_pdf(
+        self, tmp_path: Path
+    ) -> None:
+        """A PDF whose every page already has substantial text must
+        skip the engine entirely — the bypass copies input → output
+        and extracts text directly, with 100% mean_confidence."""
+        import fitz
+
+        pdf = tmp_path / "digital.pdf"
+        doc = fitz.open()
+        try:
+            for i in range(3):
+                page = doc.new_page(width=500, height=700)
+                # ≥ 50 chars and ≥ 3 words per page triggers bypass
+                page.insert_text(
+                    (50, 100),
+                    (
+                        f"This is page {i + 1} of a digital PDF that "
+                        "already contains a substantial text layer. "
+                        "The OCR pipeline should skip it entirely."
+                    ),
+                )
+            doc.save(str(pdf))
+        finally:
+            doc.close()
+
+        output_pdf = tmp_path / "out.pdf"
+
+        # Spy on the engine registry — it must NEVER be called.
+        engine_calls: list[object] = []
+
+        class _ShouldNotRun(OCREngine):
+            kind = OCREngineKind.TESSERACT
+
+            @property
+            def name(self) -> str:
+                return "should-not-run"
+
+            @property
+            def description(self) -> str:
+                return "fails the test if bypass doesn't kick in"
+
+            def is_available(self) -> tuple[bool, str]:
+                return True, ""
+
+            def run(self, *a, **kw):
+                engine_calls.append((a, kw))
+                raise AssertionError(
+                    "Text-layer bypass should have fired; engine.run() "
+                    "must not be invoked on a digital PDF"
+                )
+
+        with patch(
+            "src.application.engines.get_engine",
+            return_value=_ShouldNotRun(),
+        ):
+            result = _make_pipeline().run(
+                OCRJobConfig(
+                    input_path=str(pdf),
+                    output_path=str(output_pdf),
+                    profile=_profile(),
+                )
+            )
+
+        assert result.status is JobStatus.COMPLETED
+        assert engine_calls == [], (
+            f"engine.run was invoked {len(engine_calls)} time(s) — "
+            "text-layer bypass must skip the engine entirely on a "
+            "digital PDF"
+        )
+        assert len(result.pages) == 3
+        for page in result.pages:
+            assert "digital PDF" in page.text
+            assert page.mean_confidence == 100.0
+        assert output_pdf.exists()
+
+    def test_text_layer_bypass_respects_skip_text_false(
+        self, tmp_path: Path
+    ) -> None:
+        """With skip_text=False on the profile, the user explicitly
+        wants re-OCR — bypass must not kick in even on a digital PDF."""
+        import fitz
+
+        pdf = tmp_path / "digital.pdf"
+        doc = fitz.open()
+        try:
+            page = doc.new_page(width=500, height=700)
+            page.insert_text(
+                (50, 100),
+                "This digital PDF has plenty of text and three words.",
+            )
+            doc.save(str(pdf))
+        finally:
+            doc.close()
+
+        stub = _CapturingEngine()
+        profile = _profile()
+        profile.ocr.skip_text = False  # user wants re-OCR
+
+        with patch("src.application.engines.get_engine", return_value=stub):
+            result = _make_pipeline().run(
+                OCRJobConfig(
+                    input_path=str(pdf),
+                    output_path=str(tmp_path / "out.pdf"),
+                    profile=profile,
+                )
+            )
+
+        assert result.status is JobStatus.COMPLETED
+        assert stub.run_called == 1, (
+            "skip_text=False must force engine.run() to execute — "
+            "bypass is an opt-out for users who want re-OCR"
+        )
+
+    def test_text_layer_bypass_skips_short_pages(
+        self, tmp_path: Path
+    ) -> None:
+        """A PDF where ANY page has < 50 chars of text falls through
+        to the full pipeline — bypass is all-or-nothing per document."""
+        import fitz
+
+        pdf = tmp_path / "mixed.pdf"
+        doc = fitz.open()
+        try:
+            # Page 1: plenty of text
+            page = doc.new_page(width=500, height=700)
+            page.insert_text(
+                (50, 100),
+                "First page has a substantial text layer with many words.",
+            )
+            # Page 2: too short to count as "substantial"
+            page = doc.new_page(width=500, height=700)
+            page.insert_text((50, 100), "Short.")
+            doc.save(str(pdf))
+        finally:
+            doc.close()
+
+        stub = _CapturingEngine()
+        with patch("src.application.engines.get_engine", return_value=stub):
+            result = _make_pipeline().run(
+                OCRJobConfig(
+                    input_path=str(pdf),
+                    output_path=str(tmp_path / "out.pdf"),
+                    profile=_profile(),
+                )
+            )
+
+        assert result.status is JobStatus.COMPLETED
+        assert stub.run_called == 1, (
+            "Any page with insufficient text must bust the bypass — "
+            "engine.run() should have been called for the full pipeline"
+        )
+
     def test_preflight_progress_event_fires(self, tmp_path: Path) -> None:
         """Before the first slow step, a ``preflight`` progress event
         must arrive so the UI can move the bar off 0%."""
