@@ -65,13 +65,15 @@ _RETRY_DPI: int = 200
 # is the whole point of this tier.
 _LAST_RESORT_DPI: int = 150
 
-# Initiative 3: cap on inner per-page parallelism raised from
-# 4 to 8. 8 matches the core count on the modern Windows laptops
-# this app targets. The outer ``ParallelProcessor`` still runs
-# files in parallel, but the memory-pressure guard below keeps
-# outer × inner from thrashing the OS with more concurrent
-# Tesseract subprocesses than the host's RAM can hold.
-_MAX_PER_PAGE_WORKERS: int = 8
+# Per-page OCR worker cap. Raised from 8 to 10 in the "batch 10
+# pages at a time" UX rollout — matches the preprocess and
+# postprocess stages' cap so a 10-page bundle moves through all
+# three stages at the same width. Hosts with more cores still
+# benefit from the ``OCR_PER_PAGE_WORKERS`` env override; the
+# memory-pressure guard below keeps outer × inner from thrashing
+# the OS with more concurrent Tesseract subprocesses than RAM
+# supports.
+_MAX_PER_PAGE_WORKERS: int = 10
 
 # Memory budget per worker. A Tesseract + OCRmyPDF + pikepdf
 # pipeline on a 500 DPI A4 page holds:

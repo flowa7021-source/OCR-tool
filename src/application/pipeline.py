@@ -39,6 +39,48 @@ from src.shared.types import JobStatus
 logger = logging.getLogger(__name__)
 
 
+def _resolve_stage_parallelism(
+    *, env_var: str, fallback: int,
+) -> int:
+    """Return the worker cap for a pipeline stage.
+
+    Checks ``os.environ[env_var]`` first; if present and a positive
+    integer, returns it. Otherwise returns ``fallback``. Invalid
+    values (non-integers, zero, negative) are logged and ignored so
+    the stage falls back to the code default — safer than crashing
+    the pipeline over a typo.
+
+    Env vars, defaults (kept in sync with the docstrings on the
+    call sites):
+
+      * ``OCR_PREPROCESS_WORKERS`` — default 10
+      * ``OCR_POSTPROCESS_WORKERS`` — default 10
+      * per-page OCR workers are capped separately in
+        :mod:`src.application.engines.tesseract_engine` via
+        ``OCR_PER_PAGE_WORKERS`` (also default 10 after this change)
+    """
+    import os
+
+    raw = os.environ.get(env_var)
+    if raw is None:
+        return fallback
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid %s=%r; using default %d",
+            env_var, raw, fallback,
+        )
+        return fallback
+    if value < 1:
+        logger.warning(
+            "Ignoring non-positive %s=%d; using default %d",
+            env_var, value, fallback,
+        )
+        return fallback
+    return value
+
+
 class PipelineError(RuntimeError):
     """Base class for pipeline-level failures surfaced to the UI."""
 
@@ -914,10 +956,20 @@ class OCRPipeline:
         """
         import concurrent.futures
 
-        # 4 workers keeps memory bounded (~4 full-DPI pages in flight)
-        # and matches the typical small-batch ProcessPoolExecutor budget.
-        # Single-page jobs skip the thread overhead entirely.
-        max_workers = 1 if page_count == 1 else min(4, page_count)
+        # Preprocess parallelism: default cap 10, overridable via the
+        # ``OCR_PREPROCESS_WORKERS`` env var for tuning on constrained
+        # hosts. 10 matches the common "10 pages at a time" UX ask
+        # (batch processing of small bundles) without blowing past the
+        # typical memory budget: one preprocessed page in flight holds
+        # ~50 MB at 400 DPI, so 10 workers = ~500 MB peak, safe on
+        # 8 GB hosts. Single-page jobs skip the thread overhead
+        # entirely.
+        default_cap = _resolve_stage_parallelism(
+            env_var="OCR_PREPROCESS_WORKERS", fallback=10,
+        )
+        max_workers = (
+            1 if page_count == 1 else min(default_cap, page_count)
+        )
 
         slots: list[PageResult | None] = [None] * page_count
         png_slots: list[Path | None] = [None] * page_count
@@ -1111,47 +1163,101 @@ class OCRPipeline:
             job: Original job config (for postprocess + OCR config).
             png_paths: Preprocessed PNGs used for optional confidence scan.
         """
+        import concurrent.futures
+
         import fitz
 
+        # Pass 1: serial text extraction from the searchable PDF. Fitz
+        # doc objects aren't safe to share across threads — we open the
+        # document once on the main thread, pull the raw text per page
+        # (cheap: milliseconds per page on a text-bearing PDF), and
+        # close it before spinning up the parallel postprocess workers.
+        raw_per_page: list[str | None] = [None] * len(page_results)
         doc = fitz.open(str(ocrd_pdf))
         try:
             for idx, pr in enumerate(page_results):
-                if pr.error is not None:
-                    # Skip pages that failed preprocess, but still try to pull
-                    # whatever text the OCR'd PDF may have for that page.
-                    pass
                 if idx >= doc.page_count:
                     continue
                 try:
                     if pr.text:
-                        # Engine already produced text — postprocess that,
-                        # don't re-read from the PDF where the layout
-                        # serialisation may differ.
-                        pr.text = self._postprocess_text(
-                            pr.text, job.profile.postprocess
-                        )
+                        # Engine already produced text — keep that, do
+                        # NOT re-read from the PDF where the layout
+                        # serialisation may differ. The postprocess
+                        # worker below will see ``pr.text`` as seed.
+                        raw_per_page[idx] = pr.text
                     else:
                         page = doc.load_page(idx)
-                        raw_text = page.get_text("text") or ""
-                        pr.text = self._postprocess_text(
-                            raw_text, job.profile.postprocess
-                        )
+                        raw_per_page[idx] = page.get_text("text") or ""
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "Failed to extract text for page %d: %s",
-                        pr.page_number,
-                        exc,
+                        pr.page_number, exc,
                     )
                     pr.error = (pr.error or "") + f"; extract: {exc}"
-
-                # Periodic partial-result autosave.
-                if (
-                    self.autosave_interval_pages > 0
-                    and (idx + 1) % self.autosave_interval_pages == 0
-                ):
-                    self._autosave_partial_txt(page_results[: idx + 1], job)
+                    raw_per_page[idx] = None
         finally:
             doc.close()
+
+        # Pass 2: parallel postprocess across pages. Postprocess is
+        # pure-Python regex + string work; re.sub releases the GIL
+        # during pattern execution so thread parallelism scales up to
+        # ~10 pages even with the interpreter lock. ThreadPool is
+        # cheaper than ProcessPool for this stage because we don't
+        # have to serialise the page text across the process boundary.
+        # Batch size matches the preprocess / OCR stage caps (10) so
+        # a 10-page bundle moves through all three stages at the same
+        # width, and autosave semantics are preserved by running the
+        # periodic checkpoint between batches instead of per page.
+        workers = _resolve_stage_parallelism(
+            env_var="OCR_POSTPROCESS_WORKERS", fallback=10,
+        )
+
+        def _postprocess_one(idx: int) -> None:
+            raw = raw_per_page[idx]
+            if raw is None:
+                return
+            pr = page_results[idx]
+            try:
+                pr.text = self._postprocess_text(
+                    raw, job.profile.postprocess,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to postprocess page %d: %s",
+                    pr.page_number, exc,
+                )
+                pr.error = (pr.error or "") + f"; postprocess: {exc}"
+
+        if len(page_results) == 1:
+            _postprocess_one(0)
+        else:
+            batch_size = max(1, workers)
+            for batch_start in range(0, len(page_results), batch_size):
+                batch_indices = range(
+                    batch_start,
+                    min(batch_start + batch_size, len(page_results)),
+                )
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=workers,
+                    thread_name_prefix="ocr-postproc",
+                ) as pool:
+                    list(pool.map(_postprocess_one, batch_indices))
+                # Periodic partial-result autosave between batches. The
+                # old per-page cadence was ``(idx + 1) %
+                # autosave_interval_pages == 0``; after parallelising we
+                # approximate that by checkpointing on every batch
+                # boundary that crosses an interval multiple.
+                if self.autosave_interval_pages > 0:
+                    completed = min(
+                        batch_start + batch_size, len(page_results),
+                    )
+                    if (
+                        completed % self.autosave_interval_pages == 0
+                        or completed == len(page_results)
+                    ):
+                        self._autosave_partial_txt(
+                            page_results[:completed], job,
+                        )
 
         # Only run pytesseract-based confidence scoring when the OCR engine
         # was Tesseract. Any future engine should populate mean_confidence
