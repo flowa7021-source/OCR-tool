@@ -110,9 +110,8 @@ class _CapturingEngine(OCREngine):
     bytes that reached Tesseract genuinely differed".
 
     The engine returns one ``PageOCRResult`` per page in the PDF, with
-    ``text`` taken from ``page_texts`` (or a fallback). This mirrors
-    GOT-OCR2's behaviour where the engine pre-fills the text and the
-    pipeline then runs postprocess on it.
+    ``text`` taken from ``page_texts`` (or a fallback). The pipeline
+    then runs postprocess on whatever text the engine produced.
     """
 
     kind = OCREngineKind.TESSERACT
@@ -491,9 +490,8 @@ def test_remove_artifacts_flag_drops_pure_punctuation_lines(tmp_path: Path) -> N
 
 @pytest.mark.parametrize(
     "profile_name",
-    # Skip universal_accurate (only built in code, no JSON in repo) and
-    # handwritten_mixed (GOT-OCR2 engine — covered by the engine-dispatch
-    # test in test_e2e.py). The five below ship as JSON in /profiles/.
+    # Skip universal_accurate (only built in code, no JSON in repo).
+    # The five below ship as JSON in /profiles/.
     ["default", "quick_reliable", "low_quality_scan", "contracts_ru", "english_text"],
 )
 def test_bundled_builtin_profile_loads_and_runs_through_pipeline(
@@ -555,8 +553,7 @@ class TestQuickReliableProfile:
     ``universal_accurate`` fails. It MUST avoid every config choice that
     was in any of the production failure logs:
 
-      * Tesseract engine (not GOT-OCR 2.0 — optional model, separate
-        install failure mode);
+      * Tesseract engine (always bundled);
       * DPI strictly below 600 (the DPI that produced the timeout-
         then-graft-crash chain);
       * tesseract_timeout at least 300s (matches the new default and
@@ -573,14 +570,10 @@ class TestQuickReliableProfile:
         assert profile.name == "quick_reliable"
         assert profile.builtin is True
 
-    def test_profile_uses_tesseract_not_got_ocr2(self, tmp_path: Path) -> None:
+    def test_profile_uses_tesseract(self, tmp_path: Path) -> None:
         storage = ProfileStorage(profiles_dir=tmp_path / "user-profiles")
         profile = storage.load("quick_reliable")
-        assert profile.ocr.engine is OCREngineKind.TESSERACT, (
-            "quick_reliable must use Tesseract — GOT-OCR 2.0 depends on "
-            "a separately-downloaded model, which is exactly the failure "
-            "mode this profile exists to route around."
-        )
+        assert profile.ocr.engine is OCREngineKind.TESSERACT
 
     def test_profile_uses_moderate_dpi_and_generous_timeout(
         self, tmp_path: Path
@@ -617,12 +610,11 @@ class TestPipelinePreflight:
     """The pipeline must refuse obviously-broken configurations BEFORE
     doing any expensive work.
 
-    In a pre-fix build, a user with a stale GOT-OCR 2.0 model spent
-    ~25 seconds rasterising + preprocessing 4 pages before the engine
-    load finally crashed with ``OSError``. Preflight now calls
-    ``engine.is_available()`` up front — when False, the job returns
-    FAILED within roughly a second, so the user can fix the config
-    and re-run without waiting.
+    In a pre-fix build, a user with a broken engine spent ~25 seconds
+    rasterising + preprocessing 4 pages before the engine crashed.
+    Preflight now calls ``engine.is_available()`` up front — when
+    False, the job returns FAILED within roughly a second, so the
+    user can fix the config and re-run without waiting.
     """
 
     def _make_stub_unavailable_engine(self) -> OCREngine:
@@ -639,8 +631,8 @@ class TestPipelinePreflight:
 
             def is_available(self) -> tuple[bool, str]:
                 return False, (
-                    "Файлы модели GOT-OCR 2.0 устарели — "
-                    "откройте Настройки → Скачать модель."
+                    "Tesseract binary missing — установите его или "
+                    "проверьте путь в настройках."
                 )
 
             def run(self, *a, **kw):  # pragma: no cover — preflight skips run

@@ -590,9 +590,9 @@ def _convert_value(value: Any, target_type: Any) -> Any:
     # (value is hashable but not a member of the enum). A stored profile
     # that references an enum member the current build no longer knows —
     # for example, a downgraded binary or a hand-edited JSON with
-    # ``"engine": "got_ocr3"`` — would otherwise raise and leave the
-    # entire profile unloadable, dragging every user-saved config with
-    # it. Falling back to ``None`` lets the surrounding
+    # ``"engine": "some_unknown_engine"`` — would otherwise raise and
+    # leave the entire profile unloadable, dragging every user-saved
+    # config with it. Falling back to ``None`` lets the surrounding
     # :class:`dataclasses` default kick in (e.g. ``OCRConfig.engine``
     # reverts to ``OCREngineKind.TESSERACT``), which is the behaviour a
     # user expects from "my one odd field got reset" rather than "my

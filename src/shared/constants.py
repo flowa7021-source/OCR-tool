@@ -76,12 +76,6 @@ GHOSTSCRIPT_BIN_DIR: Path = RESOURCES_DIR / "ghostscript"
 ICONS_DIR: Path = RESOURCES_DIR / "icons"
 STYLES_DIR: Path = RESOURCES_DIR / "styles"
 BUNDLED_PROFILES_DIR: Path = APP_ROOT / "profiles"
-# Optional bundled HTR model weights. Populated by the CI installer
-# pipeline (Download GOT-OCR 2.0 weights step) so end-users don't need
-# to fetch ~580 MB from HuggingFace on first launch. Empty in source
-# checkouts — ModelManager treats it as an alternate read-only lookup
-# root if the user-writable copy doesn't have everything yet.
-BUNDLED_MODELS_DIR: Path = RESOURCES_DIR / "models"
 
 # Ground-truth catalog of Russian business identifiers (ИНН / ОГРН /
 # КПП / counterparty names). When present, the text postprocessor

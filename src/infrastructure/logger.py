@@ -56,18 +56,6 @@ def setup_logging(level: int = logging.INFO, log_to_console: bool = True) -> Pat
     # stderr is closed) write their own log files next to this one.
     os.environ.setdefault("OCRSTUDIO_LOGS_DIR", str(LOGS_DIR))
 
-    # HuggingFace / transformers runtime: offline, redirected cache,
-    # no telemetry. See ``hf_runtime`` for the rationale. Env vars
-    # propagate to worker subprocesses automatically. Safe to call
-    # unconditionally — if the user never loads GOT-OCR 2.0 these vars
-    # are simply never read.
-    try:
-        from src.infrastructure.hf_runtime import configure_huggingface_runtime
-
-        configure_huggingface_runtime()
-    except Exception:  # noqa: BLE001 - logging setup must never fail
-        pass
-
     root_logger = logging.getLogger()
     # Idempotent setup: clear previous handlers so re-calling is safe.
     for handler in list(root_logger.handlers):

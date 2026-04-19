@@ -43,28 +43,6 @@ dev = [
     # another, the benchmark flags it before merge.
     "jiwer>=3.0",
 ]
-# Optional handwriting / transformer-OCR back-ends. Adds GOT-OCR 2.0
-# support (Apache-2.0). The model weights themselves (~580 MB) are
-# downloaded at runtime via the in-app "Download GOT-OCR 2.0" action.
-# Pillow is already a base dependency so we don't list it again.
-htr = [
-    "torch>=2.1",
-    "torchvision>=0.16",
-    # GOT-OCR 2.0's ``trust_remote_code`` ``modeling_GOT.py`` uses the
-    # transformers ≤4.45 DynamicCache API (``past_key_values.seen_tokens``).
-    # transformers 4.46+ removed that attribute; loading GOT under
-    # newer transformers crashes mid-inference with:
-    #     'DynamicCache' object has no attribute 'seen_tokens'
-    # Upstream Stepfun hasn't refreshed the model card since 2024-09,
-    # so pinning is the tractable fix. Lower bound matches what
-    # Stepfun's own README validates against.
-    "transformers>=4.37,<4.46",
-    "tiktoken>=0.5",
-    "safetensors>=0.4",
-    "einops>=0.7",
-    "accelerate>=0.25",
-    "verovio>=4.0",
-]
 
 [project.scripts]
 ocr-studio = "src.main:main"

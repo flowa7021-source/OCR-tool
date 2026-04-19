@@ -41,17 +41,17 @@ class TestOCRConfigEngineField:
         from src.core.models import ProfileData
 
         profile = ProfileData(name="test")
-        profile.ocr.engine = OCREngineKind.GOT_OCR2
+        profile.ocr.engine = OCREngineKind.TESSERACT
         d = profile.to_dict()
-        assert d["ocr"]["engine"] == "got_ocr2"
+        assert d["ocr"]["engine"] == "tesseract"
 
     def test_engine_deserializes_from_dict(self) -> None:
         from src.core.models import ProfileData
 
         original = ProfileData(name="test")
-        original.ocr.engine = OCREngineKind.GOT_OCR2
+        original.ocr.engine = OCREngineKind.TESSERACT
         restored = ProfileData.from_dict(original.to_dict())
-        assert restored.ocr.engine is OCREngineKind.GOT_OCR2
+        assert restored.ocr.engine is OCREngineKind.TESSERACT
 
 
 # ---------------------------------------------------------------------------
@@ -70,30 +70,10 @@ class TestRegistry:
         b = get_engine(OCREngineKind.TESSERACT)
         assert a is b
 
-    def test_got_ocr_resolves_but_reports_unavailable(self) -> None:
-        # Module is registered but torch/transformers + weights are not
-        # installed by default, so the engine must self-report as
-        # unavailable with an actionable hint.
-        engine = get_engine(OCREngineKind.GOT_OCR2)
-        assert engine.kind is OCREngineKind.GOT_OCR2
-        ok, msg = engine.is_available()
-        assert ok is False
-        assert msg  # non-empty Russian hint
-
-    def test_list_engines_includes_all_kinds(self) -> None:
+    def test_list_engines_includes_tesseract(self) -> None:
         listing = list_engines()
         kinds = [item[0] for item in listing]
         assert OCREngineKind.TESSERACT in kinds
-        assert OCREngineKind.GOT_OCR2 in kinds
-
-    def test_list_engines_marks_unavailable(self) -> None:
-        listing = list_engines()
-        got_entry = next(item for item in listing if item[0] is OCREngineKind.GOT_OCR2)
-        # GOT-OCR2 engine module isn't shipped yet → must be marked
-        # unavailable with a non-empty hint message.
-        _, _name, available, msg = got_entry
-        assert available is False
-        assert len(msg) > 0
 
 
 # ---------------------------------------------------------------------------

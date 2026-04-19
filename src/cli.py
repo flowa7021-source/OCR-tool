@@ -93,11 +93,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--check-engine",
         metavar="KIND",
         help=(
-            "Проверить доступность OCR-движка (``tesseract`` или "
-            "``got_ocr2``) и завершить работу. Exit 0 — движок готов, "
-            "exit 1 — недоступен (причина выводится в stderr). "
-            "Используется CI-smoke тестом, чтобы поймать сломанный "
-            "HTR-бандл до релиза."
+            "Проверить доступность OCR-движка (``tesseract``) и "
+            "завершить работу. Exit 0 — движок готов, exit 1 — "
+            "недоступен (причина выводится в stderr). Используется "
+            "CI-smoke тестом, чтобы поймать сломанный бандл до релиза."
         ),
     )
     p.add_argument(
@@ -355,33 +354,20 @@ def process_batch(
 def check_engine(kind_name: str) -> int:
     """Probe an OCR engine's availability — DEEP check — and exit.
 
-    Stage-gate hook for the build-installer smoke test: catches the
-    "bundle is missing a transitive dep" class of bugs (torchvision,
-    verovio, einops, accelerate, tiktoken, safetensors) BEFORE the
-    installer ships, rather than at first user launch. Returns 0 on
-    success, 1 on failure; the reason is written to stderr so CI
-    logs capture it.
+    Stage-gate hook for the build-installer smoke test: catches a
+    broken bundle before the installer ships rather than at first
+    user launch. Returns 0 on success, 1 on failure; the reason is
+    written to stderr so CI logs capture it.
 
     Two layers of verification:
 
-      1. ``engine.is_available()`` — cheap surface check: deps
-         importable, model weights present on disk.
-      2. If the engine has a private ``_load_model()`` method (GOT-OCR
-         2.0 does), call it. This catches:
-           * corrupt / truncated ``model.safetensors`` (the ``min_size``
-             floor in the ModelManager protects against that, but a
-             bit-flip past the size gate still fails here)
-           * torchvision's native C++ ops failing to load (happens
-             when PyInstaller misses ``torchvision/_C.*.pyd`` —
-             ``import torchvision`` succeeds but the first op raises)
-           * HuggingFace ``trust_remote_code`` ``.py`` modules
-             referencing a Python package not installed in the env
-             (``is_available`` probes a fixed list, so new upstream
-             imports slip through without this backstop)
-
-    The deep check is idempotent and gated on the engine actually
-    exposing the method; Tesseract doesn't (no model load step), so
-    only the ``is_available`` surface check runs there.
+      1. ``engine.is_available()`` — surface check: tesseract
+         binary discoverable on PATH, tessdata directory complete.
+      2. If the engine exposes a private ``_load_model()`` method,
+         call it — gives future engines a place to do any expensive
+         one-time init as part of the smoke probe. Tesseract doesn't
+         have one, so today this is a no-op and only the
+         ``is_available`` surface check runs.
     """
     from src.application.engines.registry import get_engine
     from src.shared.types import OCREngineKind

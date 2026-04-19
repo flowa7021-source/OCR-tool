@@ -1,11 +1,10 @@
-"""Tests for the six cache/lifetime improvements.
+"""Tests for the cache / lifetime improvements.
 
 Covers:
-    * GOTOCREngine.unload() and registry.reset_cache() side effect
+    * registry.reset_cache() side effect
     * Startup temp cleanup hook in src.app.create_application
     * Preview-pixmap LRU cache in src.ui.preprocessing_panel
     * SettingsStorage mtime-based load cache
-    * ModelManager.is_available TTL cache + invalidation
     * TesseractWrapper.refresh()
 """
 
@@ -18,44 +17,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # ---------------------------------------------------------------------------
-# GOTOCREngine.unload + registry.reset_cache
+# registry.reset_cache
 # ---------------------------------------------------------------------------
 
 
-class TestGOTUnload:
-    def _engine(self, tmp_path: Path):
-        from src.application.engines.got_ocr_engine import GOTOCREngine
-        from src.infrastructure.model_manager import ModelManager
-
-        mgr = ModelManager(models_dir=tmp_path / "models")
-        engine = GOTOCREngine(model_manager=mgr)
-        # Simulate a loaded model
-        engine._model = MagicMock(name="fake-model")
-        engine._tokenizer = MagicMock(name="fake-tokenizer")
-        return engine
-
-    def test_unload_clears_state(self, tmp_path: Path) -> None:
-        engine = self._engine(tmp_path)
-        assert engine._model is not None
-        engine.unload()
-        assert engine._model is None
-        assert engine._tokenizer is None
-
-    def test_unload_is_idempotent(self, tmp_path: Path) -> None:
-        engine = self._engine(tmp_path)
-        engine.unload()
-        engine.unload()  # second call must not raise
-        assert engine._model is None
-
-    def test_unload_noop_when_not_loaded(self, tmp_path: Path) -> None:
-        from src.application.engines.got_ocr_engine import GOTOCREngine
-        from src.infrastructure.model_manager import ModelManager
-
-        engine = GOTOCREngine(model_manager=ModelManager(models_dir=tmp_path))
-        # Fresh engine — nothing loaded
-        engine.unload()  # should silently return
-        assert engine._model is None
-
+class TestBaseEngineUnload:
     def test_base_engine_unload_is_noop(self) -> None:
         """Default OCREngine.unload() is safe to call on engines that don't override it."""
         from src.application.engines.tesseract_engine import TesseractEngine
@@ -64,26 +30,7 @@ class TestGOTUnload:
 
 
 class TestRegistryResetCache:
-    def test_reset_cache_calls_unload(self, tmp_path: Path) -> None:
-        # Prepare a cached engine with mock loaded weights
-        import src.application.engines.registry as registry
-        from src.application.engines.got_ocr_engine import GOTOCREngine
-        from src.application.engines.registry import reset_cache
-        from src.infrastructure.model_manager import ModelManager
-        from src.shared.types import OCREngineKind
-
-        engine = GOTOCREngine(model_manager=ModelManager(models_dir=tmp_path))
-        engine._model = MagicMock()
-        engine._tokenizer = MagicMock()
-        registry._CACHE[OCREngineKind.GOT_OCR2] = engine
-
-        reset_cache()
-
-        assert engine._model is None
-        assert engine._tokenizer is None
-        assert OCREngineKind.GOT_OCR2 not in registry._CACHE
-
-    def test_reset_cache_survives_failing_unload(self, tmp_path: Path) -> None:
+    def test_reset_cache_survives_failing_unload(self) -> None:
         """A broken unload() must not prevent cache clearing."""
         import src.application.engines.registry as registry
         from src.application.engines.registry import reset_cache
@@ -286,85 +233,6 @@ class TestSettingsCache:
         ) as read_spy:
             storage.load()
         assert read_spy.call_count == 1
-
-
-# ---------------------------------------------------------------------------
-# ModelManager availability TTL
-# ---------------------------------------------------------------------------
-
-
-class TestModelAvailabilityTTL:
-    def _write_manifest(self, mgr, model_id: str) -> None:
-        """Create every file from the GOT-OCR2 manifest with the expected size."""
-        from src.infrastructure.model_manager import GOT_OCR2_SPEC
-
-        target = mgr.model_dir(model_id)
-        target.mkdir(parents=True)
-        for f in GOT_OCR2_SPEC.files:
-            size = f.size_bytes or 2048
-            (target / f.name).write_bytes(b"\x00" * size)
-
-    def test_second_call_hits_cache(self, tmp_path: Path) -> None:
-        from src.infrastructure.model_manager import ModelManager
-
-        mgr = ModelManager(models_dir=tmp_path)
-        # First call primes the cache
-        mgr.is_available("got_ocr2")
-        # Patch is_file so the slow path would lie if called again
-        with patch(
-            "pathlib.Path.is_file",
-            side_effect=AssertionError("is_file must not be called within TTL"),
-        ):
-            assert mgr.is_available("got_ocr2") is False
-
-    def test_ttl_expiry_reruns_check(self, tmp_path: Path) -> None:
-        """Simulate clock advance via patched time.monotonic."""
-        import src.infrastructure.model_manager as mm_module
-        from src.infrastructure.model_manager import ModelManager
-
-        mgr = ModelManager(models_dir=tmp_path)
-        mgr.AVAILABILITY_TTL_SEC = 5.0
-
-        t = [100.0]  # start time
-
-        def fake_monotonic() -> float:
-            return t[0]
-
-        with patch.object(mm_module.time, "monotonic", fake_monotonic):
-            mgr.is_available("got_ocr2")  # prime (False), stamped t=100
-            # Now create the files...
-            self._write_manifest(mgr, "got_ocr2")
-            # ...and advance the clock by less than TTL.
-            t[0] = 100.0 + 1.0
-            assert mgr.is_available("got_ocr2") is False  # cache still fresh
-
-            # Advance past the TTL — must re-probe the filesystem.
-            t[0] = 100.0 + 10.0
-            assert mgr.is_available("got_ocr2") is True
-
-    def test_download_invalidates_cache(self, tmp_path: Path) -> None:
-        from src.infrastructure.model_manager import ModelManager
-
-        mgr = ModelManager(models_dir=tmp_path)
-        mgr.AVAILABILITY_TTL_SEC = 60.0  # long TTL so only invalidation clears it
-        mgr.is_available("got_ocr2")  # cache False
-        # Side-effect: manually populate files (simulates download completion)
-        self._write_manifest(mgr, "got_ocr2")
-        # Without invalidation we'd still see False (TTL not expired)
-        assert mgr.is_available("got_ocr2") is False
-        mgr.invalidate_availability("got_ocr2")
-        assert mgr.is_available("got_ocr2") is True
-
-    def test_remove_invalidates_cache(self, tmp_path: Path) -> None:
-        from src.infrastructure.model_manager import ModelManager
-
-        mgr = ModelManager(models_dir=tmp_path)
-        mgr.AVAILABILITY_TTL_SEC = 60.0
-        self._write_manifest(mgr, "got_ocr2")
-        assert mgr.is_available("got_ocr2") is True
-        mgr.remove("got_ocr2")
-        # Cache must be invalidated so the deletion is visible immediately
-        assert mgr.is_available("got_ocr2") is False
 
 
 # ---------------------------------------------------------------------------

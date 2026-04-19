@@ -5,7 +5,6 @@ Covers:
 * Parallel page rasterisation preserves order + handles failures.
 * Deskew detection on large images actually downsamples.
 * Regex compile cache re-uses compiled patterns across calls.
-* GOT-OCR loads fp16 on CUDA, fp32 on CPU.
 """
 
 from __future__ import annotations
@@ -473,66 +472,6 @@ class TestRegexCache:
         )
         post.process("Foo foo FOO", cfg)
         assert len(post._user_regex_cache) == 2
-
-
-# --------------------------------------------------------------------------
-# GOT-OCR fp16 loading
-# --------------------------------------------------------------------------
-
-
-class TestGOTPrecision:
-    def test_cuda_loads_fp16(self) -> None:
-        fake_torch = MagicMock()
-        fake_torch.cuda.is_available.return_value = True
-        fake_torch.float16 = "fp16-marker"
-        fake_torch.float32 = "fp32-marker"
-
-        fake_transformers = MagicMock()
-        fake_model = MagicMock()
-        fake_transformers.AutoModel.from_pretrained.return_value = fake_model
-
-        from src.application.engines.got_ocr_engine import GOTOCREngine
-        from src.infrastructure.model_manager import ModelManager
-
-        mm = MagicMock(spec=ModelManager)
-        mm.model_dir.return_value = Path("/fake/path")
-
-        engine = GOTOCREngine(model_manager=mm)
-        with patch.dict(
-            "sys.modules",
-            {"torch": fake_torch, "transformers": fake_transformers},
-        ):
-            engine._load_model()
-
-        _, kwargs = fake_transformers.AutoModel.from_pretrained.call_args
-        assert kwargs["torch_dtype"] == "fp16-marker"
-        assert kwargs["device_map"] == "cuda"
-
-    def test_cpu_loads_fp32(self) -> None:
-        fake_torch = MagicMock()
-        fake_torch.cuda.is_available.return_value = False
-        fake_torch.float16 = "fp16-marker"
-        fake_torch.float32 = "fp32-marker"
-
-        fake_transformers = MagicMock()
-        fake_transformers.AutoModel.from_pretrained.return_value = MagicMock()
-
-        from src.application.engines.got_ocr_engine import GOTOCREngine
-        from src.infrastructure.model_manager import ModelManager
-
-        mm = MagicMock(spec=ModelManager)
-        mm.model_dir.return_value = Path("/fake/path")
-
-        engine = GOTOCREngine(model_manager=mm)
-        with patch.dict(
-            "sys.modules",
-            {"torch": fake_torch, "transformers": fake_transformers},
-        ):
-            engine._load_model()
-
-        _, kwargs = fake_transformers.AutoModel.from_pretrained.call_args
-        assert kwargs["torch_dtype"] == "fp32-marker"
-        assert kwargs["device_map"] == "cpu"
 
 
 # --------------------------------------------------------------------------

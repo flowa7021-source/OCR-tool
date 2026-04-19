@@ -154,9 +154,9 @@ class OCRPipeline:
 
             # 0. Pre-flight. Runs in ~1 second and fails fast if the
             #    selected engine is not actually usable — missing
-            #    Tesseract binary, missing GOT-OCR 2.0 manifest file,
-            #    stale HTR weights directory. Without this check a
-            #    600 DPI / 4-page job used to spend ~30 seconds on
+            #    Tesseract binary or an incomplete tessdata directory.
+            #    Without this check a 600 DPI / 4-page job used to
+            #    spend ~30 seconds on
             #    preprocessing BEFORE discovering the engine was
             #    misconfigured. Now the user finds out immediately.
             engine_kind = job.profile.ocr.engine
@@ -895,9 +895,9 @@ class OCRPipeline:
                     continue
                 try:
                     if pr.text:
-                        # Engine (e.g. GOT-OCR2) already produced text —
-                        # postprocess that, don't re-read from the PDF where
-                        # the layout serialisation may differ.
+                        # Engine already produced text — postprocess that,
+                        # don't re-read from the PDF where the layout
+                        # serialisation may differ.
                         pr.text = self._postprocess_text(
                             pr.text, job.profile.postprocess
                         )
@@ -925,8 +925,8 @@ class OCRPipeline:
             doc.close()
 
         # Only run pytesseract-based confidence scoring when the OCR engine
-        # was Tesseract. Other engines (GOT-OCR 2.0, future TrOCR) populate
-        # mean_confidence themselves; re-scoring with pytesseract would
+        # was Tesseract. Any future engine should populate mean_confidence
+        # itself; re-scoring with pytesseract would
         # overwrite that with a number derived from a different model.
         from src.shared.types import OCREngineKind
 

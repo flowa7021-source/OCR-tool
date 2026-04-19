@@ -1,7 +1,7 @@
 """Engine registry. Maps :class:`OCREngineKind` values to instances.
 
-Engines are imported lazily so that heavy dependencies (e.g. torch for
-GOT-OCR2) aren't loaded until the user actually selects them.
+Only Tesseract is registered. The lazy-import pattern is preserved so
+a future second engine can be added without restructuring this file.
 """
 
 from __future__ import annotations
@@ -33,18 +33,6 @@ def get_engine(kind: OCREngineKind) -> OCREngine:
         from src.application.engines.tesseract_engine import TesseractEngine
 
         engine: OCREngine = TesseractEngine()
-    elif kind is OCREngineKind.GOT_OCR2:
-        # Lazy import: only attempts to load torch/transformers when
-        # the user actually switches to this engine.
-        try:
-            from src.application.engines.got_ocr_engine import GOTOCREngine
-
-            engine = GOTOCREngine()
-        except ImportError as exc:
-            raise KeyError(
-                f"Движок GOT-OCR2 не установлен: {exc}. "
-                "Установите 'ocr-studio[htr]' или скачайте модель."
-            ) from exc
     else:  # pragma: no cover — exhaustive guard
         raise KeyError(f"Unknown engine kind: {kind}")
 
@@ -74,10 +62,8 @@ def reset_cache() -> None:
     """Clear the engine cache, releasing any expensive resources first.
 
     Every cached engine gets :meth:`OCREngine.unload` called before it
-    is dropped — this is how GOT-OCR 2.0's ~580 MB of weights are
-    returned to the OS after the user switches engines or deletes the
-    model. For engines whose ``unload`` is a no-op (Tesseract) this is
-    free.
+    is dropped. For Tesseract this is a no-op; the hook stays in place
+    for any future engine that holds onto heavy resources.
     """
     for engine in list(_CACHE.values()):
         try:

@@ -52,8 +52,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "associatepdf"; Description: "Ассоциировать файлы .pdf с {#MyAppName}"; GroupDescription: "Ассоциация файлов:"; Flags: unchecked
 
 ; Opt-in wipe of user data on uninstall. Off by default so a normal
-; uninstall preserves settings + downloaded GOT-OCR 2.0 weights (up to
-; ~580 MB), letting the user reinstall without re-downloading.
+; uninstall preserves the user's profiles, logs, and OCR cache —
+; reinstalling over the top picks up where the old install left off.
 [Code]
 var
   CleanUserDataCheckbox: TNewCheckBox;
@@ -70,7 +70,7 @@ begin
     + UninstallProgressForm.StatusLabel.Height + ScaleY(24);
   CleanUserDataCheckbox.Width := UninstallProgressForm.InnerPage.Width
     - (CleanUserDataCheckbox.Left * 2);
-  CleanUserDataCheckbox.Caption := 'Удалить все пользовательские данные (профили, логи, модели ~580 МБ)';
+  CleanUserDataCheckbox.Caption := 'Удалить все пользовательские данные (профили, логи, OCR-кэш)';
   CleanUserDataCheckbox.Checked := False;
 end;
 
@@ -88,24 +88,17 @@ begin
 end;
 
 [Files]
-; Copy everything from PyInstaller output EXCEPT the pre-dense neural-
-; network weights. On the HTR bundle those weights are ~640 MB out of
-; ~2 GB total, and their entropy is so high that LZMA2 max gains 5-10%
-; for 5-10 minutes of CPU. Storing them raw (``nocompression``) slashes
-; the Inno Setup compile step by that same 5-10 min while inflating the
-; final installer by only ~30 MB (2-3% of total). Installed size is
-; unchanged — these files are copied raw to disk either way.
+; Copy everything from PyInstaller output EXCEPT the Tesseract LSTM
+; ``*.traineddata`` blobs — those are already compressed internally,
+; so piping them through LZMA2 gains <5% for several minutes of
+; single-threaded CPU on the ~60 MB total. Storing them raw
+; (``nocompression``, below) cuts compile time without inflating the
+; installer meaningfully; installed size is unchanged either way.
 Source: "..\dist\OCRStudio\*"; DestDir: "{app}"; \
-    Excludes: "*.safetensors,*.traineddata"; \
+    Excludes: "*.traineddata"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
-; GOT-OCR 2.0 weights (model.safetensors, ~580 MB) — raw float tensors,
-; near-incompressible. ``recursesubdirs`` preserves the original nested
-; path (_internal\resources\models\got_ocr2\...) under {app}.
-Source: "..\dist\OCRStudio\*.safetensors"; DestDir: "{app}"; \
-    Flags: ignoreversion recursesubdirs createallsubdirs nocompression
-
-; Tesseract LSTM traineddata (rus/eng/osd, ~60 MB total) — same rationale.
+; Tesseract LSTM traineddata (rus/eng/osd, ~60 MB total).
 Source: "..\dist\OCRStudio\*.traineddata"; DestDir: "{app}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs nocompression
 

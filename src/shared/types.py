@@ -193,19 +193,23 @@ class ExportFormat(StrEnum):
 class OCREngineKind(StrEnum):
     """Selectable OCR back-end engines.
 
-    * ``TESSERACT`` — the default LSTM-based engine from Tesseract 5.x,
-      great at printed text in Russian and English, poor at handwriting.
-    * ``GOT_OCR2`` — Stepfun GOT-OCR2.0 (2024): Apache-2.0 transformer
-      model that handles printed and handwritten text in 80+ languages
-      including Russian. Requires downloading a ~580 MB model weight
-      before first use.
+    Tesseract is currently the only supported engine. The enum
+    remains as a single-value type because ``OCRConfig.engine``,
+    profile-JSON schemas and existing code-paths all branch on
+    ``engine is OCREngineKind.TESSERACT`` — keeping the enum
+    preserves that call-site shape and leaves room for a future
+    second engine without another migration.
 
-    The application ships with Tesseract bundled and advertises GOT-OCR2
-    only when the optional ``htr`` extras + model weights are installed.
+    A previous GOT-OCR 2.0 integration was removed in April 2026
+    after a real-document measurement on the user's transport-
+    invoice corpus showed 3% ground-truth coverage (vs. Tesseract's
+    78%). The transformer hallucinates on multi-panel Russian
+    business forms — out-of-distribution for its Stepfun training
+    data. Keeping it added ~2 GB to the installer, 60-120 s / page
+    CPU cost, and zero practical benefit on the user's documents.
     """
 
     TESSERACT = "tesseract"
-    GOT_OCR2 = "got_ocr2"
 
     @property
     def label(self) -> str:
@@ -218,18 +222,12 @@ class OCREngineKind(StrEnum):
 
 _OCR_ENGINE_LABELS: dict[OCREngineKind, str] = {
     OCREngineKind.TESSERACT: "Tesseract 5 (LSTM, печатный текст)",
-    OCREngineKind.GOT_OCR2: "GOT-OCR 2.0 (рукописный + печатный)",
 }
 
 _OCR_ENGINE_DESCRIPTIONS: dict[OCREngineKind, str] = {
     OCREngineKind.TESSERACT: (
         "Встроенный Tesseract 5 с LSTM-моделями rus + eng. Быстрый и "
-        "точный на печатном тексте, но не справляется с рукописью."
-    ),
-    OCREngineKind.GOT_OCR2: (
-        "Transformer-модель GOT-OCR 2.0 (Stepfun, 2024). Распознаёт "
-        "рукописный и печатный текст на 80+ языках, включая русский. "
-        "Требует скачивания ~580 МБ модели и расширения htr."
+        "точный на печатном тексте."
     ),
 }
 

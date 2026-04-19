@@ -294,18 +294,21 @@ class TestCheckEngineDeepProbe:
         """The scenario the deep check exists to catch: the engine
         claims it's ready, but actually loading the model dies with
         an ImportError / OSError. Without the deep check, first-user
-        launch would hit this — the smoke test must catch it in CI."""
+        launch would hit this — the smoke test must catch it in CI.
+        Tesseract today has no model-load step, but this test uses a
+        mock so it exercises the deep-check path regardless of which
+        engine name we pass."""
         fake_engine = MagicMock()
         fake_engine.is_available.return_value = (True, "")
         fake_engine.name = "Fake"
         fake_engine._load_model = MagicMock(
-            side_effect=ImportError("missing native op libtorchvision_C"),
+            side_effect=ImportError("missing dep"),
         )
         with patch(
             "src.application.engines.registry.get_engine",
             return_value=fake_engine,
         ):
-            rc = cli.check_engine("got_ocr2")
+            rc = cli.check_engine("tesseract")
         assert rc == 1
 
     def test_engine_without_load_model_skips_deep_check(self) -> None:
@@ -337,6 +340,6 @@ class TestCheckEngineDeepProbe:
             "src.application.engines.registry.get_engine",
             return_value=fake_engine,
         ):
-            rc = cli.check_engine("got_ocr2")
+            rc = cli.check_engine("tesseract")
         assert rc == 1
         fake_engine._load_model.assert_not_called()

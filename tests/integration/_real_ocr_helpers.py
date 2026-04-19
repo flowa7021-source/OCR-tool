@@ -131,55 +131,6 @@ requires_real_russian_ocr = pytest.mark.skipif(
 )
 
 
-def _got_ocr2_available() -> tuple[bool, str]:
-    """Return ``(is_available, reason_if_not)`` for the GOT-OCR 2.0 path.
-
-    End-to-end GOT-OCR tests need EVERY piece of the stack present on
-    the host. Probe in order from cheapest to heaviest so the reason
-    string reports the FIRST missing dep — most actionable for
-    whoever's reading the skip message in CI logs.
-    """
-    for dep in (
-        "torch", "transformers", "einops", "accelerate",
-        "torchvision", "verovio", "tiktoken", "safetensors",
-    ):
-        try:
-            __import__(dep)
-        except ImportError:
-            return False, f"Python package '{dep}' not installed"
-
-    try:
-        from src.infrastructure.model_manager import GOT_OCR2_SPEC, ModelManager
-    except ImportError as exc:
-        return False, f"ModelManager import failed: {exc}"
-    mgr = ModelManager()
-    if not mgr.is_available(GOT_OCR2_SPEC.model_id):
-        return False, (
-            "GOT-OCR 2.0 model weights missing — run "
-            ".github/scripts/download_got_ocr2.py"
-        )
-    return True, ""
-
-
-_GOT_OK, _GOT_REASON = _got_ocr2_available()
-
-#: Import-time flag: is every piece of the GOT-OCR 2.0 stack installed?
-REAL_GOT_OCR2_AVAILABLE: bool = _GOT_OK
-"""``True`` when the HTR deps AND the 580 MB model weights are
-both present on the host. End-to-end GOT-OCR tests depend on this.
-A False value carries the reason in :data:`_GOT_REASON` for the
-skip-message."""
-
-requires_real_got_ocr2 = pytest.mark.skipif(
-    not REAL_GOT_OCR2_AVAILABLE,
-    reason=(
-        f"Real GOT-OCR 2.0 unavailable: {_GOT_REASON}. "
-        "Install via `pip install -e '.[htr]'` and run "
-        "`python .github/scripts/download_got_ocr2.py`."
-    ),
-)
-
-
 # ---------------------------------------------------------------------------
 # Tesseract wrapper fixture — points at the SYSTEM tesseract, not our bundle
 # ---------------------------------------------------------------------------

@@ -77,8 +77,6 @@ jobs:
     name: Build installer via reusable workflow
     needs: gate-tests
     uses: ./.github/workflows/build-installer.yml
-    with:
-      with_htr: "true"
     secrets: inherit
 
   sign:

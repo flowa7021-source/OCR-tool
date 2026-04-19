@@ -44,7 +44,6 @@ BUILTIN_NAMES: tuple[str, ...] = (
     "low_quality_scan",
     "contracts_ru",
     "english_text",
-    "handwritten_mixed",
 )
 
 
@@ -153,7 +152,6 @@ class ProfileManager:
             "low_quality_scan": self._build_low_quality,
             "contracts_ru": self._build_contracts_ru,
             "english_text": self._build_english_text,
-            "handwritten_mixed": self._build_handwritten_mixed,
         }
         for name, builder in builders.items():
             try:
@@ -366,10 +364,8 @@ class ProfileManager:
         disk. Intentionally conservative on every axis where an
         aggressive choice could fail or hang:
 
-          * **Tesseract**, never GOT-OCR 2.0 — the transformer path
-            depends on a ~580 MB optional model download; if any of its
-            ``trust_remote_code`` Python modules is missing the job
-            dies at load time.
+          * **Tesseract** — the bundled LSTM engine is always
+            available in the installer.
           * **300 DPI**, not 400 / 600 — at 600 DPI the ``universal_accurate``
             profile hit ``tesseract_timeout`` on dense Russian contract
             pages even with the auto-retry escalation.
@@ -536,91 +532,3 @@ class ProfileManager:
             postprocess=PostprocessConfig(),
         )
 
-    def _build_handwritten_mixed(self) -> ProfileData:
-        """GOT-OCR 2.0 for scans with handwriting, stamps, and mixed fonts.
-
-        When to use (vs. ``quick_reliable``):
-
-          * Documents with **handwritten** notes, signatures, or
-            stamp text — Tesseract's LSTM is printed-font-only and
-            returns 5-25 % conf on handwriting. GOT-OCR 2.0 is a
-            transformer trained on mixed print + handwriting; it
-            routinely reads handwriting at 70-90 %.
-          * **Non-standard fonts** — stylised invoice headers, fancy
-            company logos, decorative stamps. Tesseract guesses at
-            10-40 %; GOT-OCR handles them directly.
-          * **Acceptable trade-offs**: ~580 MB model download, CPU
-            inference 3-5× slower than Tesseract at 300 DPI, GPU
-            (when available) comparable-to-faster.
-
-        When NOT to use:
-
-          * Pure printed-text scans at 300 DPI or better —
-            Tesseract via ``quick_reliable`` is faster and the
-            accuracy delta is not worth the wall-time cost.
-          * When the bundled model file isn't downloaded yet — the
-            first run surfaces a clear "model missing" error and
-            bails. Use the in-app "Download GOT-OCR 2.0" action
-            from the engine menu.
-
-        Preprocessing is deliberately MINIMAL — transformer OCR
-        prefers greyscale input over binarised. CLAHE stays on
-        (cheap, lifts contrast on faded pages). Deskew stays on
-        (angled input wastes the model's positional encoding).
-        Everything else is off.
-
-        Postprocess shares the ``quick_reliable`` identifier-fixup
-        path: even though GOT-OCR reads ИНН / ОГРН more cleanly than
-        Tesseract, a single-digit miss still happens on faded print,
-        and the catalog-assisted rewrite fixes it transparently.
-        """
-        preprocess = PreprocessConfig(
-            deskew=DeskewConfig(enabled=True, auto_detect=True),
-            dewarp=DewarpConfig(enabled=False),
-            binarization=BinarizationConfig(method=BinarizationMethod.NONE),
-            denoise=DenoiseConfig(enabled=False),
-            contrast=ContrastConfig(clahe_enabled=True, clahe_clip=2.5),
-            background=BackgroundConfig(enabled=False),
-        )
-        ocr = OCRConfig(
-            engine=OCREngineKind.GOT_OCR2,
-            languages=["rus", "eng"],
-            primary_language="rus",
-            dpi=300,
-            confidence_threshold=50.0,
-            optimize_level=OptimizeLevel.LOSSLESS,
-            # The word-level / block-level filters (Steps 1 + 2) are
-            # Tesseract-only — they read the pytesseract TSV that
-            # GOT-OCR doesn't produce. Leaving the flags off here
-            # makes the intent explicit; the pipeline already gates
-            # those steps on ``engine == TESSERACT``, so setting
-            # them to True here would be a silent no-op anyway.
-            drop_low_conf_words=False,
-            redact_noisy_blocks=False,
-        )
-        # Postprocess IS engine-agnostic — it operates on the
-        # extracted text after OCR is done, regardless of which
-        # engine produced it. Sharing the ИНН/ОГРН catalog fixup
-        # between quick_reliable and handwritten_mixed means a
-        # corrupt ИНН in GOT-OCR output also gets rewritten to the
-        # canonical form.
-        postprocess = PostprocessConfig(validate_identifiers=True)
-        return ProfileData(
-            name="handwritten_mixed",
-            description=(
-                "GOT-OCR 2.0 (экспериментально). Transformer-модель "
-                "для рукописного текста на белом фоне, математических "
-                "формул и природных изображений (scene text). Требует "
-                "скачивания модели ~1.4 ГБ + CPU-инференс 60-120с/стр. "
-                "Замер Apr 2026 на реальных ТН: coverage 3% vs 78% у "
-                "quick_reliable — модель обучена на других классах "
-                "документов и \"галлюцинирует\" на российских "
-                "транспортных накладных / УПД. Для форменных "
-                "деловых сканов оставайтесь на quick_reliable; этот "
-                "профиль включайте только для преимущественно "
-                "рукописных страниц."
-            ),
-            preprocess=preprocess,
-            ocr=ocr,
-            postprocess=postprocess,
-        )
