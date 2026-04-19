@@ -24,6 +24,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import sys
 import time
@@ -212,9 +213,18 @@ def process_single(
     except Exception:  # noqa: BLE001
         autosave_interval = 0
 
+    # Load the ground-truth ИНН/ОГРН catalog used by the postprocess
+    # step. Silent no-op when the directory is absent.
+    try:
+        from src.core.doc_catalog import load_default_catalog
+
+        _catalog = load_default_catalog()
+    except Exception:  # noqa: BLE001
+        _catalog = None
+
     pipeline = OCRPipeline(
         preprocessor=ImagePreprocessor(),
-        postprocessor=TextPostprocessor(),
+        postprocessor=TextPostprocessor(catalog=_catalog),
         tesseract=tesseract,
         progress_callback=_progress,
         autosave_interval_pages=autosave_interval,
@@ -343,13 +353,35 @@ def process_batch(
 
 
 def check_engine(kind_name: str) -> int:
-    """Probe an OCR engine's availability and exit accordingly.
+    """Probe an OCR engine's availability — DEEP check — and exit.
 
     Stage-gate hook for the build-installer smoke test: catches the
     "bundle is missing a transitive dep" class of bugs (torchvision,
-    verovio, einops, accelerate) BEFORE the installer ships, rather
-    than at first user launch. Returns 0 on success, 1 on failure;
-    the reason is written to stderr so CI logs capture it.
+    verovio, einops, accelerate, tiktoken, safetensors) BEFORE the
+    installer ships, rather than at first user launch. Returns 0 on
+    success, 1 on failure; the reason is written to stderr so CI
+    logs capture it.
+
+    Two layers of verification:
+
+      1. ``engine.is_available()`` — cheap surface check: deps
+         importable, model weights present on disk.
+      2. If the engine has a private ``_load_model()`` method (GOT-OCR
+         2.0 does), call it. This catches:
+           * corrupt / truncated ``model.safetensors`` (the ``min_size``
+             floor in the ModelManager protects against that, but a
+             bit-flip past the size gate still fails here)
+           * torchvision's native C++ ops failing to load (happens
+             when PyInstaller misses ``torchvision/_C.*.pyd`` —
+             ``import torchvision`` succeeds but the first op raises)
+           * HuggingFace ``trust_remote_code`` ``.py`` modules
+             referencing a Python package not installed in the env
+             (``is_available`` probes a fixed list, so new upstream
+             imports slip through without this backstop)
+
+    The deep check is idempotent and gated on the engine actually
+    exposing the method; Tesseract doesn't (no model load step), so
+    only the ``is_available`` surface check runs there.
     """
     from src.application.engines.registry import get_engine
     from src.shared.types import OCREngineKind
@@ -369,11 +401,33 @@ def check_engine(kind_name: str) -> int:
         print(f"Движок '{kind.value}' не зарегистрирован: {exc}", file=sys.stderr)
         return 1
     ok, msg = engine.is_available()
-    if ok:
+    if not ok:
+        print(f"FAIL: {engine.name} недоступен — {msg}", file=sys.stderr)
+        return 1
+
+    # Deep check: actually TRY to load the model. Catches bundle
+    # defects that pass the surface probe (see docstring above).
+    loader = getattr(engine, "_load_model", None)
+    if callable(loader):
+        try:
+            loader()
+        except Exception as exc:  # noqa: BLE001 — any failure = unusable
+            print(
+                f"FAIL: {engine.name} прошёл is_available, но "
+                f"загрузка модели упала: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+        # Release the weights so the probe doesn't leave ~580 MB
+        # of RAM held by the smoke-test shell.
+        with contextlib.suppress(Exception):
+            engine.unload()
+        print(
+            f"OK: {engine.name} готов (is_available + model load OK)"
+        )
+    else:
         print(f"OK: {engine.name} готов к использованию")
-        return 0
-    print(f"FAIL: {engine.name} недоступен — {msg}", file=sys.stderr)
-    return 1
+    return 0
 
 
 def list_profiles() -> int:

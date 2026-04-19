@@ -29,7 +29,7 @@ from src.core.doc_validators import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["DocCatalog", "load_catalog"]
+__all__ = ["DocCatalog", "load_catalog", "load_default_catalog"]
 
 
 @dataclass(frozen=True)
@@ -163,3 +163,37 @@ def load_catalog(expected_dir: Path) -> DocCatalog:
         len(catalog.kpps), len(catalog.names),
     )
     return catalog
+
+
+def load_default_catalog() -> DocCatalog:
+    """Load the catalog from the OS-standard search path.
+
+    Tries in order:
+
+      1. ``USER_CATALOG_DIR`` (``%LOCALAPPDATA%/OCRStudio/expected`` on
+         Windows) — lets the user drop per-install JSON fixtures
+         without a rebuild. Takes precedence so updates take effect
+         on the next run.
+      2. ``BUNDLED_CATALOG_DIR`` (``<app>/expected``) — shipped with
+         the installer so a fresh checkout has a usable catalog.
+
+    Returns an empty :class:`DocCatalog` when neither directory has
+    any loadable JSONs — the feature degrades gracefully.
+
+    Callers (pipeline worker bootstrap, CLI entry) invoke this
+    ONCE and pass the result to every :class:`~src.core.text_postprocessor
+    .TextPostprocessor` they construct. The catalog is read-only and
+    immutable, so it's safe to share across threads / processes.
+    """
+    from src.shared.constants import BUNDLED_CATALOG_DIR, USER_CATALOG_DIR
+
+    for candidate in (USER_CATALOG_DIR, BUNDLED_CATALOG_DIR):
+        if candidate.is_dir():
+            cat = load_catalog(candidate)
+            if not cat.is_empty:
+                return cat
+    logger.debug(
+        "load_default_catalog: no non-empty catalog found in %s or %s",
+        USER_CATALOG_DIR, BUNDLED_CATALOG_DIR,
+    )
+    return DocCatalog()

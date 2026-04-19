@@ -255,3 +255,88 @@ class TestProcessSingle:
 
         assert rc == 0
         assert em_instance.export.called
+
+
+# ---------------------------------------------------------------------------
+# --check-engine deep probe
+# ---------------------------------------------------------------------------
+
+
+class TestCheckEngineDeepProbe:
+    """``check_engine`` now runs a DEEP check — after ``is_available``
+    passes, it also calls the engine's private ``_load_model`` when
+    one exists. These tests lock that behaviour so a refactor that
+    reduces the check to surface-level alone fails loudly.
+
+    The deep check is what the installer smoke test relies on to
+    catch bundle defects (corrupt weights, missing torchvision C++
+    ops, HuggingFace ``trust_remote_code`` imports that probe list
+    missed) BEFORE shipping.
+    """
+
+    def test_available_and_load_succeeds_returns_zero(self) -> None:
+        fake_engine = MagicMock()
+        fake_engine.is_available.return_value = (True, "")
+        fake_engine.name = "Fake"
+        fake_engine._load_model = MagicMock()  # succeeds (returns None)
+        fake_engine.unload = MagicMock()
+        with patch(
+            "src.application.engines.registry.get_engine",
+            return_value=fake_engine,
+        ):
+            rc = cli.check_engine("tesseract")
+        assert rc == 0
+        fake_engine._load_model.assert_called_once()
+        # Weights released after the probe so the caller's RAM stays sane.
+        fake_engine.unload.assert_called_once()
+
+    def test_available_but_load_crashes_returns_one(self) -> None:
+        """The scenario the deep check exists to catch: the engine
+        claims it's ready, but actually loading the model dies with
+        an ImportError / OSError. Without the deep check, first-user
+        launch would hit this — the smoke test must catch it in CI."""
+        fake_engine = MagicMock()
+        fake_engine.is_available.return_value = (True, "")
+        fake_engine.name = "Fake"
+        fake_engine._load_model = MagicMock(
+            side_effect=ImportError("missing native op libtorchvision_C"),
+        )
+        with patch(
+            "src.application.engines.registry.get_engine",
+            return_value=fake_engine,
+        ):
+            rc = cli.check_engine("got_ocr2")
+        assert rc == 1
+
+    def test_engine_without_load_model_skips_deep_check(self) -> None:
+        """Tesseract has no model-load step; the deep check must skip
+        cleanly rather than explode on a missing attribute."""
+        # Plain object (NOT a MagicMock) so ``getattr(engine, "_load_model",
+        # None)`` genuinely returns None — MagicMock would auto-create one.
+        class _NoLoad:
+            name = "Tesseract"
+
+            def is_available(self):
+                return (True, "")
+
+        with patch(
+            "src.application.engines.registry.get_engine",
+            return_value=_NoLoad(),
+        ):
+            rc = cli.check_engine("tesseract")
+        assert rc == 0
+
+    def test_is_available_failure_short_circuits(self) -> None:
+        """When ``is_available`` reports False, the deep check must
+        not run — a missing dep / model shouldn't try to load."""
+        fake_engine = MagicMock()
+        fake_engine.is_available.return_value = (False, "torch not found")
+        fake_engine.name = "Fake"
+        fake_engine._load_model = MagicMock()
+        with patch(
+            "src.application.engines.registry.get_engine",
+            return_value=fake_engine,
+        ):
+            rc = cli.check_engine("got_ocr2")
+        assert rc == 1
+        fake_engine._load_model.assert_not_called()

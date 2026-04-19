@@ -384,7 +384,28 @@ def _worker_run_job(
         current_stage = "build_pipeline"
         worker_logger.info("[4/6] Building pipeline (preprocess + postprocess)…")
         preprocessor = ImagePreprocessor()
-        postprocessor = TextPostprocessor()
+        # Load the ground-truth ИНН/ОГРН catalog ONCE per worker and hand
+        # it to every TextPostprocessor constructed in this process. An
+        # empty catalog (no ``expected/`` directory present) makes
+        # ``PostprocessConfig.validate_identifiers`` a silent no-op — the
+        # flag stays safe to enable on profiles that ship to users who
+        # haven't populated a catalog.
+        try:
+            from src.core.doc_catalog import load_default_catalog
+
+            catalog = load_default_catalog()
+            worker_logger.info(
+                "[4/6] DocCatalog: %d inn, %d ogrn, %d kpp, %d name(s)",
+                len(catalog.inns), len(catalog.ogrns),
+                len(catalog.kpps), len(catalog.names),
+            )
+        except Exception as exc:  # noqa: BLE001
+            worker_logger.warning(
+                "[4/6] DocCatalog load failed (continuing without): %s",
+                exc,
+            )
+            catalog = None
+        postprocessor = TextPostprocessor(catalog=catalog)
 
         def _progress(current: int, total: int, stage: str) -> None:
             # Fan out to the host bridge AND log locally so we have a

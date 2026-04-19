@@ -180,6 +180,16 @@ def build_pyinstaller(onefile: bool = False, with_htr: bool = False) -> int:
             if (PROJECT_ROOT / "resources" / "ghostscript").is_dir()
             else []
         ),
+        # ``expected/`` ground-truth JSON corpus — used by
+        # :func:`src.core.doc_catalog.load_default_catalog` at worker
+        # startup to seed the ИНН / ОГРН auto-correct lookup table.
+        # Optional on dev checkouts (the folder may not exist yet)
+        # for the same reason we gate Ghostscript above.
+        *(
+            [f"--add-data=expected{sep}expected"]
+            if (PROJECT_ROOT / "expected").is_dir()
+            else []
+        ),
         # Hidden imports that PyInstaller sometimes misses
         "--collect-submodules=ocrmypdf",
         "--collect-submodules=pikepdf",

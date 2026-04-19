@@ -113,3 +113,93 @@ class TestDocCatalog:
             names=frozenset({"d", "e"}),
         )
         assert len(cat) == 5
+
+
+class TestLoadDefaultCatalog:
+    """``load_default_catalog`` is the production entry point — walks
+    the standard search path so the CLI / worker bootstrap don't have
+    to hard-code directory lookup logic. These tests pin the search
+    order AND the graceful-empty fallback."""
+
+    def test_prefers_user_dir_over_bundled(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """When the user has dropped a catalog under
+        ``USER_CATALOG_DIR`` we must read from there — NOT from the
+        installer bundle. User customisation takes precedence over
+        ship defaults."""
+        import json
+
+        from src.core import doc_catalog as dc
+
+        user_dir = tmp_path / "user"
+        bundled_dir = tmp_path / "bundled"
+        user_dir.mkdir()
+        bundled_dir.mkdir()
+
+        # Both dirs have a catalog, with different ИНН. The user
+        # one is the one we expect to win.
+        (user_dir / "u.json").write_text(
+            json.dumps({"inn": "7813266190"}), encoding="utf-8",
+        )
+        (bundled_dir / "b.json").write_text(
+            json.dumps({"inn": "7707820890"}), encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            "src.shared.constants.USER_CATALOG_DIR", user_dir,
+        )
+        monkeypatch.setattr(
+            "src.shared.constants.BUNDLED_CATALOG_DIR", bundled_dir,
+        )
+
+        cat = dc.load_default_catalog()
+        assert cat.inns == frozenset({"7813266190"})
+        assert "7707820890" not in cat.inns, (
+            "Bundled catalog leaked through when USER_CATALOG_DIR "
+            "had its own content — search order broken."
+        )
+
+    def test_falls_back_to_bundled_when_user_dir_empty(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        import json
+
+        from src.core import doc_catalog as dc
+
+        user_dir = tmp_path / "user"
+        bundled_dir = tmp_path / "bundled"
+        user_dir.mkdir()  # exists but empty
+        bundled_dir.mkdir()
+        (bundled_dir / "b.json").write_text(
+            json.dumps({"inn": "7707820890"}), encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            "src.shared.constants.USER_CATALOG_DIR", user_dir,
+        )
+        monkeypatch.setattr(
+            "src.shared.constants.BUNDLED_CATALOG_DIR", bundled_dir,
+        )
+
+        cat = dc.load_default_catalog()
+        assert cat.inns == frozenset({"7707820890"})
+
+    def test_both_missing_returns_empty_catalog(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Dev checkouts without an ``expected/`` directory must not
+        crash the pipeline — they get an empty catalog and every
+        ``validate_identifiers`` call becomes a no-op."""
+        from src.core import doc_catalog as dc
+
+        monkeypatch.setattr(
+            "src.shared.constants.USER_CATALOG_DIR",
+            tmp_path / "nope-user",
+        )
+        monkeypatch.setattr(
+            "src.shared.constants.BUNDLED_CATALOG_DIR",
+            tmp_path / "nope-bundled",
+        )
+        cat = dc.load_default_catalog()
+        assert cat.is_empty
