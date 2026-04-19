@@ -702,7 +702,7 @@ class OCRPipeline:
                     input_path, idx, dpi=profile.ocr.dpi
                 )
                 processed, angle = self.preprocessor.process(
-                    img, profile.preprocess
+                    img, profile.preprocess, dpi=profile.ocr.dpi
                 )
                 self._save_png(processed, png_path)
                 slots[idx] = PageResult(

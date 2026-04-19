@@ -1,7 +1,7 @@
 {
   "name": "low_quality_scan",
   "description": "Агрессивная обработка для плохо отсканированных документов",
-  "schema_version": 2,
+  "schema_version": 3,
   "preprocess": {
     "deskew": {
       "enabled": true,
@@ -73,7 +73,11 @@
     "tesseract_timeout": 300,
     "optimize_level": 1,
     "skip_text": true,
-    "max_pages": 0
+    "max_pages": 0,
+    "extra_tesseract_params": {
+      "preserve_interword_spaces": "1",
+      "tessedit_do_invert": "0"
+    }
   },
   "postprocess": {
     "autocorrect_russian": true,

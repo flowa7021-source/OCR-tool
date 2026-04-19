@@ -65,6 +65,34 @@ _RESIDUAL_FINE_RANGE_DEG: float = 1.0
 _RESIDUAL_FINE_STEP_DEG: float = 0.1
 
 
+#: Baseline DPI at which profile kernel sizes are specified. A ``ksize=3``
+#: median blur at 300 DPI removes features ~0.01 inch wide; at 600 DPI
+#: the same ksize removes features ~0.005 inch wide, which is sub-glyph
+#: noise only — scaled-up (ksize=7) it removes the same physical feature
+#: size regardless of render DPI. This lets profile authors write kernel
+#: sizes once at 300 DPI and have them stay physically correct when the
+#: user picks 400 / 500 / 600 DPI in the same profile.
+_KSIZE_BASELINE_DPI: int = 300
+
+
+def _scale_ksize(ksize: int, dpi: int | None, *, minimum: int = 3) -> int:
+    """Scale an odd kernel size by ``dpi / 300``, rounding to the nearest odd.
+
+    Returns ``ksize`` unchanged when ``dpi is None`` (baseline call site)
+    or when the DPI is below the baseline (don't shrink kernels — risks
+    no-op filters).
+
+    The result is always odd and ≥ ``minimum`` so it's safe to hand
+    straight to OpenCV APIs that require ``ksize % 2 == 1``.
+    """
+    if dpi is None or dpi <= _KSIZE_BASELINE_DPI:
+        return max(minimum, ksize)
+    scaled = round(ksize * dpi / _KSIZE_BASELINE_DPI)
+    if scaled % 2 == 0:
+        scaled += 1
+    return max(minimum, scaled)
+
+
 def _measure_residual_skew(image: np.ndarray) -> float:
     """Return the angle in degrees that would straighten ``image``.
 
@@ -165,7 +193,11 @@ class ImagePreprocessor:
     # ------------------------------------------------------------------
 
     def process(
-        self, image: np.ndarray, config: PreprocessConfig
+        self,
+        image: np.ndarray,
+        config: PreprocessConfig,
+        *,
+        dpi: int | None = None,
     ) -> tuple[np.ndarray, float]:
         """Apply the full preprocessing pipeline to ``image``.
 
@@ -181,6 +213,14 @@ class ImagePreprocessor:
         Args:
             image: Grayscale or BGR image as a numpy array.
             config: Full preprocessing configuration.
+            dpi: The render DPI of ``image``. When provided, kernel sizes
+                for denoise / background-blur / Sauvola window / border
+                removal / adaptive-threshold are scaled by ``dpi / 300``
+                so the same profile produces physically consistent
+                filtering at 300, 400, 500 and 600 DPI. ``None`` (the
+                default) keeps legacy ``ksize`` values unchanged — kept
+                for tests that construct configs directly without a
+                meaningful DPI.
 
         Returns:
             Tuple ``(processed_image, detected_skew_angle)``. The angle is the
@@ -216,13 +256,18 @@ class ImagePreprocessor:
         ):
             from src.core.border_remover import remove_border_lines
 
+            scaled_min_line = (
+                int(round(config.border_removal.min_line_length * dpi / _KSIZE_BASELINE_DPI))
+                if dpi is not None and dpi > _KSIZE_BASELINE_DPI
+                else config.border_removal.min_line_length
+            )
             logger.debug(
                 "Preprocess: border removal (min_line_length=%d)",
-                config.border_removal.min_line_length,
+                scaled_min_line,
             )
             current = remove_border_lines(
                 current,
-                min_line_length=config.border_removal.min_line_length,
+                min_line_length=scaled_min_line,
             )
 
         # Background removal FIRST, then contrast. The old order (CLAHE
@@ -234,7 +279,7 @@ class ImagePreprocessor:
         # across the page.
         if config.background.enabled:
             logger.debug("Preprocess: background removal")
-            current = self._apply_background_removal(current, config.background)
+            current = self._apply_background_removal(current, config.background, dpi=dpi)
 
         if config.contrast.clahe_enabled or config.contrast.manual_enabled:
             logger.debug("Preprocess: contrast adjustment")
@@ -242,11 +287,11 @@ class ImagePreprocessor:
 
         if config.denoise.enabled and config.denoise.steps:
             logger.debug("Preprocess: denoise chain (%d steps)", len(config.denoise.steps))
-            current = self._apply_denoise(current, config.denoise)
+            current = self._apply_denoise(current, config.denoise, dpi=dpi)
 
         if config.binarization.method != BinarizationMethod.NONE:
             logger.debug("Preprocess: binarization %s", config.binarization.method.value)
-            current = self._apply_binarization(current, config.binarization)
+            current = self._apply_binarization(current, config.binarization, dpi=dpi)
 
         return current, angle
 
@@ -337,12 +382,18 @@ class ImagePreprocessor:
         return self._dewarp_handler.dewarp(img, cfg)
 
     def _apply_binarization(
-        self, img: np.ndarray, cfg: BinarizationConfig
+        self,
+        img: np.ndarray,
+        cfg: BinarizationConfig,
+        *,
+        dpi: int | None = None,
     ) -> np.ndarray:
         """Convert ``img`` to a binary (black/white) image.
 
         Supports OTSU, adaptive Gaussian, adaptive mean, and Sauvola (via
-        :mod:`skimage`).
+        :mod:`skimage`). The adaptive-threshold block size and the Sauvola
+        window are scaled by ``dpi / 300`` so the local-context window
+        covers a stable fraction of a glyph regardless of render DPI.
         """
         self._validate_image(img)
         gray = _to_grayscale(img)
@@ -357,7 +408,8 @@ class ImagePreprocessor:
 
             if method == BinarizationMethod.ADAPTIVE_GAUSSIAN:
                 block = validate_odd_int(
-                    cfg.adaptive_block_size, name="adaptive_block_size"
+                    _scale_ksize(cfg.adaptive_block_size, dpi),
+                    name="adaptive_block_size",
                 )
                 return cv2.adaptiveThreshold(
                     gray,
@@ -370,7 +422,8 @@ class ImagePreprocessor:
 
             if method == BinarizationMethod.ADAPTIVE_MEAN:
                 block = validate_odd_int(
-                    cfg.adaptive_block_size, name="adaptive_block_size"
+                    _scale_ksize(cfg.adaptive_block_size, dpi),
+                    name="adaptive_block_size",
                 )
                 return cv2.adaptiveThreshold(
                     gray,
@@ -385,7 +438,8 @@ class ImagePreprocessor:
                 return _sauvola_binarize(
                     gray,
                     window_size=validate_odd_int(
-                        cfg.sauvola_window, name="sauvola_window"
+                        _scale_ksize(cfg.sauvola_window, dpi),
+                        name="sauvola_window",
                     ),
                     k=float(cfg.sauvola_k),
                 )
@@ -396,41 +450,66 @@ class ImagePreprocessor:
         # NONE or unknown: return grayscale unchanged.
         return gray
 
-    def _apply_denoise(self, img: np.ndarray, cfg: DenoiseConfig) -> np.ndarray:
+    def _apply_denoise(
+        self,
+        img: np.ndarray,
+        cfg: DenoiseConfig,
+        *,
+        dpi: int | None = None,
+    ) -> np.ndarray:
         """Apply the ordered denoise chain."""
         self._validate_image(img)
         current = img
         for index, step in enumerate(cfg.steps):
             if not step.enabled:
                 continue
-            current = self._apply_denoise_step(current, step, index)
+            current = self._apply_denoise_step(current, step, index, dpi=dpi)
         return current
 
     def _apply_denoise_step(
-        self, img: np.ndarray, step: DenoiseStep, index: int
+        self,
+        img: np.ndarray,
+        step: DenoiseStep,
+        index: int,
+        *,
+        dpi: int | None = None,
     ) -> np.ndarray:
-        """Apply a single denoising step."""
+        """Apply a single denoising step.
+
+        Kernel sizes for median / Gaussian / morphological steps scale
+        with ``dpi / 300`` so a profile tuned at 300 DPI still removes
+        the same physical feature sizes at 600 DPI. NLM's ``h``
+        (strength) is DPI-independent and is not scaled.
+        """
         method = step.method
         try:
             if method == DenoiseMethod.MEDIAN:
-                ksize = validate_odd_int(step.ksize, name=f"denoise[{index}].ksize")
+                ksize = validate_odd_int(
+                    _scale_ksize(step.ksize, dpi),
+                    name=f"denoise[{index}].ksize",
+                )
                 return cv2.medianBlur(img, ksize)
 
             if method == DenoiseMethod.GAUSSIAN:
-                ksize = validate_odd_int(step.ksize, name=f"denoise[{index}].ksize")
+                ksize = validate_odd_int(
+                    _scale_ksize(step.ksize, dpi),
+                    name=f"denoise[{index}].ksize",
+                )
                 sigma = max(0.0, float(step.sigma))
                 return cv2.GaussianBlur(img, (ksize, ksize), sigmaX=sigma, sigmaY=sigma)
 
             if method == DenoiseMethod.MORPH_OPEN:
                 ksize = validate_odd_int(
-                    step.morph_ksize, name=f"denoise[{index}].morph_ksize"
+                    _scale_ksize(step.morph_ksize, dpi),
+                    name=f"denoise[{index}].morph_ksize",
                 )
                 kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (ksize, ksize))
                 return cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel)
 
             if method == DenoiseMethod.MORPH_CLOSE:
                 ksize = validate_odd_int(
-                    step.morph_ksize, name=f"denoise[{index}].morph_ksize"
+                    _scale_ksize(step.morph_ksize, dpi),
+                    name=f"denoise[{index}].morph_ksize",
                 )
                 kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (ksize, ksize))
                 return cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)
@@ -487,15 +566,23 @@ class ImagePreprocessor:
         return current
 
     def _apply_background_removal(
-        self, img: np.ndarray, cfg: BackgroundConfig
+        self,
+        img: np.ndarray,
+        cfg: BackgroundConfig,
+        *,
+        dpi: int | None = None,
     ) -> np.ndarray:
         """Remove illumination gradient by dividing the image by its blur.
 
         The blurred version approximates the background; dividing the original
-        by it flattens shading while preserving foreground text.
+        by it flattens shading while preserving foreground text. The blur
+        kernel scales with ``dpi / 300`` so the gradient estimate covers a
+        consistent physical region across DPIs.
         """
         self._validate_image(img)
-        ksize = validate_odd_int(cfg.blur_kernel, name="background.blur_kernel")
+        ksize = validate_odd_int(
+            _scale_ksize(cfg.blur_kernel, dpi), name="background.blur_kernel"
+        )
 
         try:
             blurred = cv2.GaussianBlur(img, (ksize, ksize), 0)
@@ -529,7 +616,11 @@ class ImagePreprocessor:
 
 
 def preview_step(
-    image: np.ndarray, step_name: str, config: PreprocessConfig
+    image: np.ndarray,
+    step_name: str,
+    config: PreprocessConfig,
+    *,
+    dpi: int | None = None,
 ) -> np.ndarray:
     """Return the intermediate result up to ``step_name`` (inclusive).
 
@@ -542,6 +633,8 @@ def preview_step(
         step_name: One of ``"original"``, ``"dewarp"``, ``"deskew"``,
             ``"contrast"``, ``"background"``, ``"denoise"``, ``"binarization"``.
         config: Full preprocessing configuration.
+        dpi: Optional render DPI — forwarded to steps with scalable
+            kernels so the preview matches the final pipeline output.
 
     Returns:
         Image array representing the pipeline's state after ``step_name``.
@@ -578,17 +671,21 @@ def preview_step(
         return current
 
     if config.background.enabled:
-        current = preprocessor._apply_background_removal(current, config.background)
+        current = preprocessor._apply_background_removal(
+            current, config.background, dpi=dpi
+        )
     if step_name == "background":
         return current
 
     if config.denoise.enabled and config.denoise.steps:
-        current = preprocessor._apply_denoise(current, config.denoise)
+        current = preprocessor._apply_denoise(current, config.denoise, dpi=dpi)
     if step_name == "denoise":
         return current
 
     if config.binarization.method != BinarizationMethod.NONE:
-        current = preprocessor._apply_binarization(current, config.binarization)
+        current = preprocessor._apply_binarization(
+            current, config.binarization, dpi=dpi
+        )
     return current
 
 

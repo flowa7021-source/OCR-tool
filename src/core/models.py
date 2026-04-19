@@ -216,6 +216,29 @@ class OCRConfig:
     #: keep behaviour byte-exact for profiles that haven't opted in;
     #: ``quick_reliable`` turns it on.
     redact_noisy_blocks: bool = False
+    #: Freeform ``-c key=value`` Tesseract parameters passed through
+    #: OCRmyPDF's ``tesseract_config`` kwarg. Profile authors use this
+    #: to toggle internal Tesseract behaviour that isn't exposed as a
+    #: first-class OCRConfig field. The recommended defaults for this
+    #: app (set by the builtin profile builders) are:
+    #:
+    #:   * ``preserve_interword_spaces=1`` — keeps the spaces between
+    #:     columns in tables and forms; without this Tesseract collapses
+    #:     variable-width gaps, destroying column alignment.
+    #:   * ``tessedit_do_invert=0`` — disables the built-in
+    #:     "maybe the page is white-on-black" detector. It triggers
+    #:     false positives on dark photos / scanner edge shadows and
+    #:     produces garbled output; our preprocessing already hands
+    #:     Tesseract a correctly-polarised binary image.
+    #:
+    #: Profile-specific keys (e.g. ``load_freq_dawg=0`` for contracts
+    #: with lots of ИНН / ОГРН digits, where the frequency dictionary
+    #: mis-corrects them) are set by the relevant builder method.
+    #:
+    #: Stored as ``dict[str, str]`` so every value round-trips through
+    #: JSON unchanged — Tesseract's CLI accepts all values as strings
+    #: anyway ("1" / "0", not ``True`` / ``False``).
+    extra_tesseract_params: dict[str, str] = field(default_factory=dict)
 
     @property
     def tesseract_language_string(self) -> str:
@@ -326,7 +349,7 @@ class PostprocessConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 2
+PROFILE_SCHEMA_VERSION: int = 3
 
 
 @dataclass
@@ -404,7 +427,15 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         data["schema_version"] = 2
         version = 2
 
-    # Future migrations go here: `if version < 3: ...`
+    # v2 → v3: add the ``extra_tesseract_params`` dict. Old profiles
+    # without it get the empty default (no -c flags), which preserves
+    # their exact prior behaviour; the builtin profile builders seed
+    # the recommended defaults on freshly-installed machines.
+    if version < 3:
+        ocr = data.setdefault("ocr", {})
+        ocr.setdefault("extra_tesseract_params", {})
+        data["schema_version"] = 3
+        version = 3
 
     return data
 

@@ -120,6 +120,10 @@ class OCRmyPDFOptions:
     #: the bundle (graceful-degradation path, logged at map time).
     user_words: Path | None = None
     user_patterns: Path | None = None
+    #: Tesseract ``-c key=value`` parameters forwarded via OCRmyPDF's
+    #: ``tesseract_config``. Merged into the same list as the
+    #: whitelist / blacklist strings in :func:`_build_tesseract_config`.
+    extra_tesseract_params: dict[str, str] = field(default_factory=dict)
 
 
 def map_ocr_config(
@@ -162,21 +166,48 @@ def map_ocr_config(
         progress_bar=progress_bar,
         user_words=user_words,
         user_patterns=user_patterns,
+        extra_tesseract_params=dict(cfg.extra_tesseract_params),
     )
 
 
 def _build_tesseract_config(options: OCRmyPDFOptions) -> list[str] | None:
     """Assemble the ``tesseract_config`` list for whitelist/blacklist.
 
+    Also emits ``-c key=value`` entries for every pair in
+    :attr:`OCRmyPDFOptions.extra_tesseract_params`. Key names are
+    validated against a minimal safe-char regex so a stray newline or
+    shell metacharacter in a hand-edited profile can't break out of the
+    ``-c`` argument (OCRmyPDF hands the list straight to Tesseract's
+    CLI). Invalid keys are dropped with a warning.
+
     Returns:
-        List of config strings, or ``None`` if neither whitelist nor
-        blacklist is set.
+        List of config strings, or ``None`` if nothing was set.
     """
     extras: list[str] = []
     if options.char_whitelist:
         extras.append(f"-c tessedit_char_whitelist={options.char_whitelist}")
     if options.char_blacklist:
         extras.append(f"-c tessedit_char_blacklist={options.char_blacklist}")
+
+    import re as _re
+
+    _key_re = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    for key, value in options.extra_tesseract_params.items():
+        if not _key_re.fullmatch(str(key)):
+            logger.warning(
+                "Ignoring Tesseract -c parameter with invalid key %r", key,
+            )
+            continue
+        # Reject values containing control chars or embedded newlines —
+        # harmless Tesseract values are "0"/"1"/numbers/plain strings.
+        value_str = str(value)
+        if any(ch in value_str for ch in "\n\r\x00"):
+            logger.warning(
+                "Ignoring Tesseract -c %s with control characters in value", key,
+            )
+            continue
+        extras.append(f"-c {key}={value_str}")
+
     return extras or None
 
 

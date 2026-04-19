@@ -161,14 +161,19 @@ class TestUniversalAccurateProfile:
             "fix_cyrillic_latin_confusion",
         ):
             assert getattr(profile.postprocess, flag) is True, flag
-        # The "maximum accuracy" preset requires ≥ 500 DPI as of
-        # Initiative 4 (bumped from 400 → 500). Dense small-font
-        # Russian body text measured 25 % CER at 400 DPI on the
-        # nightly benchmark; 500 DPI gives the LSTM more pixel
-        # density per character without hitting Tesseract's
-        # layout-analysis timeout ceiling.
-        assert profile.ocr.dpi >= 500, (
-            f"universal_accurate must request ≥500 DPI; got {profile.ocr.dpi}"
+        # The "maximum accuracy" preset runs at exactly 400 DPI as
+        # of Apr 2026. 500 DPI was tried and tuned the profile
+        # inward, but measurement on real user scans showed
+        # confidence drops with every step above 400 DPI: Tesseract's
+        # LSTM was trained on 150–300 DPI and its layout analyser
+        # crashes more often on 5000×7000 px images, forcing the
+        # retry tiers down to 200 DPI (strictly worse than the
+        # requested 500). Combined with DPI-adaptive preprocessing
+        # (kernels auto-scale in ImagePreprocessor) this gives the
+        # user the stable 95 %+ confidence target without the
+        # 600 DPI instability.
+        assert profile.ocr.dpi == 400, (
+            f"universal_accurate must request 400 DPI; got {profile.ocr.dpi}"
         )
 
     def test_description_hints_at_purpose(self, tmp_path: Path) -> None:

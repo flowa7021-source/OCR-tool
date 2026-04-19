@@ -57,7 +57,11 @@
     "skip_text": true,
     "max_pages": 0,
     "drop_low_conf_words": true,
-    "redact_noisy_blocks": true
+    "redact_noisy_blocks": true,
+    "extra_tesseract_params": {
+      "preserve_interword_spaces": "1",
+      "tessedit_do_invert": "0"
+    }
   },
   "postprocess": {
     "autocorrect_russian": true,
@@ -71,5 +75,5 @@
   },
   "builtin": true,
   "created_at": "2026-04-16T20:30:00.000000",
-  "schema_version": 2
+  "schema_version": 3
 }

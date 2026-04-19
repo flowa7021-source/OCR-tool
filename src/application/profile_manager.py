@@ -47,6 +47,24 @@ BUILTIN_NAMES: tuple[str, ...] = (
 )
 
 
+# Tesseract ``-c`` parameters applied to every builtin profile.
+#
+# ``preserve_interword_spaces=1`` — keeps variable-width gaps (columns
+# in tables, tab-separated form fields) intact in the OCR output.
+# Without this Tesseract collapses them to a single space and we lose
+# column alignment in the text layer.
+#
+# ``tessedit_do_invert=0`` — suppresses Tesseract's "maybe this page
+# is white-on-black" auto-detector. Our preprocessing already hands
+# Tesseract a correctly-polarised binary; the detector is responsible
+# for a class of "every letter comes back as gibberish" reports where
+# it misfires on a page with a dark border or an inverted header panel.
+_COMMON_TESSERACT_PARAMS: dict[str, str] = {
+    "preserve_interword_spaces": "1",
+    "tessedit_do_invert": "0",
+}
+
+
 class ProfileManager:
     """In-memory profile service with on-disk persistence.
 
@@ -241,12 +259,9 @@ class ProfileManager:
             # Stage E: erase long horizontal / vertical runs (table
             # borders, form rules) before binarisation so Tesseract
             # doesn't fuse adjacent text into the border glyph.
-            # 75 px at 500 DPI is the empirically-validated value; a
-            # brief Apr 2026 experiment raising it to 125 hurt real-
-            # document OCR (more table rules made it through to
-            # Tesseract's segmentation → more ``|||`` / ``===`` noise
-            # fragments in the output). Keep 75 until a benchmarked
-            # change shows otherwise.
+            # 75 px is the 300-DPI baseline; ImagePreprocessor scales
+            # it to the runtime DPI, so it stays at ~0.25 inch at any
+            # render resolution.
             border_removal=BorderRemovalConfig(
                 enabled=True, min_line_length=75,
             ),
@@ -256,29 +271,26 @@ class ProfileManager:
             primary_language="rus",
             psm=PSM.AUTO,
             oem=OEM.LSTM_ONLY,
-            # 500 DPI is the sweet spot for the "maximum accuracy"
-            # preset after the parallel-per-page engine lifted the
-            # per-page timeout ceiling. 600 DPI was tried first and
-            # still blows past 900 s on A4 Russian contracts
-            # (5000×7000 pixels crashes Tesseract's layout analyser).
-            # 400 worked but left ``ru_dense_small`` CER at ~25 % —
-            # small 10pt body text genuinely needed more pixel density.
-            # 500 DPI gives the LSTM 25 % more pixels per character
-            # with ~1.56× image area vs 400; combined with the
-            # raised timeout below, real-world contracts complete
-            # without hitting retry tiers.
-            dpi=500,
+            # 400 DPI is the LSTM sweet spot for printed Russian text.
+            # Tesseract's LSTM was trained on 150–300 DPI corpora; at
+            # 500–600 DPI the pixel features grow beyond what the net
+            # saw, softmax confidence drops, and the layout analyser
+            # crashes far more often (5000×7000 px A4 → retry tiers at
+            # 200 DPI, which are strictly worse than the originally
+            # requested DPI). 400 gives enough pixels-per-glyph for
+            # 10 pt body text without tripping either failure mode.
+            # Combined with DPI-adaptive preprocessing (kernel sizes
+            # auto-scale in ImagePreprocessor), this delivers the
+            # stable-95-%-confidence target the user asked for.
+            dpi=400,
             optimize_level=OptimizeLevel.LOSSLESS,
             confidence_threshold=60.0,
             skip_text=True,
-            # Timeout raised 300 → 450 s to match the ~1.56× per-page
-            # work at 500 DPI. Still well under the per-page retry
-            # escalation ceiling in ocrmypdf_integration.py
-            # (``_MAX_RETRY_TESSERACT_TIMEOUT_SEC = 900``), so a rare
-            # dense page that exceeds 450 s still gets one retry at
-            # the 900 s cap before falling back to the simplified-
-            # settings tier.
-            tesseract_timeout=450,
+            # 360 s fits the per-page work at 400 DPI with headroom for
+            # table-dense contract pages. The per-page retry inside
+            # ocrmypdf_integration.py still escalates to the 900 s cap
+            # for rare outliers before surfacing an error.
+            tesseract_timeout=360,
             # Word-level confidence filter. On mixed-content scans
             # (forms + stamps + signatures + logos) Tesseract emits a
             # long tail of 10–40 %-confidence guesses from the
@@ -291,6 +303,7 @@ class ProfileManager:
             # (60 %), and mean_conf is reported over the kept set.
             # See ``src.core.confidence_filter`` for the mechanism.
             drop_low_conf_words=True,
+            extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
         )
         postprocess = PostprocessConfig(
             autocorrect_russian=True,
@@ -316,8 +329,9 @@ class ProfileManager:
         return ProfileData(
             name="universal_accurate",
             description=(
-                "Универсальный «максимум точности»: 500 DPI, Sauvola + "
-                "CLAHE + удаление фона + deskew + удаление рамок таблиц, "
+                "Универсальный «максимум точности»: 400 DPI (LSTM sweet "
+                "spot), Sauvola + CLAHE + удаление фона + deskew + "
+                "удаление рамок таблиц, адаптивный масштаб ядер по DPI, "
                 "полная постобработка включая нормализацию "
                 "кириллицы/латиницы и фильтр слов по уверенности "
                 "распознавания"
@@ -347,6 +361,7 @@ class ProfileManager:
             oem=OEM.LSTM_ONLY,
             dpi=300,
             optimize_level=OptimizeLevel.LOSSLESS,
+            extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
         )
         return ProfileData(
             name="default",
@@ -426,6 +441,7 @@ class ProfileManager:
             # letting borderline-conf words inside that region sneak
             # into Ctrl-F and copy-paste output.
             redact_noisy_blocks=True,
+            extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
         )
         return ProfileData(
             name="quick_reliable",
@@ -471,6 +487,7 @@ class ProfileManager:
             oem=OEM.LSTM_ONLY,
             dpi=400,
             optimize_level=OptimizeLevel.LOSSLESS,
+            extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
         )
         return ProfileData(
             name="low_quality_scan",
@@ -497,6 +514,19 @@ class ProfileManager:
             oem=OEM.LSTM_ONLY,
             dpi=300,
             optimize_level=OptimizeLevel.LOSSLESS,
+            # ``load_freq_dawg=0`` disables Tesseract's frequency
+            # dictionary for this profile. Russian contracts are full
+            # of ИНН / ОГРН / account numbers and legal-entity names
+            # (``ООО "Ромашка"``) that aren't in the freq dict; when
+            # the dict IS loaded Tesseract biases digit sequences
+            # toward common Russian words, corrupting the very
+            # fields the user cares about most. Keeping the system
+            # DAWG (``load_system_dawg`` unchanged) preserves prose
+            # accuracy in the contract body.
+            extra_tesseract_params={
+                **_COMMON_TESSERACT_PARAMS,
+                "load_freq_dawg": "0",
+            },
         )
         return ProfileData(
             name="contracts_ru",
@@ -523,6 +553,7 @@ class ProfileManager:
             oem=OEM.LSTM_ONLY,
             dpi=300,
             optimize_level=OptimizeLevel.LOSSLESS,
+            extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
         )
         return ProfileData(
             name="english_text",

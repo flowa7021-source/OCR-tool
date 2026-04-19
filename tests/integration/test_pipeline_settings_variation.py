@@ -662,7 +662,7 @@ class TestPipelinePreflight:
 
         assert result.status is JobStatus.FAILED
         assert result.error is not None
-        assert "Скачать модель" in result.error, (
+        assert "Tesseract binary missing" in result.error, (
             f"engine.is_available() message should be preserved verbatim; "
             f"got {result.error!r}"
         )
