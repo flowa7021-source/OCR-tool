@@ -63,6 +63,13 @@ resources/icons/app.ico
 tests/test_data/*_ocr.pdf
 tests/test_data/output/
 
+# Benchmark outputs — ``scripts/benchmark_universal.py`` writes its
+# searchable PDF next to the input by default (``<pdf>.ocr.pdf``).
+# These are throwaway artefacts of a measurement run, not fixtures,
+# so keep them out of git regardless of which folder the input sits in.
+*.ocr.pdf
+inputs/*.ocr.pdf
+
 # Generated test fixtures — produced by tests/fixtures/generate_fixtures.py
 # and tests/fixtures/accuracy_corpus/generate.py on first test run, not
 # committed (300+ MB of synthetic PDFs total). The generators are
