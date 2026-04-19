@@ -636,9 +636,12 @@ class OCRPipeline:
             from src.infrastructure.config_storage import SettingsStorage
 
             try:
-                cap_mb = int(SettingsStorage().load().ocr_cache_max_mb)
+                settings = SettingsStorage().load()
+                cap_mb = int(settings.ocr_cache_max_mb)
+                min_conf = float(settings.ocr_cache_min_confidence)
             except Exception:  # noqa: BLE001
                 cap_mb = 2048
+                min_conf = 50.0
             if cap_mb <= 0:
                 logger.debug("OCR cache disabled (max_mb=0) — skipping store")
                 return
@@ -657,6 +660,27 @@ class OCRPipeline:
                     "cache for subsequent attempts on the same input."
                 )
                 return
+
+            # Low-confidence floor. Second poison-prevention guard after
+            # the empty-pages check: catches a run that completed
+            # structurally but produced mostly-garbage text — wrong
+            # profile for the document, truly unreadable scan, or the
+            # simplified-settings retry tier succeeded at 150 DPI with
+            # compromised accuracy. Caching that result would make every
+            # subsequent attempt on the same file short-circuit to the
+            # same garbage before the user can try a better profile.
+            # ``min_conf == 0.0`` disables the floor (legacy behaviour).
+            if min_conf > 0.0 and result.pages:
+                mean_conf = result.average_confidence
+                if 0.0 < mean_conf < min_conf:
+                    logger.warning(
+                        "Cache SKIPPED: mean_confidence %.1f%% below "
+                        "floor %.1f%% — likely wrong profile or damaged "
+                        "scan. Not poisoning the cache; re-run with a "
+                        "different profile to try again.",
+                        mean_conf, min_conf,
+                    )
+                    return
 
             ocr_cache.store(
                 input_path,

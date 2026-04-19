@@ -817,6 +817,71 @@ class TestPipelinePreflight:
             "poison the cache"
         )
 
+    def test_low_confidence_result_is_not_cached(self, tmp_path: Path) -> None:
+        """A COMPLETED job with mean_confidence below the cache floor
+        (``AppSettings.ocr_cache_min_confidence``) must NOT hit the
+        cache. Pairs with the empty-pages guard: that one catches
+        "OCR found nothing", this one catches "OCR found mostly
+        garbage" — a wrong-profile-for-the-document run that would
+        otherwise poison every subsequent attempt.
+        """
+        from src.application.engines.base import OCREngine, PageOCRResult
+
+        class _LowConfEngine(OCREngine):
+            kind = OCREngineKind.TESSERACT
+
+            @property
+            def name(self) -> str:
+                return "low-conf-stub"
+
+            @property
+            def description(self) -> str:
+                return "returns real text at sub-threshold confidence"
+
+            def is_available(self) -> tuple[bool, str]:
+                return True, ""
+
+            def run(self, preprocessed_pdf, output_pdf, config, progress_callback=None):
+                import shutil
+
+                output_pdf.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(preprocessed_pdf, output_pdf)
+                # mean_confidence well below the 50% default floor
+                return [
+                    PageOCRResult(page_number=1, text="garbled", mean_confidence=25.0)
+                ]
+
+        input_pdf = _build_test_pdf(tmp_path / "input.pdf", page_count=1)
+        output_pdf = tmp_path / "out.pdf"
+
+        store_calls: list[object] = []
+        from src.infrastructure import ocr_cache
+
+        real_store = ocr_cache.store
+
+        def spy_store(*a, **kw):
+            store_calls.append((a, kw))
+            return real_store(*a, **kw)
+
+        with patch.object(ocr_cache, "store", side_effect=spy_store), \
+             patch("src.application.engines.get_engine", return_value=_LowConfEngine()):
+            result = _make_pipeline().run(
+                OCRJobConfig(
+                    input_path=str(input_pdf),
+                    output_path=str(output_pdf),
+                    profile=_profile(),
+                )
+            )
+
+        assert result.status is JobStatus.COMPLETED
+        # Result came back structurally OK but with 25% mean_confidence,
+        # below the 50% cache floor → must not be cached.
+        assert store_calls == [], (
+            f"ocr_cache.store was invoked {len(store_calls)} time(s) "
+            "for a 25% mean_confidence result — low-confidence results "
+            "would poison the cache"
+        )
+
     def test_preflight_progress_event_fires(self, tmp_path: Path) -> None:
         """Before the first slow step, a ``preflight`` progress event
         must arrive so the UI can move the bar off 0%."""

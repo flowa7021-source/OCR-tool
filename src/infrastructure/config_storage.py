@@ -371,6 +371,20 @@ class AppSettings:
     # entirely (useful on disk-constrained systems). The default maps
     # to the historic 2 GB cap — kept identical for upgrade parity.
     ocr_cache_max_mb: int = 2048
+    # Minimum mean_confidence (0–100) below which a completed job is
+    # NOT cached. Pairs with the empty-pages guard in
+    # :meth:`OCRPipeline._try_cache_store`: that guard catches "OCR
+    # produced nothing at all" (broken pipeline), this one catches
+    # "OCR produced mostly garbage" (wrong profile for the document,
+    # borderline scan, silently-escalated retry tier at 150 DPI).
+    # Without it, a poor-quality run poisons the cache — every
+    # subsequent attempt on the same file short-circuits to the cached
+    # garbage before the user can even try a different profile. 50 %
+    # is conservative: genuinely-readable documents routinely come
+    # back at 80–95 %; anything under 50 % is almost always either a
+    # damaged scan or the wrong profile. ``0.0`` disables the floor
+    # (legacy behaviour: cache whatever we got).
+    ocr_cache_min_confidence: float = 50.0
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dictionary."""
@@ -387,6 +401,7 @@ class AppSettings:
             "recent_files": list(self.recent_files),
             "notify_on_complete": self.notify_on_complete,
             "ocr_cache_max_mb": self.ocr_cache_max_mb,
+            "ocr_cache_min_confidence": self.ocr_cache_min_confidence,
             "app_version": APP_VERSION,
         }
 
@@ -434,6 +449,18 @@ class AppSettings:
             ocr_cache_max_mb=max(
                 0,
                 int(data.get("ocr_cache_max_mb", defaults.ocr_cache_max_mb)),
+            ),
+            ocr_cache_min_confidence=max(
+                0.0,
+                min(
+                    100.0,
+                    float(
+                        data.get(
+                            "ocr_cache_min_confidence",
+                            defaults.ocr_cache_min_confidence,
+                        )
+                    ),
+                ),
             ),
         )
 
