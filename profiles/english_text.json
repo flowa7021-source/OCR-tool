@@ -68,6 +68,7 @@
     "normalize_whitespace": true,
     "normalize_unicode": true,
     "remove_artifacts": true,
+    "fix_cyrillic_latin_confusion": true,
     "custom_rules": []
   },
   "builtin": true,

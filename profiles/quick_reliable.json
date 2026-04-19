@@ -70,6 +70,7 @@
     "normalize_whitespace": true,
     "normalize_unicode": true,
     "remove_artifacts": true,
+    "fix_cyrillic_latin_confusion": true,
     "validate_identifiers": true,
     "custom_rules": []
   },

@@ -185,6 +185,10 @@ DEFAULT_ENGLISH_RULES: Final[list[tuple[str, str, str]]] = [
 #: Uppercase/lowercase Latin letters that have a visually identical
 #: Cyrillic counterpart. Keeps the mapping small and explicit — adding
 #: marginal look-alikes here (e.g. ``Q``→``Ԛ``) would over-correct.
+#: The mirror pair ``I``↔``І`` is intentionally omitted — Russian
+#: documents don't use ``І`` (pre-1918 orthography), so a Tesseract
+#: confusion there is vanishingly rare and the asymmetric digit/I
+#: collision is handled by the separate regex rule set.
 _LATIN_TO_CYRILLIC: Final[dict[str, str]] = {
     "A": "А", "B": "В", "C": "С", "E": "Е", "H": "Н",
     "K": "К", "M": "М", "O": "О", "P": "Р", "T": "Т",
@@ -209,6 +213,17 @@ _CYRILLIC_EXCLUSIVE: Final[frozenset[str]] = frozenset(
 _LATIN_EXCLUSIVE: Final[frozenset[str]] = frozenset(
     "DFGIJLNQRSUVWZ"
     "bdfghijklmnqrstuvwz"
+)
+
+#: Look-alike chars that carry NO script-exclusive evidence on their
+#: own. A word made entirely of these is a "pure look-alike" token —
+#: the word-level classifier would return ``mixed`` with no bias.
+#: This frozenset isn't used by the classifier directly but documents
+#: which characters the paragraph-majority / numeric-context tie-
+#: breakers are expected to handle.
+_LOOKALIKE_CHARS: Final[frozenset[str]] = frozenset(
+    "".join(_LATIN_TO_CYRILLIC)
+    + "".join(_LATIN_TO_CYRILLIC.values())
 )
 
 #: Tokens that must NOT be touched even if they look Cyrillic-majority.
@@ -246,7 +261,10 @@ def _classify_word_script(word: str) -> str:
 
 
 def _normalize_cyrillic_latin_word(
-    word: str, *, paragraph_majority: str | None = None,
+    word: str,
+    *,
+    paragraph_majority: str | None = None,
+    prefer_latin: bool = False,
 ) -> str:
     """Replace Latin ↔ Cyrillic look-alikes inside a single word.
 
@@ -256,16 +274,28 @@ def _normalize_cyrillic_latin_word(
 
       * ``cyr`` — swap every Latin look-alike → its Cyrillic twin
       * ``lat`` — swap every Cyrillic look-alike → its Latin twin
-      * ``mixed`` — when ``paragraph_majority`` is provided, the
-        paragraph-wide script wins (fixes short all-look-alike
-        tokens like ``Со`` in a Russian document). Without a
-        paragraph hint, leaves as-is.
+      * ``mixed`` — three resolution strategies, tried in order:
+          1. ``prefer_latin`` — set by the caller when the word sits
+             in a numeric context (adjacent to digits via
+             ``-``/``_``/``/`` or at position-adjacent offsets).
+             Product codes, invoice numbers and account IDs are
+             overwhelmingly Latin even in Russian documents; a
+             Russian-dominant paragraph majority would otherwise
+             wrongly flip e.g. ``INV-12345`` to Cyrillic.
+          2. ``paragraph_majority`` — the document's script
+             skew (fixes short all-look-alike tokens like ``Со``
+             in a Russian page that Tesseract split with a Latin
+             letter in the middle).
+          3. Leave untouched.
     """
     if _SKIP_TOKEN_RE.search(word):
         return word
     kind = _classify_word_script(word)
-    if kind == "mixed" and paragraph_majority is not None:
-        kind = paragraph_majority
+    if kind == "mixed":
+        if prefer_latin:
+            kind = "lat"
+        elif paragraph_majority is not None:
+            kind = paragraph_majority
     if kind == "cyr":
         return "".join(_LATIN_TO_CYRILLIC.get(ch, ch) for ch in word)
     if kind == "lat":
@@ -295,6 +325,16 @@ def _paragraph_script_majority(text: str) -> str | None:
     return None
 
 
+#: Numeric-context detector. Matches a digit optionally preceded by
+#: ``-``, ``_``, ``/`` or ``.`` — separators common in product codes,
+#: invoice numbers and account IDs. When a word chunk is immediately
+#: followed OR preceded by such a pattern, the chunk is treated as
+#: likely-Latin (``prefer_latin=True``) so e.g. ``INV-12345`` stays
+#: Latin even inside a Russian-majority document.
+_NUMERIC_AFTER_RE: Final[Pattern[str]] = re.compile(r"^[-_/.]?\d")
+_NUMERIC_BEFORE_RE: Final[Pattern[str]] = re.compile(r"\d[-_/.]?$")
+
+
 def normalize_cyrillic_latin_confusion(text: str) -> str:
     """Tokenise ``text``, normalise Latin/Cyrillic look-alikes per-word.
 
@@ -302,22 +342,50 @@ def normalize_cyrillic_latin_confusion(text: str) -> str:
     through unchanged. See :func:`_normalize_cyrillic_latin_word` for
     the per-word logic.
 
-    Stage F enhancement: short all-look-alike tokens (which the
-    per-word classifier refuses to touch because they carry no
-    script-exclusive evidence) inherit the paragraph-wide script
-    majority if one exists. This recovers words like ``Со`` and
-    ``Оно`` in predominantly-Russian pages that Tesseract split
-    with a Latin letter in the middle.
+    Two resolution strategies for ``mixed``-script tokens:
+      * Numeric-context heuristic — a word sitting next to digits
+        (``INV-12345``, ``7USD``, ``INN 7701234567``) is tilted
+        Latin-ward regardless of paragraph majority. Product codes,
+        invoice numbers and account IDs are overwhelmingly Latin in
+        Russian documents too, and the old paragraph-majority
+        strategy would wrongly flip them to Cyrillic.
+      * Paragraph majority — short all-look-alike tokens inherit
+        the document's script skew (fixes ``Со``, ``Оно`` etc. on
+        predominantly-Russian pages that Tesseract split with a
+        Latin letter in the middle).
+
+    The numeric-context check runs first so product codes win over
+    prose majority; falls back to paragraph majority for everything
+    else.
     """
     if not text:
         return text
     paragraph_majority = _paragraph_script_majority(text)
-    return _WORD_CHUNK_RE.sub(
-        lambda m: _normalize_cyrillic_latin_word(
-            m.group(0), paragraph_majority=paragraph_majority,
-        ),
-        text,
-    )
+    out: list[str] = []
+    last = 0
+    for m in _WORD_CHUNK_RE.finditer(text):
+        out.append(text[last:m.start()])
+        word = m.group(0)
+        # Look up to five chars in each direction for a digit /
+        # separator-digit pattern. Five is empirically enough for the
+        # "space + digit", "hyphen + number" and "dot + digit" shapes
+        # seen in real invoices without being expensive.
+        after = text[m.end():m.end() + 5]
+        before = text[max(0, m.start() - 5):m.start()]
+        numeric_context = bool(
+            _NUMERIC_AFTER_RE.match(after)
+            or _NUMERIC_BEFORE_RE.search(before)
+        )
+        out.append(
+            _normalize_cyrillic_latin_word(
+                word,
+                paragraph_majority=paragraph_majority,
+                prefer_latin=numeric_context,
+            )
+        )
+        last = m.end()
+    out.append(text[last:])
+    return "".join(out)
 
 
 # ---------------------------------------------------------------------------
