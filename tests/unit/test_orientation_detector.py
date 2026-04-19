@@ -125,7 +125,7 @@ class TestDetectOrientation:
     def test_min_confidence_default_matches_constant(self) -> None:
         # Guard against accidental drift between the public constant
         # (used in AutoRotateConfig defaults) and the internal value.
-        assert MIN_ORIENTATION_CONFIDENCE == pytest.approx(1.0)
+        assert pytest.approx(1.0) == MIN_ORIENTATION_CONFIDENCE
 
 
 class TestPreprocessorAutoRotateIntegration:
