@@ -204,13 +204,23 @@ class ProfileManager:
             # Sauvola adapts threshold per-pixel based on local mean +
             # standard deviation — handles uneven lighting far better
             # than adaptive Gaussian on real-world scans with shadows
-            # or page-edge darkening. Window 25 is the typical sweet
-            # spot for 300-400 DPI text; k=0.2 is the paper default
-            # for documents (lower than k=0.5 which is better for
-            # photos).
+            # or page-edge darkening.
+            #
+            # Step 2 retune (Apr 2026): window 25 → 41, k stays 0.2.
+            # Window 25 is the canonical 300-DPI number, but this
+            # profile runs at 500 DPI where a 10-pt body glyph is
+            # ~70 px tall and ``window=25`` falls entirely inside a
+            # thick stroke — local mean trends dark, std is low and
+            # the per-pixel threshold produces streaky artefacts at
+            # the stroke edges. Window 41 (≈0.6× glyph height) gives
+            # the mean/std window enough room to include surrounding
+            # background, which is what the Sauvola paper actually
+            # recommends (window ≈ glyph size at the working DPI).
+            # k=0.2 stays — lower than the photo-documents default
+            # of 0.5 because printed text has far sharper strokes.
             binarization=BinarizationConfig(
                 method=BinarizationMethod.SAUVOLA,
-                sauvola_window=25,
+                sauvola_window=41,
                 sauvola_k=0.2,
             ),
             denoise=DenoiseConfig(
@@ -238,11 +248,19 @@ class ProfileManager:
             # Stage E: erase long horizontal / vertical runs (table
             # borders, form rules) before binarisation so Tesseract
             # doesn't fuse adjacent text into the border glyph.
-            # 75 px matches the 500 DPI rasterisation — about 0.15 cm
-            # of continuous line, longer than any legitimate letter
-            # stroke.
+            #
+            # Step 2 retune (Apr 2026): min_line_length 75 → 125.
+            # At 500 DPI a 14-pt header glyph can have horizontal /
+            # vertical crossbar runs approaching 100 px (Cyrillic
+            # ``Ш``, ``Щ``, ``Ж``, Latin ``M``); 75 was dangerously
+            # close to that ceiling and the morph-dilate step could
+            # leak the erase mask onto adjacent body strokes of
+            # wider characters. 125 comfortably clears every
+            # legitimate glyph at sizes the profile targets while
+            # still catching real table rules (usually 500-3000 px
+            # at this DPI). Conservative margin.
             border_removal=BorderRemovalConfig(
-                enabled=True, min_line_length=75,
+                enabled=True, min_line_length=125,
             ),
         )
         ocr = OCRConfig(
@@ -297,19 +315,33 @@ class ProfileManager:
             # letter pairs like ``О/O`` at word edges, and the
             # in-context regex autocorrect can't catch those.
             fix_cyrillic_latin_confusion=True,
-            # Lenient garbage filter drops ruler lines and symbol
-            # walls Tesseract emits from table borders and page
-            # noise, without touching legitimate short tokens like
-            # "ООО" or numeric totals.
-            garbage_filter_strictness="lenient",
+            # Step 2 retune (Apr 2026): lenient → strict. Lenient
+            # drops only mechanical "symbol walls" (≥70 % non-letter
+            # lines), which left orphan-letter lines and symbol-
+            # dominated fragments (page-4 of the transport-invoice
+            # failure: ``нe / Taw / Fam / а / ба / к.``) in the
+            # output. Strict adds two rules on top of lenient:
+            #  * single-character letter-only lines get dropped (a
+            #    legitimate Russian token is always ≥2 chars — "ИП",
+            #    "НН", "№" with its number),
+            #  * the symbol-ratio threshold tightens from 70 % → 40 %,
+            #    which catches "ц.\\ч.(с) |* .ж)" style fragments
+            #    Tesseract emits from stamp / seal regions.
+            # Combined with the Step 1 word-confidence filter this
+            # gives the user a cleaner body-text-only view. Digits-
+            # only lines (invoice totals like "1 250 000") are still
+            # preserved — the filter has an explicit digit carve-out.
+            garbage_filter_strictness="strict",
             custom_rules=[],
         )
         return ProfileData(
             name="universal_accurate",
             description=(
-                "Универсальный «максимум точности»: 400 DPI, Sauvola + "
-                "CLAHE + удаление фона + deskew, полная постобработка "
-                "включая нормализацию кириллицы/латиницы"
+                "Универсальный «максимум точности»: 500 DPI, Sauvola + "
+                "CLAHE + удаление фона + deskew + удаление рамок таблиц, "
+                "полная постобработка включая нормализацию "
+                "кириллицы/латиницы, фильтр слов по уверенности "
+                "распознавания и строгая очистка мусорных строк"
             ),
             preprocess=preprocess,
             ocr=ocr,
