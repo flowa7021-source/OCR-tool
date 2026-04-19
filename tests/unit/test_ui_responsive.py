@@ -126,19 +126,15 @@ class TestLaptop1280x720Target:
     14-inch laptop). At that resolution all core workflow
     controls must be visible without a horizontal scroll."""
 
-    @pytest.mark.xfail(
-        reason=(
-            "Known UI debt — Initiative 6 UI refactor required. The "
-            "settings + preprocessing panels stand side-by-side with "
-            "natural widths of ~1000 + ~750 px, so at 1280×720 they "
-            "need ~1770 px and overflow by ~500 px. Fix requires a "
-            "tabbed or stack-on-narrow layout, which needs visual "
-            "feedback to get right. This xfail DOCUMENTS the gap; "
-            "flip to ``@pytest.mark.xfail(strict=True)`` once the "
-            "refactor lands so we catch regressions."
-        ),
-    )
     def test_fits_in_laptop_viewport(self, main_window) -> None:
+        # Initiative 6's tabbed / stack-on-narrow refactor has landed:
+        # with the settings + preprocessing panels no longer stacked
+        # side-by-side at 1280×720, no top-level widget overflows the
+        # viewport. The previous ``xfail`` documenting the debt was
+        # being reported as XPASS; flipping this to a plain assertion
+        # turns it into a hard regression guard — if a future layout
+        # change re-breaks the 1280×720 target, this test fails
+        # loudly instead of silently succeeding as an xpass.
         main_window.resize(1280, 720)
         main_window.show()
 

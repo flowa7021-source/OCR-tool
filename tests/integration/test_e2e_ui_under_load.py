@@ -57,11 +57,15 @@ class TestResultsPanelWithRealJobResult:
 
         # The text viewer inside the panel must contain the recognised text.
         # We don't know the exact widget name across refactors, so walk
-        # children and find QTextEdit-like ones.
+        # children and find QTextEdit-like ones. ``QObject.findChildren``
+        # accepts exactly one type — call it separately for QTextEdit and
+        # QPlainTextEdit and concatenate the results.
         from PySide6.QtWidgets import QPlainTextEdit, QTextEdit
 
         texts: list[str] = []
-        for child in panel.findChildren((QTextEdit, QPlainTextEdit)):
+        for child in panel.findChildren(QTextEdit):
+            texts.append(child.toPlainText())
+        for child in panel.findChildren(QPlainTextEdit):
             texts.append(child.toPlainText())
         all_text = "\n".join(texts)
 

@@ -37,7 +37,6 @@ so Tesseract genuinely recognises it. We then assert:
 from __future__ import annotations
 
 import shutil
-import sys
 from pathlib import Path
 
 import pytest
@@ -50,11 +49,30 @@ pytest.importorskip("ocrmypdf")
 pytest.importorskip("pytesseract")
 
 # External subprocess tools — skip cleanly if the host doesn't have them.
-_REAL_OCR_AVAILABLE = bool(shutil.which("tesseract")) and bool(shutil.which("gs"))
+# On Windows, Artifex's Ghostscript distribution ships ``gswin64c.exe`` /
+# ``gswin32c.exe`` — never a plain ``gs.exe`` — so ``shutil.which("gs")``
+# returns None on every Windows host even when Ghostscript is correctly
+# installed. Probing both POSIX and Windows names matches the production
+# logic in ``src.infrastructure.external_tools`` and keeps the whole
+# real-OCR suite from being silently skipped on the Windows CI leg.
+def _find_ghostscript_binary() -> str | None:
+    for name in ("gs", "gswin64c", "gswin32c"):
+        p = shutil.which(name)
+        if p:
+            return p
+    return None
+
+
+_REAL_OCR_AVAILABLE = bool(shutil.which("tesseract")) and bool(
+    _find_ghostscript_binary()
+)
 pytestmark = [
     pytest.mark.skipif(
         not _REAL_OCR_AVAILABLE,
-        reason="Real OCR E2E requires tesseract + gs on PATH",
+        reason=(
+            "Real OCR E2E requires tesseract + ghostscript on PATH "
+            "(gs on POSIX, gswin64c/gswin32c on Windows)"
+        ),
     ),
     # Bypass autouse pre-flight mock: we want the REAL
     # verify_required_for_ocrmypdf to confirm tesseract/gs discovery.
@@ -662,9 +680,13 @@ class TestExternalToolsOnRealHost:
         ``locate()``) correctly detects system-installed binaries
         when the bundle dir is absent — which is exactly the dev /
         CI environment.
+
+        Runs on both POSIX and Windows: ``locate()`` probes platform-
+        specific candidates (``gs`` vs ``gswin64c.exe``), so as long
+        as the CI workflow's install step put the binaries on PATH
+        this test exercises the discovery layer identically on both
+        operating systems.
         """
-        if sys.platform == "win32":
-            pytest.skip("Real-host test is POSIX-only; Windows CI bundles its own")
         from src.infrastructure.external_tools import (
             verify_required_for_ocrmypdf,
         )
@@ -672,5 +694,5 @@ class TestExternalToolsOnRealHost:
         missing = verify_required_for_ocrmypdf()
         assert missing == [], (
             f"Required external tools missing on CI host: {missing}. "
-            "Install tesseract and/or ghostscript via apt/brew."
+            "Install tesseract and/or ghostscript via apt/brew/choco."
         )

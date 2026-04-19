@@ -444,6 +444,29 @@ def main(argv: list[str] | None = None) -> int:
 
     install_windows_console_hide()
 
+    # Register bundled Tesseract + Ghostscript on ``PATH`` so OCRmyPDF's
+    # ``shutil.which("gswin64c")`` finds the installer-shipped copy.
+    # The parallel-processing path does this at worker startup, but the
+    # single-worker CLI path (``--workers 1 -o out.pdf``) calls
+    # ``process_single`` directly and previously never registered the
+    # bundled binaries — causing the installer smoke test to fail with
+    # "The program 'gs' could not be executed or was not found on your
+    # system PATH" even though the executables sit under
+    # ``resources/ghostscript/bin/``. Done here (in ``main()``) so every
+    # CLI invocation — batch or single — benefits, not just the
+    # parallel branch.
+    try:
+        from src.infrastructure.external_tools import ensure_on_path
+
+        ensure_on_path()
+    except Exception:  # noqa: BLE001
+        # External-tools registration is best-effort: if it blows up
+        # (missing bundle dir in a dev checkout, exotic packaging) we
+        # still want the CLI to start and fall back to system PATH. Any
+        # real "required binary missing" case surfaces later as a clear
+        # pre-flight error instead of an import-time crash here.
+        pass
+
     _force_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)

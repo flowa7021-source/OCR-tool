@@ -164,6 +164,11 @@ jobs:
           pip install python-docx PyMuPDF psutil deskew cffi
           pip install ocrmypdf pytesseract
           pip install pytest pytest-mock pytest-cov pytest-qt pytest-benchmark
+          # PyYAML unlocks the workflow-structure tests in
+          # tests/unit/test_p3_followup.py and test_p3_improvements.py
+          # — without it those 6 tests silently ``pytest.importorskip``
+          # and the "no skips" invariant breaks.
+          pip install PyYAML
 
       - name: Compile-check all sources
         run: python -m compileall -q src tests build.py dev_run.py

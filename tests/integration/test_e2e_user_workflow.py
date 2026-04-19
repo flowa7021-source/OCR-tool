@@ -255,15 +255,28 @@ class TestEnglishTextProfile:
         assert_ocr_recognised(result, ["CONTRACT", "AGREEMENT"])
 
 
-@requires_real_ocr
+@requires_real_russian_ocr
 class TestUniversalAccurateProfile:
-    """``universal_accurate`` uses 600 DPI — too slow for a
+    """``universal_accurate`` uses 500 DPI — too slow for a
     parametrised CI test. We cap DPI at 300 for this test to
-    verify the rest of the profile (adaptive_gaussian + CLAHE +
-    deskew + denoise chain + all postprocess flags) doesn't crash.
+    verify the rest of the profile (Sauvola + CLAHE + deskew +
+    denoise chain + border removal + background removal + all
+    postprocess flags) doesn't crash.
 
-    The 600 DPI + real Tesseract path is exercised by the smoke
-    test script which the user runs before push.
+    The 500 DPI + real Tesseract path is exercised by the nightly
+    corpus matrix and the installer smoke test the user runs
+    before a release.
+
+    Note on input text: ``universal_accurate`` sets
+    ``primary_language='rus'``. Feeding it a short English string
+    causes Tesseract to prefer the Cyrillic LSTM and emit
+    look-alike glyphs (``U → Ц/Ш``, ``T → Т``), which tripped the
+    OCR-content assertion at capped DPI. Rendering a Russian
+    string matches the profile's design target and the rest of
+    this file's conventions (every sibling test uses Cyrillic).
+    Requires both ``rus.traineddata`` and a Cyrillic-capable font,
+    hence the ``@requires_real_russian_ocr`` gate promoted to the
+    class level.
     """
 
     def test_universal_accurate_runs_at_capped_dpi(
@@ -282,14 +295,14 @@ class TestUniversalAccurateProfile:
         profile.ocr.dpi = 300
 
         input_pdf = render_clean_text_pdf(
-            tmp_path / "ua.pdf", text="UNIVERSAL TEST"
+            tmp_path / "ua.pdf", text="ДОГОВОР", cyrillic=True
         )
         output_pdf = tmp_path / "ua_ocr.pdf"
 
         result = run_pipeline(
             input_pdf, output_pdf, profile, real_tesseract_wrapper
         )
-        assert_ocr_recognised(result, ["UNIVERSAL", "TEST"])
+        assert_ocr_recognised(result, ["ДОГ", "ОГО", "ВОР"])
 
 
 # ---------------------------------------------------------------------------

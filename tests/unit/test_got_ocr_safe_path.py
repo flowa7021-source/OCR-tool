@@ -10,7 +10,6 @@ elsewhere.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -35,11 +34,17 @@ def test_safe_path_ascii_passthrough(tmp_path: Path) -> None:
     assert got == str(tmp_path / "models" / "got_ocr2")
 
 
-def test_safe_path_posix_non_ascii_passthrough() -> None:
-    """On POSIX we never try to shorten — pathlib is Unicode-safe."""
-    if sys.platform == "win32":
-        pytest.skip("Windows-specific behaviour covered in another test")
+def test_safe_path_posix_non_ascii_passthrough(monkeypatch) -> None:
+    """The POSIX branch returns non-ASCII paths unchanged.
+
+    The shortening logic is gated on ``os.name == 'nt'``. Patching
+    ``os.name`` to ``"posix"`` lets this test exercise the pathlib-
+    safe branch on every platform — including the Windows CI leg,
+    where a naive ``sys.platform == 'win32'`` skip previously kept
+    the test from running at all.
+    """
     engine = _engine()
+    monkeypatch.setattr("src.application.engines.got_ocr_engine.os.name", "posix")
     p = Path("/home/Т.Н. 020/models")
     assert engine._safe_model_path(p) == str(p)
 
