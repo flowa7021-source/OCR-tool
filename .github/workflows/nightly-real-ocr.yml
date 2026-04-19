@@ -31,6 +31,14 @@ on:
       - "tests/integration/test_e2e_retry_tiers.py"
       - "tests/integration/test_e2e_engine_real.py"
       - "tests/integration/test_nightly_corpus.py"
+      # GOT-OCR 2.0 real-inference stage. Any change to the engine
+      # code, the model-manager manifest, or the download script
+      # must re-run nightly so a broken bundle path can't slip
+      # past on a green PR CI.
+      - "tests/integration/test_e2e_got_ocr2_real.py"
+      - "src/application/engines/got_ocr_engine.py"
+      - "src/infrastructure/model_manager.py"
+      - ".github/scripts/download_got_ocr2.py"
       # Shared helper that decides REAL_OCR_AVAILABLE and
       # RUSSIAN_OCR_AVAILABLE for every real-OCR test. A change here
       # (e.g. the recent gswin64c Windows-path fix) can silently
@@ -332,6 +340,65 @@ jobs:
           OCR_NIGHTLY: "1"
         run: |
           pytest tests/integration/test_nightly_corpus.py `
+                 --tb=short -v
+
+      # Stage 4: real GOT-OCR 2.0 inference. Until this stage landed
+      # (Apr 2026), every GOT-OCR test in the suite was stubbed —
+      # torch / transformers / einops / accelerate / torchvision /
+      # verovio / tiktoken / safetensors were all replaced with
+      # SimpleNamespace fakes. That caught profile-dispatch wiring
+      # regressions but would let a genuine transformer bug ship
+      # (corrupt bundled weights, ``_recognize_page`` typo, stale
+      # ``trust_remote_code`` modules, torchvision's native C++
+      # ops failing to load). This stage downloads the real 580 MB
+      # model (cached by key) and runs ONE end-to-end inference
+      # per test case against actual torch.
+      #
+      # Runs AFTER Tesseract stages so a Tesseract regression
+      # surfaces first (fastest signal); this stage's ~20-40 min
+      # cost kicks in only once the rest is green.
+      - name: Install HTR deps (torch + transformers + tokenizer stack)
+        shell: pwsh
+        run: |
+          # CPU-only torch wheel keeps the install under 1 GB —
+          # the Windows CI runner has no GPU anyway. Pinning to
+          # torch 2.6+ (released 2025) for the bf16 / fp16 CPU
+          # fallback that earlier builds miss. transformers 4.45+
+          # is required by the GOT-OCR ``trust_remote_code``
+          # ``modeling_GOT.py`` — older transformers crash on
+          # ``AutoModel.from_pretrained`` with a cryptic
+          # ``RotaryEmbedding`` error.
+          pip install --index-url https://download.pytorch.org/whl/cpu `
+                      torch torchvision
+          pip install "transformers>=4.45" tiktoken safetensors `
+                      "einops>=0.7" "accelerate>=0.25" "verovio>=4.0"
+
+      - name: Cache GOT-OCR 2.0 weights
+        id: cache-got-ocr2-nightly
+        uses: actions/cache@v4
+        with:
+          path: resources/models/got_ocr2
+          key: got-ocr2-weights-${{ hashFiles('src/infrastructure/model_manager.py', '.github/scripts/download_got_ocr2.py') }}
+
+      - name: Download GOT-OCR 2.0 weights
+        if: steps.cache-got-ocr2-nightly.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          python .github/scripts/download_got_ocr2.py
+
+      - name: Stage 4 — real GOT-OCR 2.0 inference
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          # ``ModelManager`` resolves ``BUNDLED_MODELS_DIR`` to
+          # ``<repo_root>/resources/models/`` in dev checkouts (it's
+          # anchored on ``get_app_root`` which falls back to the
+          # repo root off-bundle). The download step above wrote
+          # the 11 manifest files to exactly that path, so
+          # ``is_available("got_ocr2")`` sees them without any env
+          # var plumbing.
+          pytest tests/integration/test_e2e_got_ocr2_real.py `
                  --tb=short -v
 
       # On failure: upload the generated corpus + any produced output
