@@ -17,6 +17,7 @@ import numpy as np
 from src.core.deskew_handler import DeskewHandler, rotate_image
 from src.core.dewarp_handler import DewarpHandler
 from src.core.models import (
+    AutoRotateConfig,
     BackgroundConfig,
     BinarizationConfig,
     ContrastConfig,
@@ -26,6 +27,7 @@ from src.core.models import (
     DewarpConfig,
     PreprocessConfig,
 )
+from src.core.orientation_detector import detect_orientation
 from src.shared.types import BinarizationMethod, DenoiseMethod
 from src.shared.validators import ValidationError, validate_odd_int
 
@@ -36,6 +38,7 @@ logger = logging.getLogger(__name__)
 # pipeline exactly.
 _PREVIEW_STEPS: tuple[str, ...] = (
     "original",
+    "auto_rotate",
     "dewarp",
     "deskew",
     "contrast",
@@ -239,6 +242,19 @@ class ImagePreprocessor:
         current = image
         angle = 0.0
 
+        # Auto-orientation BEFORE everything else. OSD sees the raw
+        # scan (colour or grayscale, no deskew applied yet) and works
+        # best on the un-modified page — our own preprocessing can
+        # change stroke thickness / contrast enough to confuse OSD's
+        # script classifier. Running first also means every
+        # subsequent step (dewarp, deskew, binarisation) operates on
+        # an already-upright image, which is the shape those algos
+        # were designed for.
+        auto_rotate_cfg = getattr(config, "auto_rotate", None)
+        if auto_rotate_cfg is not None and auto_rotate_cfg.enabled:
+            logger.debug("Preprocess: auto-rotate (OSD)")
+            current = self._apply_auto_rotate(current, auto_rotate_cfg)
+
         if config.dewarp.enabled:
             logger.debug("Preprocess: dewarp enabled")
             current = self._apply_dewarp(current, config.dewarp)
@@ -375,6 +391,50 @@ class ImagePreprocessor:
             primary_angle, residual, corrective, total,
         )
         return final, total
+
+    def _apply_auto_rotate(
+        self, img: np.ndarray, cfg: AutoRotateConfig
+    ) -> np.ndarray:
+        """Rotate ``img`` by 90/180/270° if OSD detects it's off-axis.
+
+        Uses Tesseract's OSD via
+        :func:`src.core.orientation_detector.detect_orientation`. When
+        OSD returns ``None`` (low confidence, few glyphs, OSD error)
+        the image is returned unchanged — the fallback is always
+        "leave it alone" so a logo-only page or a QR-code scan can't
+        accidentally rotate.
+
+        Uses :func:`cv2.rotate` for the three canonical 90° turns —
+        that's a lossless pixel remap; we never want to go through
+        the arbitrary-angle affine path for exact 90° multiples.
+        """
+        self._validate_image(img)
+        rotate = detect_orientation(img, min_confidence=cfg.min_confidence)
+        if rotate is None or rotate == 0:
+            return img
+        rotate_map = {
+            90: cv2.ROTATE_90_CLOCKWISE,
+            180: cv2.ROTATE_180,
+            270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+        }
+        op = rotate_map.get(int(rotate))
+        if op is None:
+            logger.debug(
+                "auto-rotate: unexpected non-90°-multiple rotation %s, "
+                "leaving image alone",
+                rotate,
+            )
+            return img
+        try:
+            rotated = cv2.rotate(img, op)
+        except cv2.error as exc:
+            logger.warning(
+                "auto-rotate: cv2.rotate failed (%s) — leaving image alone",
+                exc,
+            )
+            return img
+        logger.info("auto-rotate: applied %d° rotation", rotate)
+        return rotated
 
     def _apply_dewarp(self, img: np.ndarray, cfg: DewarpConfig) -> np.ndarray:
         """Delegate to :class:`DewarpHandler`."""
@@ -653,6 +713,12 @@ def preview_step(
 
     current = image
     if step_name == "original":
+        return current
+
+    auto_rotate_cfg = getattr(config, "auto_rotate", None)
+    if auto_rotate_cfg is not None and auto_rotate_cfg.enabled:
+        current = preprocessor._apply_auto_rotate(current, auto_rotate_cfg)
+    if step_name == "auto_rotate":
         return current
 
     if config.dewarp.enabled:

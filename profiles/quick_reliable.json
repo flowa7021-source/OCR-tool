@@ -2,6 +2,10 @@
   "name": "quick_reliable",
   "description": "Быстрый и надёжный. Рекомендуется, если другие профили падают с ошибкой (таймаут, не хватает памяти). 300 DPI, Tesseract, минимум шагов.",
   "preprocess": {
+    "auto_rotate": {
+      "enabled": true,
+      "min_confidence": 1.0
+    },
     "deskew": {
       "enabled": true,
       "auto_detect": true,
@@ -76,5 +80,5 @@
   },
   "builtin": true,
   "created_at": "2026-04-16T20:30:00.000000",
-  "schema_version": 3
+  "schema_version": 4
 }

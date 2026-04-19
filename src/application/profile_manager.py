@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 
 from src.core.models import (
+    AutoRotateConfig,
     BackgroundConfig,
     BinarizationConfig,
     BorderRemovalConfig,
@@ -215,6 +216,7 @@ class ProfileManager:
         ``low_quality_scan`` (NLM denoise + larger CLAHE).
         """
         preprocess = PreprocessConfig(
+            auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
             deskew=DeskewConfig(enabled=True, auto_detect=True, max_angle=45.0),
             dewarp=DewarpConfig(enabled=False),
             # Sauvola adapts threshold per-pixel based on local mean +
@@ -344,6 +346,7 @@ class ProfileManager:
     def _build_default(self) -> ProfileData:
         """Balanced defaults suitable for most scans."""
         preprocess = PreprocessConfig(
+            auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
             deskew=DeskewConfig(enabled=True, auto_detect=True),
             dewarp=DewarpConfig(enabled=False),
             binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
@@ -409,6 +412,7 @@ class ProfileManager:
         explicitly in the profile description so UI users see it.
         """
         preprocess = PreprocessConfig(
+            auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
             deskew=DeskewConfig(enabled=True, auto_detect=True, max_angle=45.0),
             dewarp=DewarpConfig(enabled=False),
             binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
@@ -463,6 +467,7 @@ class ProfileManager:
     def _build_low_quality(self) -> ProfileData:
         """Aggressive cleanup for blurry / noisy / low-contrast scans."""
         preprocess = PreprocessConfig(
+            auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
             deskew=DeskewConfig(enabled=True, auto_detect=True),
             dewarp=DewarpConfig(enabled=False),
             binarization=BinarizationConfig(
@@ -500,6 +505,7 @@ class ProfileManager:
     def _build_contracts_ru(self) -> ProfileData:
         """Russian contracts: single uniform block, minimal preprocessing."""
         preprocess = PreprocessConfig(
+            auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
             deskew=DeskewConfig(enabled=True, auto_detect=True),
             dewarp=DewarpConfig(enabled=False),
             binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
@@ -539,6 +545,7 @@ class ProfileManager:
     def _build_english_text(self) -> ProfileData:
         """Clean English documents: light preprocessing, eng language only."""
         preprocess = PreprocessConfig(
+            auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
             deskew=DeskewConfig(enabled=True, auto_detect=True),
             dewarp=DewarpConfig(enabled=False),
             binarization=BinarizationConfig(method=BinarizationMethod.OTSU),

@@ -1,8 +1,12 @@
 {
   "name": "low_quality_scan",
   "description": "Агрессивная обработка для плохо отсканированных документов",
-  "schema_version": 3,
+  "schema_version": 4,
   "preprocess": {
+    "auto_rotate": {
+      "enabled": true,
+      "min_confidence": 1.0
+    },
     "deskew": {
       "enabled": true,
       "auto_detect": true,

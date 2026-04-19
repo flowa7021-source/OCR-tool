@@ -53,6 +53,33 @@ class DeskewConfig:
 
 
 @dataclass
+class AutoRotateConfig:
+    """Coarse page-orientation detection (90 / 180 / 270°).
+
+    Runs before :class:`DeskewConfig`. Where deskew fixes the ±5°
+    tilt of a scanned page, this fixes the "scanner ate the paper
+    sideways" class of errors in 90° increments — a common failure
+    mode on landscape documents fed through a portrait-oriented
+    sheet feeder, or phone-camera snaps that come out rotated.
+
+    Attributes:
+        enabled: Whether to call Tesseract's OSD and rotate. Cheap
+            (~50 ms per page) and safe — the orientation module
+            only rotates when OSD reports confidence above
+            :attr:`min_confidence`; below that it leaves the image
+            untouched.
+        min_confidence: Tesseract OSD ``Orientation confidence``
+            floor. Default ``1.0`` matches
+            :data:`src.core.orientation_detector.MIN_ORIENTATION_CONFIDENCE`
+            and empirically excludes the random-guess regime for
+            logo-only / stamp-only / blank pages.
+    """
+
+    enabled: bool = True
+    min_confidence: float = 1.0
+
+
+@dataclass
 class DewarpConfig:
     """Page dewarping (cubic sheet model via page-dewarp)."""
 
@@ -136,6 +163,7 @@ class BorderRemovalConfig:
 class PreprocessConfig:
     """Complete preprocessing pipeline configuration."""
 
+    auto_rotate: AutoRotateConfig = field(default_factory=AutoRotateConfig)
     deskew: DeskewConfig = field(default_factory=DeskewConfig)
     dewarp: DewarpConfig = field(default_factory=DewarpConfig)
     binarization: BinarizationConfig = field(default_factory=BinarizationConfig)
@@ -349,7 +377,7 @@ class PostprocessConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 3
+PROFILE_SCHEMA_VERSION: int = 4
 
 
 @dataclass
@@ -436,6 +464,19 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         ocr.setdefault("extra_tesseract_params", {})
         data["schema_version"] = 3
         version = 3
+
+    # v3 → v4: add ``auto_rotate`` to preprocessing. Old profiles get
+    # the enabled-by-default config so they pick up the fix without
+    # user action; users who disabled it explicitly (there was no
+    # way to before v4 so this branch is for safety) keep their
+    # preference via setdefault.
+    if version < 4:
+        pre = data.setdefault("preprocess", {})
+        pre.setdefault(
+            "auto_rotate", {"enabled": True, "min_confidence": 1.0}
+        )
+        data["schema_version"] = 4
+        version = 4
 
     return data
 
