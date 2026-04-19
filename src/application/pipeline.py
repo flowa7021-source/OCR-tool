@@ -1302,6 +1302,67 @@ class OCRPipeline:
                     confidences.append(c)
                     if c < threshold:
                         low_words.append(word)
+                # Per-word script disambiguation: for mixed-script
+                # tokens, re-OCR each word's bbox with ``-l rus`` and
+                # ``-l eng`` separately and pick the higher-confidence
+                # result. Solves the "ИНV-12345" class of errors
+                # before the paragraph-majority / numeric-context
+                # heuristics in the text postprocessor run.
+                if getattr(
+                    job.profile.ocr, "per_word_script_disambiguation", False,
+                ):
+                    from src.core.per_word_script_disambiguator import (
+                        disambiguate_word,
+                    )
+                    from src.core.text_postprocessor import (
+                        _classify_word_script,
+                    )
+
+                    texts = data.get("text", [])
+                    confs_raw = data.get("conf", [])
+                    lefts = data.get("left", [])
+                    tops = data.get("top", [])
+                    widths = data.get("width", [])
+                    heights = data.get("height", [])
+
+                    for i in range(len(texts)):
+                        word = texts[i] if isinstance(texts[i], str) else ""
+                        if not word.strip():
+                            continue
+                        try:
+                            c = float(confs_raw[i])
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                        if c < 0:
+                            continue
+                        if _classify_word_script(word) != "mixed":
+                            continue
+                        try:
+                            bbox = (
+                                int(lefts[i]), int(tops[i]),
+                                int(widths[i]), int(heights[i]),
+                            )
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                        new_word, new_conf = disambiguate_word(
+                            img, bbox, word, c, tess_cfg,
+                        )
+                        if new_word != word:
+                            texts[i] = new_word
+                            confs_raw[i] = str(new_conf)
+
+                    # Rebuild the confidences list from the possibly-
+                    # updated data so the downstream mean / threshold
+                    # logic sees the disambiguated numbers.
+                    confidences = []
+                    for val in confs_raw:
+                        try:
+                            cv = float(val)
+                        except (TypeError, ValueError):
+                            continue
+                        if cv >= 0:
+                            confidences.append(cv)
+
                 # Per-page adaptive threshold: clean pages use a lower
                 # threshold (keep borderline words), noisy pages use
                 # a higher threshold (filter harder). See

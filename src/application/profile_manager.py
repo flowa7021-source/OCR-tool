@@ -311,6 +311,13 @@ class ProfileManager:
             # Turns the nominal ``confidence_threshold`` into a
             # reasonable default instead of a per-document tuning knob.
             adaptive_confidence_threshold=True,
+            # Per-word script re-OCR for mixed tokens. Catches the
+            # "ИНV-12345" class of errors where a single glyph went
+            # Latin when the line went Cyrillic (or vice versa).
+            # Adds ~10-20 % per-page latency on Russian documents
+            # with Latin islands; zero cost when there are no mixed
+            # tokens.
+            per_word_script_disambiguation=True,
             extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
         )
         postprocess = PostprocessConfig(

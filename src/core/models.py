@@ -262,6 +262,26 @@ class OCRConfig:
     #: for backwards-compatibility; profiles that want the behaviour
     #: opt in explicitly.
     adaptive_confidence_threshold: bool = False
+    #: Per-word script disambiguation for mixed-script tokens.
+    #:
+    #: After the main OCR pass, every word classified as "mixed"
+    #: script (contains both a Cyrillic-exclusive letter AND a
+    #: Latin-exclusive letter — Tesseract picked the wrong script
+    #: for at least one glyph) is re-OCR'd on its own bounding box
+    #: with ``-l rus`` and ``-l eng`` separately. The version with
+    #: higher mean confidence wins and replaces the original word.
+    #:
+    #: Solves the "ИНV-12345" class of errors where the line-level
+    #: LSTM mixed scripts and neither the paragraph majority nor
+    #: the numeric-context heuristic in the postprocessor can
+    #: untangle it (both run AFTER we've lost the image).
+    #:
+    #: Off by default — the re-OCR path spawns one extra Tesseract
+    #: call per mixed word (typically <3 % of words on Russian
+    #: documents) and adds ~10-20 % to per-page latency. Profiles
+    #: that explicitly prioritise accuracy (``universal_accurate``)
+    #: opt in.
+    per_word_script_disambiguation: bool = False
     #: Freeform ``-c key=value`` Tesseract parameters passed through
     #: OCRmyPDF's ``tesseract_config`` kwarg. Profile authors use this
     #: to toggle internal Tesseract behaviour that isn't exposed as a
@@ -498,6 +518,7 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         )
         ocr = data.setdefault("ocr", {})
         ocr.setdefault("adaptive_confidence_threshold", False)
+        ocr.setdefault("per_word_script_disambiguation", False)
         data["schema_version"] = 4
         version = 4
 
