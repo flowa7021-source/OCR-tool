@@ -271,18 +271,17 @@ class TestUniversalAccurateProfile:
     Scope of THIS test: "pipeline survives the full universal_accurate
     configuration and returns a COMPLETED job". We intentionally do
     NOT assert on OCR content because the profile's preprocessing
-    stack is tuned for the real 500 DPI target: Sauvola
-    ``window=41``, background removal ``blur_kernel=55``, border
-    removal ``min_line_length=125``, CLAHE, deskew, denoise chain.
-    At the capped 300 DPI (and the test input being rasterised at
-    200 DPI before being up-sampled), those parameters over-
-    aggressively strip strokes from short synthetic text like
-    "ДОГОВОР" — Tesseract ends up reading noise. That's a test-
-    harness artefact, not a pipeline bug; asserting on content
-    here would produce flaky failures unrelated to any real
-    regression. The nightly corpus matrix (running at the
-    profile's native 500 DPI on 20 adversarial documents) is
-    where we catch actual accuracy regressions.
+    stack is tuned for the real 500 DPI target: Sauvola ``window=25``,
+    background removal ``blur_kernel=55``, border removal
+    ``min_line_length=75``, CLAHE, deskew, denoise chain. At the
+    capped 300 DPI (and the test input being rasterised at 200 DPI
+    before being up-sampled), those parameters over-aggressively
+    strip strokes from short synthetic text like "ДОГОВОР" — Tesseract
+    ends up reading noise. That's a test-harness artefact, not a
+    pipeline bug; asserting on content here would produce flaky
+    failures unrelated to any real regression. The nightly corpus
+    matrix (running at the profile's native 500 DPI on 20 adversarial
+    documents) is where we catch actual accuracy regressions.
 
     What we DO assert: the job reaches ``JobStatus.COMPLETED``, the
     output PDF exists with non-trivial size, and the per-page

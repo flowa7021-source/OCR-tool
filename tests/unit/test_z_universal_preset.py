@@ -181,15 +181,17 @@ class TestUniversalAccurateProfile:
         assert "универсал" in text or "accurate" in text
 
     # ------------------------------------------------------------------
-    # Step 2 retune (Apr 2026): four knobs that together raise the
-    # perceived OCR accuracy on mixed-content scans (forms + stamps
-    # + signatures + tables). Each knob has a comment in
-    # profile_manager.py explaining the move + a test here pinning
-    # the new value so a future hand-edit won't silently undo it.
-    # Grouped under this class so `pytest -k "step2"` runs them all.
+    # Step 1 tuning lock: word-confidence filter. Step 2 (Apr 2026)
+    # also touched Sauvola window / border_removal / garbage_filter
+    # but was reverted — those numbers were speculative and hurt real-
+    # document OCR (51.5 % → 44 % mean_confidence on the user's
+    # transport-invoice scan). Any future change to those knobs MUST
+    # be justified by a before/after run of
+    # ``scripts/benchmark_universal.py`` before a lock-in test is
+    # added here.
     # ------------------------------------------------------------------
 
-    def test_step2_drops_low_conf_words(self, tmp_path: Path) -> None:
+    def test_drops_low_conf_words(self, tmp_path: Path) -> None:
         """Word-level confidence filter ON. Without this, every
         10-40%-conf stamp / signature guess ends up in the user-
         visible text and mean_confidence reads catastrophically
@@ -206,72 +208,6 @@ class TestUniversalAccurateProfile:
             "Step 1 regression: universal_accurate lost its word-"
             "confidence filter, results panel will refill with "
             "stamp/signature noise."
-        )
-
-    def test_step2_sauvola_window_matches_500_dpi_glyph_size(
-        self, tmp_path: Path
-    ) -> None:
-        """Sauvola window=41 is the 500-DPI value; window=25 (the old
-        300-DPI number) produced streaky stroke edges. If this
-        drifts back below 41 the profile is misconfigured for its
-        stated DPI target."""
-        from src.application.profile_manager import ProfileManager
-        from src.infrastructure.config_storage import ProfileStorage
-
-        storage = ProfileStorage(profiles_dir=tmp_path)
-        manager = ProfileManager(storage)
-        manager.initialize_builtins()
-        profile = storage.load("universal_accurate")
-        assert profile.preprocess.binarization.sauvola_window >= 41, (
-            f"Sauvola window={profile.preprocess.binarization.sauvola_window}"
-            f" is below the 500-DPI lower bound of 41"
-        )
-
-    def test_step2_border_removal_above_header_glyph_width(
-        self, tmp_path: Path
-    ) -> None:
-        """``min_line_length`` must clear the widest legitimate
-        header-glyph crossbar at the profile's DPI (Cyrillic Ш, Щ,
-        Ж, Latin M peak around 100 px at 500 DPI). 125 gives a
-        comfortable margin so the morph-dilate step can't leak the
-        erase mask onto adjacent body strokes."""
-        from src.application.profile_manager import ProfileManager
-        from src.infrastructure.config_storage import ProfileStorage
-
-        storage = ProfileStorage(profiles_dir=tmp_path)
-        manager = ProfileManager(storage)
-        manager.initialize_builtins()
-        profile = storage.load("universal_accurate")
-        assert profile.preprocess.border_removal.enabled, (
-            "border_removal was disabled — table borders will "
-            "fuse into adjacent text Tesseract tries to OCR"
-        )
-        assert profile.preprocess.border_removal.min_line_length >= 125, (
-            f"min_line_length="
-            f"{profile.preprocess.border_removal.min_line_length} is "
-            "below the 500-DPI safety margin of 125 — wide header "
-            "glyphs (Ш/Щ/Ж/M crossbars) can now be caught by the "
-            "erase mask."
-        )
-
-    def test_step2_garbage_filter_is_strict(self, tmp_path: Path) -> None:
-        """Strict mode drops orphan single-letter lines and
-        symbol-dominated fragments (40 %-threshold, not 70 %).
-        This is the second half of the Step 2 perception fix: the
-        word-conf filter (Step 1) cleans per-word, the strict
-        garbage filter cleans per-line."""
-        from src.application.profile_manager import ProfileManager
-        from src.infrastructure.config_storage import ProfileStorage
-
-        storage = ProfileStorage(profiles_dir=tmp_path)
-        manager = ProfileManager(storage)
-        manager.initialize_builtins()
-        profile = storage.load("universal_accurate")
-        assert profile.postprocess.garbage_filter_strictness == "strict", (
-            f"garbage_filter_strictness="
-            f"{profile.postprocess.garbage_filter_strictness!r} — "
-            "orphan 'нe / Taw / Fam' fragments will return to the "
-            "output text."
         )
 
 
