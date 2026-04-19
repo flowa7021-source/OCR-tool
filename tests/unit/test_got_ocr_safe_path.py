@@ -42,10 +42,29 @@ def test_safe_path_posix_non_ascii_passthrough(monkeypatch) -> None:
     safe branch on every platform — including the Windows CI leg,
     where a naive ``sys.platform == 'win32'`` skip previously kept
     the test from running at all.
+
+    WARNING: ``os`` is a module singleton so ``monkeypatch.setattr``
+    on ``os.name`` mutates it globally for the duration of the test.
+    While that patch is in place, ``pathlib.Path(...)`` reads the
+    hijacked value and tries to instantiate ``PosixPath`` on an
+    actual Windows host, which raises::
+
+        NotImplementedError: cannot instantiate 'PosixPath' on your system
+
+    Any ``Path(...)`` constructor — including the ones pytest itself
+    calls in its cache-provider teardown — crashes until the patch is
+    undone. We dodge this by building the test ``Path`` BEFORE
+    patching ``os.name``, then never constructing another ``Path``
+    for the rest of the test body. The sibling test
+    ``test_safe_path_falls_back_when_short_unavailable`` gets the
+    same safety for free via the ``tmp_path`` fixture (Path created
+    by pytest before the test function even starts).
     """
+    # Build the Path FIRST, while os.name is still "nt" on Windows
+    # (so pathlib resolves to WindowsPath). Only then hijack os.name.
+    p = Path("/home/Т.Н. 020/models")
     engine = _engine()
     monkeypatch.setattr("src.application.engines.got_ocr_engine.os.name", "posix")
-    p = Path("/home/Т.Н. 020/models")
     assert engine._safe_model_path(p) == str(p)
 
 
