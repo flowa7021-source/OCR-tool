@@ -305,6 +305,15 @@ class PostprocessConfig:
     #: without a custom encoder. Accepted values: ``"disabled"``,
     #: ``"lenient"`` (default), ``"strict"``.
     garbage_filter_strictness: str = "lenient"
+    #: When True, scan the OCR output for digit-only tokens that look
+    #: like Russian business identifiers (ИНН 10/12-digit, ОГРН 13/15-
+    #: digit) and replace a 1-edit-distance typo with the canonical
+    #: value from the known-good catalog. Only fires when the
+    #: ``TextPostprocessor`` was constructed with a non-empty
+    #: :class:`src.core.doc_catalog.DocCatalog` — otherwise it's a
+    #: silent no-op. Off by default so JSON-profile migrations from
+    #: pre-v3 schemas stay byte-exact; ``quick_reliable`` opts in.
+    validate_identifiers: bool = False
     custom_rules: list[RegexRule] = field(default_factory=list)
 
 

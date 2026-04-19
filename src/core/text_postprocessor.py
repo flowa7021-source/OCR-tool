@@ -16,7 +16,7 @@ import logging
 import re
 import unicodedata
 from re import Pattern
-from typing import Final
+from typing import Any, Final
 
 from src.core.garbage_filter import GarbageStrictness, filter_garbage_lines
 from src.core.models import PostprocessConfig, RegexRule
@@ -337,8 +337,26 @@ class TextPostprocessor:
         :meth:`process` so dynamic reconfiguration is allowed.
     """
 
-    def __init__(self) -> None:
-        """Pre-compile the built-in rule sets for efficiency."""
+    def __init__(
+        self,
+        *,
+        catalog: Any = None,
+    ) -> None:
+        """Pre-compile the built-in rule sets for efficiency.
+
+        Args:
+            catalog: Optional :class:`src.core.doc_catalog.DocCatalog`
+                used by the identifier-validation step when
+                :attr:`PostprocessConfig.validate_identifiers` is on.
+                Stored by reference — pass the same instance to every
+                worker to share its frozen sets.
+
+                The parameter is typed as ``Any`` (rather than
+                ``DocCatalog | None``) to avoid importing the doc
+                module at class-definition time: every ``pipeline.py``
+                unit test that patches out OCR shouldn't need to
+                import the catalog layer too.
+        """
         self._russian_rules: list[tuple[Pattern[str], str]] = _compile_rules(
             DEFAULT_RUSSIAN_RULES
         )
@@ -350,6 +368,7 @@ class TextPostprocessor:
         # `re.compile` calls. Cache by `(pattern, flags)` so the cost
         # is paid exactly once per unique rule per Postprocessor instance.
         self._user_regex_cache: dict[tuple[str, int], Pattern[str]] = {}
+        self._catalog = catalog
 
     # ------------------------------------------------------------------
     # Internal: compiled regex cache
@@ -465,6 +484,19 @@ class TextPostprocessor:
                 "Postprocess: %d custom rules evaluated", len(config.custom_rules)
             )
 
+        # Business-identifier validation runs LAST — after every other
+        # step has settled on its final tokenisation. A digit-run that
+        # was corrupted by hyphen-merge or unicode-NFC would get
+        # spuriously fixed-up; running at the tail means the number
+        # we validate is the number the user will see.
+        if (
+            getattr(config, "validate_identifiers", False)
+            and self._catalog is not None
+            and not self._catalog.is_empty
+        ):
+            current = self._validate_identifiers(current)
+            logger.debug("Postprocess: identifiers validated against catalog")
+
         return current
 
     # ------------------------------------------------------------------
@@ -539,6 +571,85 @@ class TextPostprocessor:
             else:
                 logger.debug("Postprocess: отброшена артефакт-строка: %r", stripped)
         return "\n".join(kept)
+
+    # Digit-only tokens 10-15 chars long — the union of ИНН (10 / 12)
+    # and ОГРН (13 / 15). ``\b`` anchors keep us from matching
+    # sub-sequences of longer numbers (e.g. part of a 20-digit SWIFT).
+    _IDENTIFIER_RE: Final[Pattern[str]] = re.compile(r"\b\d{10,15}\b")
+
+    def _validate_identifiers(self, text: str) -> str:
+        """Replace catalog-1-edit-matched digit tokens with canonical.
+
+        Scans for digit-runs of length 10/12 (ИНН) and 13/15 (ОГРН).
+        For each token:
+
+          1. If the token is already a valid identifier AND appears in
+             the catalog → keep as-is (canonical).
+          2. If invalid OR valid-but-absent-from-catalog: search the
+             catalog for a unique 1-edit neighbour. Replace when
+             exactly one match is found.
+          3. Otherwise leave the token alone — ambiguous and bare-
+             checksum corrections are unsafe to pick without the
+             catalog narrowing the space.
+
+        The replacements are logged at INFO so the user can audit
+        each fixup.
+        """
+        from src.core.doc_validators import (
+            catalog_assisted_fix,
+            validate_inn,
+            validate_ogrn,
+        )
+
+        catalog = self._catalog
+        if catalog is None or catalog.is_empty:
+            return text
+
+        def _pick_catalog(token: str) -> frozenset[str]:
+            # Route ИНН-shaped tokens to the INN set, ОГРН-shaped to
+            # the OGRN set. ``12``-digit tokens could be ИНН-for-
+            # individual; ``13``/``15`` are ОГРН — no overlap.
+            if len(token) in (10, 12):
+                return catalog.inns
+            if len(token) in (13, 15):
+                return catalog.ogrns
+            # 11 / 14 are only valid as one-edit-deletion inputs;
+            # route them to both catalogs so the fix can go either
+            # way (deletion of a spurious digit typically restores
+            # a 10-digit ИНН or 13-digit ОГРН).
+            if len(token) == 11:
+                return catalog.inns
+            if len(token) == 14:
+                return catalog.ogrns
+            return frozenset()
+
+        def _replace(match) -> str:
+            token = match.group(0)
+            pool = _pick_catalog(token)
+            if not pool:
+                return token
+            # A token that's already in the catalog is canonical —
+            # do not rewrite. A token that VALIDATES but isn't in
+            # the catalog is probably a novel counterparty we've
+            # never seen before; also leave it alone.
+            if token in pool:
+                return token
+            already_valid = (
+                (len(token) in (10, 12) and validate_inn(token))
+                or (len(token) in (13, 15) and validate_ogrn(token))
+            )
+            if already_valid:
+                return token
+            fixed = catalog_assisted_fix(token, known_valid=pool)
+            if fixed is None:
+                return token
+            logger.info(
+                "validate_identifiers: %r → %r (catalog match)",
+                token, fixed,
+            )
+            return fixed
+
+        return self._IDENTIFIER_RE.sub(_replace, text)
 
     def _apply_custom_rules(self, text: str, rules: list[RegexRule]) -> str:
         """Apply user-defined rules one by one, in order.

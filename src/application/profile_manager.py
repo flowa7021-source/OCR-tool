@@ -440,7 +440,12 @@ class ProfileManager:
             ),
             preprocess=preprocess,
             ocr=ocr,
-            postprocess=PostprocessConfig(),
+            # ``validate_identifiers=True`` means the postprocessor
+            # will rewrite corrupt ИНН / ОГРН tokens into their
+            # canonical form when a unique 1-edit match exists in
+            # the catalog loaded from ``expected/*.json``. Silent
+            # no-op when the catalog is empty or absent.
+            postprocess=PostprocessConfig(validate_identifiers=True),
         )
 
     def _build_low_quality(self) -> ProfileData:
