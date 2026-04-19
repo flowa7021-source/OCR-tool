@@ -55,7 +55,9 @@
     "tesseract_timeout": 300,
     "optimize_level": 1,
     "skip_text": true,
-    "max_pages": 0
+    "max_pages": 0,
+    "drop_low_conf_words": true,
+    "redact_noisy_blocks": true
   },
   "postprocess": {
     "autocorrect_russian": true,

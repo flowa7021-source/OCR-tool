@@ -207,6 +207,15 @@ class OCRConfig:
     #: word Tesseract emitted — regenerating THAT requires rewriting
     #: the hOCR stream and is a larger, separate piece of work.
     drop_low_conf_words: bool = False
+    #: When ``drop_low_conf_words`` is on, additionally redact the
+    #: ENTIRE layout block (as identified by Tesseract's ``block_num``
+    #: column) whenever the block is majority-noise. Catches stamp /
+    #: signature / fine-print-template regions where even the individual
+    #: above-threshold words are unreliable because the whole zone was
+    #: mis-analysed by Tesseract's layout stage. Off by default to
+    #: keep behaviour byte-exact for profiles that haven't opted in;
+    #: ``quick_reliable`` turns it on.
+    redact_noisy_blocks: bool = False
 
     @property
     def tesseract_language_string(self) -> str:

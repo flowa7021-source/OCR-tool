@@ -19,7 +19,10 @@ import pytest
 
 pytest.importorskip("fitz")
 
-from src.core.pdf_text_filter import filter_pdf_text_layer  # noqa: E402
+from src.core.pdf_text_filter import (  # noqa: E402
+    filter_pdf_text_layer,
+    find_noisy_blocks,
+)
 
 
 def _build_pdf_with_words(
@@ -59,16 +62,50 @@ def _pdf_text(path: Path) -> str:
 
 def _tsv(
     *rows: tuple[str, float, int, int, int, int],
+    block: int = 1,
 ) -> dict[str, list]:
     """Build an ``image_to_data``-shaped dict from ``(text, conf,
-    left_px, top_px, width_px, height_px)`` tuples."""
+    left_px, top_px, width_px, height_px)`` tuples. All rows live in
+    one block by default; multi-block fixtures use :func:`_tsv_blocks`.
+    """
     return {
-        "text":   [r[0] for r in rows],
-        "conf":   [r[1] for r in rows],
-        "left":   [r[2] for r in rows],
-        "top":    [r[3] for r in rows],
-        "width":  [r[4] for r in rows],
-        "height": [r[5] for r in rows],
+        "text":      [r[0] for r in rows],
+        "conf":      [r[1] for r in rows],
+        "left":      [r[2] for r in rows],
+        "top":       [r[3] for r in rows],
+        "width":     [r[4] for r in rows],
+        "height":    [r[5] for r in rows],
+        "block_num": [block] * len(rows),
+    }
+
+
+def _tsv_blocks(
+    *groups: tuple[int, list[tuple[str, float, int, int, int, int]]],
+) -> dict[str, list]:
+    """Build a multi-block TSV. Each ``(block_num, [rows...])`` group
+    contributes rows tagged with that block id — lets a single test
+    fixture cover "this page has two layout blocks, one noisy".
+    """
+    texts, confs, lefts, tops, widths, heights, blocks = (
+        [], [], [], [], [], [], [],
+    )
+    for blk, rows in groups:
+        for r in rows:
+            texts.append(r[0])
+            confs.append(r[1])
+            lefts.append(r[2])
+            tops.append(r[3])
+            widths.append(r[4])
+            heights.append(r[5])
+            blocks.append(blk)
+    return {
+        "text":      texts,
+        "conf":      confs,
+        "left":      lefts,
+        "top":       tops,
+        "width":     widths,
+        "height":    heights,
+        "block_num": blocks,
     }
 
 
@@ -257,12 +294,14 @@ class TestFilterSafety:
         assert redacted == 0
         assert "keep" in _pdf_text(pdf)
 
-    def test_module_exports_filter_only(self) -> None:
-        """Tripwire: if someone adds another public function without
-        updating __all__ / the module docstring, this fails loudly."""
+    def test_module_exports_public_surface(self) -> None:
+        """Tripwire: ``__all__`` must contain exactly the public helpers
+        documented in the module docstring + tested here. If someone
+        adds a third public function without updating this list, this
+        fails loudly."""
         import src.core.pdf_text_filter as m
 
-        assert m.__all__ == ["filter_pdf_text_layer"]
+        assert set(m.__all__) == {"filter_pdf_text_layer", "find_noisy_blocks"}
 
 
 class TestMultiPage:
@@ -309,3 +348,209 @@ class TestMultiPage:
             page2_text = d.load_page(1).get_text("text") or ""
         assert "keep1" in page1_text and "foo" not in page1_text
         assert "keep2" in page2_text and "bar" not in page2_text
+
+
+# ---------------------------------------------------------------------------
+# find_noisy_blocks — unit tests for the pure helper
+# ---------------------------------------------------------------------------
+
+
+class TestFindNoisyBlocks:
+    """Block-level "majority noise" detection from the TSV."""
+
+    def test_empty_tsv_returns_empty_list(self) -> None:
+        assert find_noisy_blocks({}, min_confidence=60.0) == []
+
+    def test_block_below_min_words_is_ignored(self) -> None:
+        """A 2-word block is too small-sample to trust its ratio —
+        page numbers / captions often hit 100 % noise by chance."""
+        tsv = _tsv_blocks(
+            (1, [
+                ("junk1", 10.0, 0, 0, 10, 10),
+                ("junk2", 15.0, 0, 15, 10, 10),
+            ]),
+        )
+        assert find_noisy_blocks(
+            tsv, min_confidence=60.0, min_block_words=3,
+        ) == []
+
+    def test_noisy_block_returned_bbox_encloses_all_words(self) -> None:
+        """Majority-noise block: bbox spans from the leftmost/top-most
+        word to the rightmost/bottom-most."""
+        tsv = _tsv_blocks(
+            (1, [
+                ("real",  90.0, 100, 100, 40, 15),
+                ("junk1", 10.0, 200, 100, 40, 15),
+                ("junk2", 15.0, 300, 120, 40, 15),
+                ("junk3", 20.0, 400, 110, 40, 15),
+            ]),
+        )
+        noisy = find_noisy_blocks(tsv, min_confidence=60.0)
+        # 3 / 4 words noisy = 75 % > 0.5 threshold
+        assert len(noisy) == 1
+        left, top, width, height = noisy[0]
+        # Encloses all words: left=100 (from "real"), right=440
+        # (from "junk3"), top=100, bottom=135.
+        assert left == 100
+        assert top == 100
+        assert width == 340   # 440 - 100
+        assert height == 35   # 135 - 100
+
+    def test_clean_block_not_returned(self) -> None:
+        tsv = _tsv_blocks(
+            (1, [
+                ("body1", 95.0, 100, 100, 40, 15),
+                ("body2", 92.0, 150, 100, 40, 15),
+                ("body3", 90.0, 200, 100, 40, 15),
+                ("body4", 15.0, 250, 100, 40, 15),  # 1/4 noise, < 50%
+            ]),
+        )
+        assert find_noisy_blocks(tsv, min_confidence=60.0) == []
+
+    def test_multi_block_only_noisy_ones_returned(self) -> None:
+        """Page has two blocks. Block 1 clean, block 2 is a stamp
+        zone. Only block 2 should be flagged."""
+        tsv = _tsv_blocks(
+            (1, [
+                ("Hello", 95.0, 50,  50, 60, 15),
+                ("World", 95.0, 120, 50, 60, 15),
+                ("body",  90.0, 180, 50, 60, 15),
+                ("text",  92.0, 250, 50, 60, 15),
+            ]),
+            (2, [
+                ("noise1", 20.0, 500, 800, 50, 15),
+                ("noise2", 15.0, 560, 800, 50, 15),
+                ("noise3", 10.0, 620, 800, 50, 15),
+                ("noise4", 25.0, 680, 800, 50, 15),
+            ]),
+        )
+        noisy = find_noisy_blocks(tsv, min_confidence=60.0)
+        assert len(noisy) == 1
+        left, top, _, _ = noisy[0]
+        # The returned bbox is block 2's (stamp zone), not block 1's.
+        assert left == 500
+        assert top == 800
+
+    def test_noise_ratio_threshold_boundary(self) -> None:
+        """Exactly at the ratio threshold counts as "noisy"."""
+        # 2/4 = 50% exactly — at the threshold, included.
+        tsv = _tsv_blocks(
+            (1, [
+                ("a", 95.0, 0,  0, 10, 10),
+                ("b", 90.0, 20, 0, 10, 10),
+                ("c", 20.0, 40, 0, 10, 10),
+                ("d", 15.0, 60, 0, 10, 10),
+            ]),
+        )
+        assert len(find_noisy_blocks(
+            tsv, min_confidence=60.0, noise_ratio=0.5,
+        )) == 1
+
+    def test_custom_noise_ratio(self) -> None:
+        """Stricter ratio (e.g. 0.8) lets more blocks through."""
+        tsv = _tsv_blocks(
+            (1, [
+                ("a", 95.0, 0,  0, 10, 10),
+                ("b", 20.0, 20, 0, 10, 10),
+                ("c", 15.0, 40, 0, 10, 10),
+                ("d", 10.0, 60, 0, 10, 10),
+            ]),
+        )
+        # 3/4 = 75% — noisy at default 0.5, NOT noisy at 0.8.
+        assert len(find_noisy_blocks(
+            tsv, min_confidence=60.0, noise_ratio=0.5,
+        )) == 1
+        assert len(find_noisy_blocks(
+            tsv, min_confidence=60.0, noise_ratio=0.8,
+        )) == 0
+
+
+# ---------------------------------------------------------------------------
+# filter_pdf_text_layer — block-level redaction end-to-end
+# ---------------------------------------------------------------------------
+
+
+class TestBlockRedaction:
+    """``redact_noisy_blocks=True`` wipes the whole block, not just
+    the individually-low-conf words inside it."""
+
+    def test_borderline_conf_word_in_noisy_block_is_also_redacted(
+        self, tmp_path: Path
+    ) -> None:
+        """A word with conf=70 (above threshold=60) but sitting inside
+        a 75 %-noise block gets swept out with the rest of the block.
+        Without this, a borderline-confident 'ТРАНСПОРТ' stamped
+        inside a stamp rectangle would sneak through the per-word
+        filter."""
+        pdf = _build_pdf_with_words(
+            tmp_path / "stamp.pdf",
+            words=[
+                ("body",    50.0, 100.0),
+                ("stamp1",  100.0, 400.0),
+                ("stamp2",  160.0, 400.0),
+                ("stamp3",  220.0, 400.0),
+                ("STAMP70", 280.0, 400.0),  # inside stamp block, conf=70
+            ],
+        )
+        tsv = _tsv_blocks(
+            (1, [("body", 92.0, 50, 90, 40, 15)]),
+            # Block 2: 3/4 noise (75 %), above the 50 % ratio threshold.
+            (2, [
+                ("stamp1",  20.0, 100, 390, 40, 15),
+                ("stamp2",  15.0, 160, 390, 40, 15),
+                ("stamp3",  25.0, 220, 390, 40, 15),
+                ("STAMP70", 70.0, 280, 390, 60, 15),  # borderline
+            ]),
+        )
+        redacted = filter_pdf_text_layer(
+            pdf,
+            tsv_per_page=[tsv],
+            image_sizes_px=[(612, 792)],
+            min_confidence=60.0,
+            redact_noisy_blocks=True,
+        )
+        # 3 per-word (stamp1/2/3) + 1 per-block = 4 redactions.
+        assert redacted == 4
+        text = _pdf_text(pdf)
+        assert "body" in text, "clean block was preserved"
+        assert "stamp1" not in text
+        assert "stamp2" not in text
+        assert "stamp3" not in text
+        # Critical: the borderline-conf word that survived per-word
+        # filtering is nevertheless gone because its block was noisy.
+        assert "STAMP70" not in text, (
+            "borderline-conf word inside stamp block leaked through"
+        )
+
+    def test_flag_off_leaves_borderline_words(self, tmp_path: Path) -> None:
+        """Default behaviour (flag off) keeps the borderline word —
+        backwards-compat for profiles that haven't opted in."""
+        pdf = _build_pdf_with_words(
+            tmp_path / "stamp.pdf",
+            words=[
+                ("body",    50.0, 100.0),
+                ("stamp1",  100.0, 400.0),
+                ("stamp2",  160.0, 400.0),
+                ("STAMP70", 220.0, 400.0),
+            ],
+        )
+        tsv = _tsv_blocks(
+            (1, [("body", 92.0, 50, 90, 40, 15)]),
+            (2, [
+                ("stamp1",  20.0, 100, 390, 40, 15),
+                ("stamp2",  15.0, 160, 390, 40, 15),
+                ("STAMP70", 70.0, 220, 390, 60, 15),
+            ]),
+        )
+        redacted = filter_pdf_text_layer(
+            pdf,
+            tsv_per_page=[tsv],
+            image_sizes_px=[(612, 792)],
+            min_confidence=60.0,
+            redact_noisy_blocks=False,
+        )
+        assert redacted == 2  # only per-word (stamp1, stamp2)
+        text = _pdf_text(pdf)
+        assert "STAMP70" in text, (
+            "flag off → borderline word survives, as expected"
+        )

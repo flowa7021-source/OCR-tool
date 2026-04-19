@@ -1142,6 +1142,9 @@ class OCRPipeline:
                     tsv_per_page=tsv_per_page,
                     image_sizes_px=image_sizes_px,
                     min_confidence=threshold,
+                    redact_noisy_blocks=(
+                        job.profile.ocr.redact_noisy_blocks
+                    ),
                 )
                 logger.info(
                     "PDF text-layer filter: redacted %d word region(s) "
