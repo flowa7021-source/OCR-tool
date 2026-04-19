@@ -273,6 +273,18 @@ class ProfileManager:
             # the 900 s cap before falling back to the simplified-
             # settings tier.
             tesseract_timeout=450,
+            # Word-level confidence filter. On mixed-content scans
+            # (forms + stamps + signatures + logos) Tesseract emits a
+            # long tail of 10–40 %-confidence guesses from the
+            # non-text regions. Without this flag those guesses end
+            # up in the user-facing text next to real content, and a
+            # 51 % mean_confidence reads to the user as "51 % of the
+            # document is gibberish" even though 90 % of it is clean.
+            # With the filter on, the results panel / TXT / DOCX
+            # export show only words meeting ``confidence_threshold``
+            # (60 %), and mean_conf is reported over the kept set.
+            # See ``src.core.confidence_filter`` for the mechanism.
+            drop_low_conf_words=True,
         )
         postprocess = PostprocessConfig(
             autocorrect_russian=True,

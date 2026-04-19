@@ -1046,6 +1046,42 @@ class OCRPipeline:
                 if confidences:
                     pr.mean_confidence = sum(confidences) / len(confidences)
                     pr.low_confidence_words = low_words
+
+                # Word-level drop: rebuild pr.text from the same TSV,
+                # dropping every word below ``confidence_threshold``. The
+                # searchable-PDF text layer is still the OCRmyPDF union
+                # (see :mod:`src.core.confidence_filter` module docstring),
+                # but the user-facing text — results panel, TXT/DOCX
+                # export — is now the cleaner filtered version. Empty
+                # reconstructions leave ``pr.text`` untouched so we never
+                # blank out a result just because confidence scoring
+                # itself was noisy. Mean-conf is also recomputed over
+                # the KEPT words so the UI doesn't flash a lower number
+                # than what the user is actually looking at.
+                if job.profile.ocr.drop_low_conf_words:
+                    from src.core.confidence_filter import (
+                        reconstruct_text_from_tsv,
+                    )
+
+                    filtered = reconstruct_text_from_tsv(
+                        data, min_confidence=threshold,
+                    )
+                    if filtered.strip():
+                        pr.text = self._postprocess_text(
+                            filtered, job.profile.postprocess,
+                        )
+                        kept = [c for c in confidences if c >= threshold]
+                        if kept:
+                            pr.mean_confidence = sum(kept) / len(kept)
+                        logger.info(
+                            "Page %d: word-conf filter dropped %d/%d "
+                            "words (threshold=%.1f), kept mean_conf=%.1f",
+                            pr.page_number,
+                            len(confidences) - len(kept),
+                            len(confidences),
+                            threshold,
+                            pr.mean_confidence,
+                        )
             except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "Confidence computation failed for page %d: %s",

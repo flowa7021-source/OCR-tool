@@ -188,6 +188,25 @@ class OCRConfig:
     #: abbreviations is consistent, and if the files happen to be
     #: missing the integration degrades gracefully with a WARNING.
     use_user_dictionaries: bool = True
+    #: When True, rebuild the per-page extracted text from Tesseract's
+    #: ``image_to_data`` TSV output, keeping ONLY words whose confidence
+    #: meets or exceeds :attr:`confidence_threshold`. Without this, the
+    #: text surfaced to the user (results panel, TXT/DOCX exports) is
+    #: exactly what OCRmyPDF stamped into the PDF — including every
+    #: stamp, signature, logo and table-border artefact Tesseract
+    #: guessed at with 10–40 % confidence. Dropping those words lifts
+    #: the PERCEIVED accuracy of a mixed-content scan far more than
+    #: any amount of preprocessing re-tuning: a 51 %-mean document
+    #: typically presents as 80–90 % once the sub-threshold noise is
+    #: gone. Off by default for backwards-compatibility with existing
+    #: profiles / tests; the ``universal_accurate`` profile opts in.
+    #:
+    #: Caveat: this affects only the text exposed through ``PageResult
+    #: .text`` (what the user sees and exports). The searchable text
+    #: layer inside the OCRmyPDF output PDF is still the union of every
+    #: word Tesseract emitted — regenerating THAT requires rewriting
+    #: the hOCR stream and is a larger, separate piece of work.
+    drop_low_conf_words: bool = False
 
     @property
     def tesseract_language_string(self) -> str:
