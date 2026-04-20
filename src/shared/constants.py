@@ -8,7 +8,14 @@ from pathlib import Path
 
 # --- Application identity ---
 APP_NAME: str = "OCR Studio"
-APP_VERSION: str = "1.1.0"
+#: Bumped to invalidate stale OCR cache entries. The cache key is
+#: ``sha256(input) + sha256(profile) + APP_VERSION``; bumping this
+#: forces every cached result to miss on the next run, which is the
+#: right thing to do when accuracy-affecting code changes that don't
+#: appear in the profile JSON — e.g. Tesseract retry-ladder logic,
+#: ``resources/tessdata/user-words.rus`` contents, confidence-filter
+#: heuristics. 1.2.0 → post-Apr-2026 accuracy sprint.
+APP_VERSION: str = "1.2.0"
 APP_ORGANIZATION: str = "OCRStudio"
 APP_ID: str = "com.ocrstudio.app"
 

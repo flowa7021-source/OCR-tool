@@ -1435,16 +1435,21 @@ class OCRPipeline:
                     if c < threshold:
                         low_words.append(word)
                 # Per-word script disambiguation: for mixed-script
-                # tokens, re-OCR each word's bbox with ``-l rus`` and
-                # ``-l eng`` separately and pick the higher-confidence
-                # result. Solves the "ИНV-12345" class of errors
-                # before the paragraph-majority / numeric-context
-                # heuristics in the text postprocessor run.
+                # tokens AND short all-caps words that might be Latin
+                # brands mis-recognised as Cyrillic (``TENSAR`` →
+                # ``Тапваг``, ``SCANIA`` → ``СКАНИЯ`` / garbage), re-
+                # OCR each word's bbox with ``-l rus`` and ``-l eng``
+                # separately and pick the higher-confidence result.
+                # Solves the "ИНV-12345" class AND the
+                # brand-name-russified class before the paragraph-
+                # majority / numeric-context heuristics in the text
+                # postprocessor run.
                 if getattr(
                     job.profile.ocr, "per_word_script_disambiguation", False,
                 ):
                     from src.core.per_word_script_disambiguator import (
                         disambiguate_word,
+                        is_latin_brand_suspect,
                     )
                     from src.core.text_postprocessor import (
                         _classify_word_script,
@@ -1467,7 +1472,8 @@ class OCRPipeline:
                             continue
                         if c < 0:
                             continue
-                        if _classify_word_script(word) != "mixed":
+                        klass = _classify_word_script(word)
+                        if klass != "mixed" and not is_latin_brand_suspect(word):
                             continue
                         try:
                             bbox = (

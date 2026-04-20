@@ -55,6 +55,44 @@ _BBOX_PADDING_PX: int = 6
 _MIN_CONFIDENCE_LIFT: float = 5.0
 
 
+def is_latin_brand_suspect(word: str) -> bool:
+    """Return True for tokens that might be a Latin brand mis-read as
+    Cyrillic (``TENSAR`` → ``Тапваг``, ``SCANIA`` → garbage).
+
+    The look-alike classifier in :mod:`src.core.text_postprocessor`
+    returns ``"cyr"`` (unambiguous Cyrillic) for such tokens because
+    Tesseract's LSTM happily renders Latin letters as Cyrillic-
+    EXCLUSIVE characters when forced through ``-l rus+eng`` on a
+    Russian-dominant page — not a look-alike swap but a fresh
+    hallucination biased by the dominant script. The classifier
+    can't recover that without image-level re-OCR.
+
+    This heuristic picks up the class of suspicious tokens that
+    SHOULD be re-OCR'd despite not being "mixed":
+
+      * 3-10 chars (short enough to plausibly be a brand abbrev
+        or acronym; longer tokens are prose).
+      * All uppercase — Russian prose has very few all-caps
+        tokens; invoices / catalogues are full of them (ИНН, КПП,
+        ОГРН, brand names, product codes).
+      * Alphabetic only (no digits / punctuation) — digit-mixed
+        codes are caught by the numeric-context path in the
+        postprocessor.
+
+    Russian all-caps acronyms (``ИНН``, ``ОГРН`` etc) trigger this
+    heuristic too, but that's fine: the disambiguator will run
+    both ``-l rus`` and ``-l eng`` re-OCR and Russian wins the
+    confidence race for a genuinely-Cyrillic token. Cost is one
+    extra Tesseract call per candidate, which is ~5-15 tokens per
+    page on typical Russian business docs.
+    """
+    if not (3 <= len(word) <= 10):
+        return False
+    if not word.isupper():
+        return False
+    return all(ch.isalpha() for ch in word)
+
+
 def _run_single_lang_ocr(
     crop: Any, lang: str, tess_config: str,
 ) -> tuple[str, float] | None:
@@ -183,4 +221,4 @@ def disambiguate_word(
     return best_word, best_conf
 
 
-__all__ = ["disambiguate_word"]
+__all__ = ["disambiguate_word", "is_latin_brand_suspect"]

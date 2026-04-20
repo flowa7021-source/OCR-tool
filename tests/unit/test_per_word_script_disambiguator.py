@@ -6,7 +6,74 @@ from unittest.mock import patch
 
 import numpy as np
 
-from src.core.per_word_script_disambiguator import disambiguate_word
+from src.core.per_word_script_disambiguator import (
+    disambiguate_word,
+    is_latin_brand_suspect,
+)
+
+
+class TestIsLatinBrandSuspect:
+    """Heuristic for "should we speculative-Latin re-OCR this token?"
+
+    The look-alike classifier in text_postprocessor returns ``"cyr"``
+    for tokens like ``Тапваг`` (Tesseract's hallucinated rendering of
+    ``TENSAR`` on a Russian-dominant page) — not "mixed" — so the
+    disambiguator would skip them without this extra trigger.
+    """
+
+    def test_all_caps_cyrillic_is_suspect(self) -> None:
+        assert is_latin_brand_suspect("ТАПВАГ")
+        assert is_latin_brand_suspect("СКАНИЯ")
+        assert is_latin_brand_suspect("ИНН")
+
+    def test_all_caps_latin_is_suspect(self) -> None:
+        assert is_latin_brand_suspect("TENSAR")
+        assert is_latin_brand_suspect("SCANIA")
+        assert is_latin_brand_suspect("VOLVO")
+
+    def test_mixed_case_not_suspect(self) -> None:
+        """Prose tokens in mixed or lowercase are Russian body text —
+        re-OCR would just waste cycles."""
+        assert not is_latin_brand_suspect("Тапваг")
+        assert not is_latin_brand_suspect("Scania")
+        assert not is_latin_brand_suspect("contract")
+
+    def test_too_short_not_suspect(self) -> None:
+        # 2-char tokens are too short to safely apply re-OCR — they're
+        # often fragments from table cells / stamp-overlay lines.
+        assert not is_latin_brand_suspect("XY")
+        assert not is_latin_brand_suspect("АБ")
+
+    def test_too_long_not_suspect(self) -> None:
+        # Long all-caps tokens are typically yelled prose / stamp text,
+        # not brand acronyms. Skip re-OCR to avoid false positives.
+        assert not is_latin_brand_suspect("ABCDEFGHIJK")  # 11 chars
+        assert not is_latin_brand_suspect("АБВГДЕЖЗИКЛ")
+
+    def test_digits_not_suspect(self) -> None:
+        # Digit-mixed codes are caught by the numeric-context path in
+        # the postprocessor; the disambiguator skips them here to
+        # avoid double-processing.
+        assert not is_latin_brand_suspect("USD123")
+        assert not is_latin_brand_suspect("INV12")
+        assert not is_latin_brand_suspect("1234567")
+
+    def test_punctuation_not_suspect(self) -> None:
+        assert not is_latin_brand_suspect("INV-5")
+        assert not is_latin_brand_suspect("P.O.")
+
+    def test_empty_not_suspect(self) -> None:
+        assert not is_latin_brand_suspect("")
+
+    def test_three_char_boundary(self) -> None:
+        # 3 is the lower bound — inclusive.
+        assert is_latin_brand_suspect("ДСК")
+        assert is_latin_brand_suspect("MAN")
+
+    def test_ten_char_boundary(self) -> None:
+        # 10 is the upper bound — inclusive.
+        assert is_latin_brand_suspect("TRANSINZKO")  # 10 chars
+        assert is_latin_brand_suspect("ТРАНСИНЖКО")
 
 
 def _fake_tsv(words: list[str], confs: list[float]) -> dict:
