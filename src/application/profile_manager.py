@@ -333,6 +333,13 @@ class ProfileManager:
             # with Latin islands; zero cost when there are no mixed
             # tokens.
             per_word_script_disambiguation=True,
+            # Per-word image rescue for borderline-conf tokens —
+            # CLAHE + sharpen first (cheap), upscale second (for
+            # tiny-glyph text the CLAHE pass couldn't lift). Both
+            # only fire on words in the 30-70 conf band so rescues
+            # don't churn already-correct text.
+            per_word_clahe_rescue=True,
+            per_word_upscale_rescue=True,
             extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
         )
         postprocess = PostprocessConfig(

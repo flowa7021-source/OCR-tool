@@ -1011,8 +1011,13 @@ class OCRPipeline:
         # into Cyrillic look-alikes Tesseract reports with high
         # confidence (``ТЕМЗАК``) that the disambiguator can't
         # break at the binary layer.
+        # Persist pre-binarisation grayscale when ANY per-word re-OCR
+        # rescue is on (script disambiguator, CLAHE, upscale). All
+        # three need the tonal range OTSU / Sauvola destroyed.
         want_gray = bool(
             getattr(profile.ocr, "per_word_script_disambiguation", False)
+            or getattr(profile.ocr, "per_word_clahe_rescue", False)
+            or getattr(profile.ocr, "per_word_upscale_rescue", False)
         )
 
         def _worker(idx: int) -> None:
@@ -1457,6 +1462,38 @@ class OCRPipeline:
                     confidences.append(c)
                     if c < threshold:
                         low_words.append(word)
+                # Source image for any per-word re-OCR rescue
+                # (disambiguator, CLAHE, upscale). The pre-binarisation
+                # grayscale snapshot (saved by the preprocess worker
+                # when any rescue flag is on) preserves faint strokes
+                # that OTSU / Sauvola destroyed — essential for
+                # ``-l eng`` to win confidence races on faded-ink
+                # brands and for CLAHE to have tonal range to boost.
+                # Falls back to the binary ``img`` when the gray
+                # snapshot is missing (older code paths / profile
+                # didn't opt in).
+                rescue_image = img
+                gray_path = png_path.with_name(
+                    png_path.stem + "_gray.png",
+                )
+                if gray_path.exists():
+                    try:
+                        raw_g = np.frombuffer(
+                            gray_path.read_bytes(), dtype=np.uint8,
+                        )
+                        gray_img = (
+                            cv2.imdecode(raw_g, cv2.IMREAD_UNCHANGED)
+                            if raw_g.size else None
+                        )
+                        if gray_img is not None:
+                            rescue_image = gray_img
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "page %d: failed to read pre-binary "
+                            "grayscale (%s) — rescues fall back to binary",
+                            pr.page_number, exc,
+                        )
+
                 # Per-word script disambiguation: for mixed-script
                 # tokens AND short all-caps words that might be Latin
                 # brands mis-recognised as Cyrillic (``TENSAR`` →
@@ -1505,37 +1542,8 @@ class OCRPipeline:
                             )
                         except (TypeError, ValueError, IndexError):
                             continue
-                        # Prefer the pre-binarisation grayscale for
-                        # re-OCR when the preprocess stage saved one
-                        # (faded Latin brands dissolve into Cyrillic
-                        # hallucinations after OTSU — ``TENSAR`` →
-                        # ``ТЕМЗАК`` — and only the pre-binary image
-                        # retains enough stroke evidence for the
-                        # ``-l eng`` pass to win the confidence race).
-                        disambig_image = img
-                        gray_path = png_path.with_name(
-                            png_path.stem + "_gray.png",
-                        )
-                        if gray_path.exists():
-                            try:
-                                raw_g = np.frombuffer(
-                                    gray_path.read_bytes(), dtype=np.uint8,
-                                )
-                                gray_img = (
-                                    cv2.imdecode(raw_g, cv2.IMREAD_UNCHANGED)
-                                    if raw_g.size else None
-                                )
-                                if gray_img is not None:
-                                    disambig_image = gray_img
-                            except Exception as exc:  # noqa: BLE001
-                                logger.debug(
-                                    "page %d: failed to read pre-binary "
-                                    "grayscale for disambiguator (%s) — "
-                                    "falling back to binary",
-                                    pr.page_number, exc,
-                                )
                         new_word, new_conf = disambiguate_word(
-                            disambig_image, bbox, word, c, tess_cfg,
+                            rescue_image, bbox, word, c, tess_cfg,
                         )
                         if new_word != word:
                             texts[i] = new_word
@@ -1554,9 +1562,82 @@ class OCRPipeline:
                             # clear any reasonable adaptive ceiling.
                             confs_raw[i] = str(max(new_conf, 80.0))
 
-                    # Rebuild the confidences list from the possibly-
-                    # updated data so the downstream mean / threshold
-                    # logic sees the disambiguated numbers.
+                # Per-word image-enhancement rescue for borderline
+                # words (30-70 conf band). Runs AFTER the script
+                # disambiguator so its swaps are still visible, and
+                # BEFORE the adaptive-threshold decision / drop
+                # filter so the rescued confidences feed into both.
+                # CLAHE rescue runs first (cheap); upscale rescue
+                # fires only on words the CLAHE pass didn't already
+                # lift above the lift threshold.
+                use_clahe_rescue = getattr(
+                    job.profile.ocr, "per_word_clahe_rescue", False,
+                )
+                use_upscale_rescue = getattr(
+                    job.profile.ocr, "per_word_upscale_rescue", False,
+                )
+                if use_clahe_rescue or use_upscale_rescue:
+                    from src.core.per_word_image_rescue import (
+                        clahe_sharpen_rescue,
+                        upscale_rescue,
+                    )
+
+                    texts = data.get("text", [])
+                    confs_raw = data.get("conf", [])
+                    lefts = data.get("left", [])
+                    tops = data.get("top", [])
+                    widths = data.get("width", [])
+                    heights = data.get("height", [])
+
+                    for i in range(len(texts)):
+                        word = texts[i] if isinstance(texts[i], str) else ""
+                        if not word.strip():
+                            continue
+                        try:
+                            c = float(confs_raw[i])
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                        if c < 0:
+                            continue
+                        try:
+                            bbox = (
+                                int(lefts[i]), int(tops[i]),
+                                int(widths[i]), int(heights[i]),
+                            )
+                        except (TypeError, ValueError, IndexError):
+                            continue
+
+                        cur_word, cur_conf = word, c
+                        if use_clahe_rescue:
+                            cur_word, cur_conf = clahe_sharpen_rescue(
+                                rescue_image, bbox,
+                                cur_word, cur_conf,
+                                lang, tess_cfg,
+                            )
+                        if (
+                            use_upscale_rescue
+                            and cur_conf < 80.0  # skip if already high
+                        ):
+                            cur_word, cur_conf = upscale_rescue(
+                                rescue_image, bbox,
+                                cur_word, cur_conf,
+                                lang, tess_cfg,
+                            )
+                        if cur_word != word or cur_conf != c:
+                            texts[i] = cur_word
+                            confs_raw[i] = str(cur_conf)
+
+                # Rebuild the confidences list from the possibly-
+                # updated data so the downstream mean / threshold
+                # logic sees the disambiguated / rescued numbers.
+                if (
+                    getattr(
+                        job.profile.ocr,
+                        "per_word_script_disambiguation", False,
+                    )
+                    or use_clahe_rescue
+                    or use_upscale_rescue
+                ):
                     confidences = []
                     for val in confs_raw:
                         try:

@@ -282,6 +282,27 @@ class OCRConfig:
     #: that explicitly prioritise accuracy (``universal_accurate``)
     #: opt in.
     per_word_script_disambiguation: bool = False
+    #: Per-word CLAHE + unsharp-mask rescue. For each line-level
+    #: word with ``30 ≤ conf ≤ 70`` (the "faded ink, uncertain but
+    #: not pure noise" band), crop the bbox from the pre-
+    #: binarisation grayscale snapshot, apply aggressive CLAHE
+    #: (clip=8) + Gaussian unsharp-mask (σ=1.2), re-OCR with
+    #: ``--psm 8``, and swap in the result when it clears a 10-point
+    #: confidence lift. Cheap (~5 ms per candidate) and targeted at
+    #: the failure mode where Tesseract's single-pass preprocessing
+    #: was too conservative for a specific word. Off by default;
+    #: ``universal_accurate`` opts in.
+    per_word_clahe_rescue: bool = False
+    #: Per-word 2× bicubic upscale rescue. Same gate (30-70 conf
+    #: band) as the CLAHE rescue, applied independently. Targets
+    #: tiny-glyph text (stamp body lines, printed ticker-tape at
+    #: 10-15 px height) where the LSTM scores poorly because the
+    #: trained regime is 20-40 px per glyph. Costs one extra
+    #: Tesseract call on a 4× pixel crop, typically ~50 ms per
+    #: candidate. Stacks with ``per_word_clahe_rescue`` — CLAHE
+    #: runs first (cheap), upscale runs only on words the CLAHE
+    #: pass didn't lift.
+    per_word_upscale_rescue: bool = False
     #: Freeform ``-c key=value`` Tesseract parameters passed through
     #: OCRmyPDF's ``tesseract_config`` kwarg. Profile authors use this
     #: to toggle internal Tesseract behaviour that isn't exposed as a
@@ -427,7 +448,7 @@ class PostprocessConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 5
+PROFILE_SCHEMA_VERSION: int = 6
 
 
 @dataclass
@@ -544,6 +565,17 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         post.setdefault("mark_suspect_handwritten_blocks", False)
         data["schema_version"] = 5
         version = 5
+
+    # v5 → v6: add the per-word image-enhancement rescue flags.
+    # Old profiles default both to False to preserve byte-identical
+    # behaviour; builtin builders turn them on in
+    # ``universal_accurate``.
+    if version < 6:
+        ocr = data.setdefault("ocr", {})
+        ocr.setdefault("per_word_clahe_rescue", False)
+        ocr.setdefault("per_word_upscale_rescue", False)
+        data["schema_version"] = 6
+        version = 6
 
     return data
 
