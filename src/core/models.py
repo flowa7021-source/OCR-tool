@@ -303,6 +303,20 @@ class OCRConfig:
     #: runs first (cheap), upscale runs only on words the CLAHE
     #: pass didn't lift.
     per_word_upscale_rescue: bool = False
+    #: Fuzzy-match rescue against ``user-words.rus``. For each
+    #: line-level word in the 30-75 confidence band, find the
+    #: closest dictionary entry within Levenshtein distance 1
+    #: (short words) or 2 (≥ 6 char words) and swap in the
+    #: canonical spelling. No extra Tesseract call — pure
+    #: dict + edit-distance lookup, ~100× cheaper than re-OCR.
+    #: Catches the class of errors where the CROP was readable
+    #: but the LSTM's vocabulary wasn't biased strongly enough
+    #: at primary OCR time (``ИНЦ`` → ``ИНН``, ``Скаnia`` →
+    #: ``Scania``). Depends on ``use_user_dictionaries`` being
+    #: True so the same catalog file the DAWG loaded is
+    #: available at rescue time. Off by default;
+    #: ``universal_accurate`` opts in.
+    user_words_fuzzy_rescue: bool = False
     #: Freeform ``-c key=value`` Tesseract parameters passed through
     #: OCRmyPDF's ``tesseract_config`` kwarg. Profile authors use this
     #: to toggle internal Tesseract behaviour that isn't exposed as a
@@ -448,7 +462,7 @@ class PostprocessConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 6
+PROFILE_SCHEMA_VERSION: int = 7
 
 
 @dataclass
@@ -576,6 +590,15 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         ocr.setdefault("per_word_upscale_rescue", False)
         data["schema_version"] = 6
         version = 6
+
+    # v6 → v7: add ``user_words_fuzzy_rescue`` flag. Default False
+    # on migration — rescue is opt-in and universal_accurate's
+    # builder turns it on explicitly.
+    if version < 7:
+        ocr = data.setdefault("ocr", {})
+        ocr.setdefault("user_words_fuzzy_rescue", False)
+        data["schema_version"] = 7
+        version = 7
 
     return data
 

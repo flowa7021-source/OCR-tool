@@ -1627,6 +1627,57 @@ class OCRPipeline:
                             texts[i] = cur_word
                             confs_raw[i] = str(cur_conf)
 
+                # User-words fuzzy rescue — dictionary-backed post-OCR
+                # correction. Runs LAST so it can fix tokens the image
+                # rescues couldn't (the CROP was readable but the LSTM
+                # output ``ИНЦ`` for ``ИНН`` anyway). Zero extra
+                # Tesseract calls — pure dict + Levenshtein.
+                use_user_words_rescue = getattr(
+                    job.profile.ocr, "user_words_fuzzy_rescue", False,
+                )
+                if use_user_words_rescue:
+                    from src.application.ocrmypdf_integration import (
+                        _resolve_user_dict_paths,
+                    )
+                    from src.core.user_words_rescue import (
+                        load_user_words_catalog,
+                        user_words_fuzzy_rescue,
+                    )
+
+                    words_path, _patterns_path = _resolve_user_dict_paths(
+                        job.profile.ocr.primary_language,
+                    )
+                    catalog = load_user_words_catalog(words_path)
+                    if catalog is not None:
+                        texts = data.get("text", [])
+                        confs_raw = data.get("conf", [])
+                        changed_uw = 0
+                        for i in range(len(texts)):
+                            word = (
+                                texts[i] if isinstance(texts[i], str) else ""
+                            )
+                            if not word.strip():
+                                continue
+                            try:
+                                c = float(confs_raw[i])
+                            except (TypeError, ValueError, IndexError):
+                                continue
+                            if c < 0:
+                                continue
+                            new_word, new_conf = user_words_fuzzy_rescue(
+                                word, c, catalog,
+                            )
+                            if new_word != word or new_conf != c:
+                                texts[i] = new_word
+                                confs_raw[i] = str(new_conf)
+                                changed_uw += 1
+                        if changed_uw:
+                            logger.info(
+                                "Page %d: user-words fuzzy rescue "
+                                "corrected %d token(s)",
+                                pr.page_number, changed_uw,
+                            )
+
                 # Rebuild the confidences list from the possibly-
                 # updated data so the downstream mean / threshold
                 # logic sees the disambiguated / rescued numbers.
@@ -1637,6 +1688,7 @@ class OCRPipeline:
                     )
                     or use_clahe_rescue
                     or use_upscale_rescue
+                    or use_user_words_rescue
                 ):
                     confidences = []
                     for val in confs_raw:

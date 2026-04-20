@@ -340,6 +340,14 @@ class ProfileManager:
             # don't churn already-correct text.
             per_word_clahe_rescue=True,
             per_word_upscale_rescue=True,
+            # Dictionary-backed fuzzy rescue. For each borderline-
+            # conf token (30-75 band), find the closest entry in
+            # ``user-words.rus`` within edit distance 1 (short) or
+            # 2 (≥ 6 chars) and swap in the canonical spelling.
+            # Covers the failure mode where the crop was readable
+            # but the LSTM's DAWG bias at primary OCR time was too
+            # soft (``ИНЦ`` → ``ИНН``, ``Скаnia`` → ``Scania``).
+            user_words_fuzzy_rescue=True,
             extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
         )
         postprocess = PostprocessConfig(
