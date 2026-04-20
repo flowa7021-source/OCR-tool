@@ -334,10 +334,10 @@ def check_field(name: str, expected: Any, got: str
 # main
 
 
-def main() -> int:
-    p = argparse.ArgumentParser()
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="ocr-cli parser golden")
     p.add_argument("--verbose", action="store_true")
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     if not INPUTS.exists() or not EXPECTED.exists():
         print(f"Папок {INPUTS}/ и {EXPECTED}/ не существует.", file=sys.stderr)

@@ -69,8 +69,8 @@ def read_excel_rows(xlsx_path: Path) -> list:
     return rows
 
 
-def main() -> int:
-    p = argparse.ArgumentParser()
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="ocr-cli parser collect-feedback")
     p.add_argument("xlsx", help="Путь к отредактированному Excel")
     p.add_argument(
         "--snapshot",
@@ -87,7 +87,7 @@ def main() -> int:
         action="store_true",
         help="Показать правки, но не записывать в лог",
     )
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     xlsx_path = Path(args.xlsx).resolve()
     if not xlsx_path.exists():

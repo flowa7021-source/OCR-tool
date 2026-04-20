@@ -26,8 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.tn_parser.feedback import TRACKABLE_FIELDS, load_corrections  # noqa: E402
 
 
-def main() -> int:
-    p = argparse.ArgumentParser()
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="ocr-cli parser feedback-stats")
     p.add_argument(
         "--log",
         default="feedback/corrections.jsonl",
@@ -39,7 +39,7 @@ def main() -> int:
         default=10,
         help="Сколько самых частых паттернов показать",
     )
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     log_path = Path(args.log).resolve()
     corrections = load_corrections(log_path)

@@ -472,8 +472,114 @@ def _force_utf8_stdio() -> None:
                 reconfigure(encoding="utf-8", errors="replace")
 
 
+# ---------------------------------------------------------------------------
+# Parser subcommands (``ocr-cli parser <subcmd>``)
+# ---------------------------------------------------------------------------
+
+
+# Dev / ops utilities for the ТН / УПД parser — documented under a
+# single ``parser`` subcommand so the help text for the main OCR CLI
+# isn't cluttered with golden-dataset maintenance flags. Each entry
+# maps the CLI verb to the module that ``import``'s as ``main(argv)``.
+#
+# The dict is intentionally populated at definition time rather than
+# lazily: module import failures (missing ``openpyxl`` in a stripped
+# build) surface on ``ocr-cli parser --help``, not after the user
+# has typed the full subcommand.
+_PARSER_SUBCOMMANDS: dict[str, tuple[str, str]] = {
+    "golden": (
+        "scripts.run_golden",
+        "Прогон golden-датасета (inputs/*.pdf + expected/*.json) и "
+        "per-field accuracy по 9 извлекаемым полям.",
+    ),
+    "update-golden": (
+        "scripts.update_golden",
+        "Пересоздать expected.json для golden-кейса из текущего "
+        "вывода парсера (с опцией --merge для инкрементальной правки).",
+    ),
+    "collect-feedback": (
+        "scripts.collect_feedback",
+        "Собрать правки оператора из отредактированного Excel в "
+        "JSONL-корпус (append-only, для анализа слабых мест парсера).",
+    ),
+    "feedback-stats": (
+        "scripts.feedback_stats",
+        "Статистика по накопленному корпусу правок: распределение "
+        "по полям, средняя confidence, top-N повторяющихся паттернов.",
+    ),
+}
+
+
+def _print_parser_help() -> None:
+    """Print the `ocr-cli parser` top-level help block."""
+    print("Usage: ocr-cli parser <command> [args...]\n")
+    print("Подкоманды парсера ТН / УПД:\n")
+    width = max(len(k) for k in _PARSER_SUBCOMMANDS)
+    for name, (_, desc) in _PARSER_SUBCOMMANDS.items():
+        print(f"  {name:<{width}}  {desc}")
+    print("\nДетальная справка: `ocr-cli parser <command> --help`.")
+
+
+def _run_parser_subcommand(argv: list[str]) -> int:
+    """Dispatch ``ocr-cli parser <sub> [args]`` to the right script.
+
+    Returns the sub-subcommand's exit code, or ``2`` for a missing /
+    unknown subcommand. Import errors on the backing module surface
+    as ``ExportError``-style stderr lines instead of raw tracebacks,
+    consistent with how the rest of the CLI reports failures.
+    """
+    if not argv or argv[0] in ("-h", "--help"):
+        _print_parser_help()
+        # `-h` is a user request → 0. Missing argv → 2, matching
+        # argparse's own convention for "you forgot something".
+        return 0 if argv else 2
+
+    subcmd = argv[0]
+    if subcmd not in _PARSER_SUBCOMMANDS:
+        print(
+            f"Неизвестная подкоманда парсера: {subcmd!r}\n",
+            file=sys.stderr,
+        )
+        _print_parser_help()
+        return 2
+
+    module_name, _desc = _PARSER_SUBCOMMANDS[subcmd]
+    try:
+        import importlib
+
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        print(
+            f"Не удалось загрузить подкоманду {subcmd!r}: {exc}. "
+            "Проверьте, что зависимости парсера (openpyxl, rapidfuzz) "
+            "установлены.",
+            file=sys.stderr,
+        )
+        return 3
+
+    sub_main = getattr(module, "main", None)
+    if sub_main is None or not callable(sub_main):
+        print(
+            f"Модуль {module_name!r} не экспортирует callable `main`.",
+            file=sys.stderr,
+        )
+        return 3
+
+    return int(sub_main(argv[1:]))
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI. Returns the process exit code."""
+    # Early dispatch: ``parser`` is a self-contained subcommand group
+    # that doesn't share the OCR pipeline's flags, so we strip it off
+    # before build_parser() gets a look at the tail. Keeps every
+    # existing ``ocr-cli <pdf> [--flags]`` invocation untouched.
+    raw_argv: list[str] = (
+        list(argv) if argv is not None else list(sys.argv[1:])
+    )
+    if raw_argv and raw_argv[0] == "parser":
+        return _run_parser_subcommand(raw_argv[1:])
+
     # Must happen BEFORE any subprocess-spawning code runs (Tesseract,
     # Ghostscript, OCRmyPDF all fork children). Without this, CLI users
     # on Windows see transient console windows flash every time a page
@@ -509,7 +615,7 @@ def main(argv: list[str] | None = None) -> int:
 
     _force_utf8_stdio()
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     _configure_logging(args.verbose)
 
     if args.list_profiles:
