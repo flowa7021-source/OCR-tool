@@ -293,6 +293,16 @@ class ProfileManager:
             # (60 %), and mean_conf is reported over the kept set.
             # See ``src.core.confidence_filter`` for the mechanism.
             drop_low_conf_words=True,
+            # Soft-rescue band [45, 60) for lexically-clean tokens:
+            # Tesseract underweights confidence on short digit runs
+            # (ИНН, суммы, даты) and all-caps Cyrillic acronyms. A
+            # straight 60%-cut discards real content along with the
+            # stamp noise; soft-rescue keeps only the shape-credible
+            # borderline tokens (single-script letters len≥3 OR
+            # digit/separator tokens). Mixed-script tokens like
+            # ``нe``, ``Taw`` and anything below 45% still drop, so
+            # the stamp / signature garbage stays out.
+            soft_rescue_dropped_words=True,
         )
         postprocess = PostprocessConfig(
             autocorrect_russian=True,

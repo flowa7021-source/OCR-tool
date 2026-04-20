@@ -202,6 +202,241 @@ class TestRealisticGarbagePage:
             assert junk not in out
 
 
+class TestSoftRescue:
+    """Soft-rescue keeps borderline-conf tokens that look lexically clean.
+
+    The goal is to recover the Tesseract under-confidence pattern on
+    short digit runs (ИНН, суммы, даты) and all-caps acronyms without
+    letting stamp / signature scribble back in. Every test here pairs
+    what-rescues with what-still-drops so regressions in either
+    direction get caught.
+    """
+
+    def test_disabled_by_default_preserves_legacy_behavior(self) -> None:
+        """``soft_rescue`` defaults to False — every legacy caller is
+        unaffected. Same input, same output as the strict-drop path."""
+        data = _tsv(
+            ("kept", 80.0, 1, 1, 1, 1),
+            ("borderline", 55.0, 1, 1, 1, 2),
+        )
+        assert reconstruct_text_from_tsv(data, min_confidence=60.0) == "kept"
+
+    def test_rescues_short_digit_run_in_band(self) -> None:
+        """An ИНН-like digit run at 55% with threshold 60 gets rescued —
+        this is the primary reason soft-rescue exists."""
+        data = _tsv(
+            ("ГЕКСАФОРМ", 88.0, 1, 1, 1, 1),
+            ("7813266190", 55.0, 1, 1, 1, 2),  # real content, underweighted
+        )
+        out = reconstruct_text_from_tsv(
+            data, min_confidence=60.0, soft_rescue=True,
+        )
+        assert out == "ГЕКСАФОРМ 7813266190"
+
+    def test_rescues_all_cyrillic_acronym_in_band(self) -> None:
+        """``ООО`` at 58% with threshold 60 is credible — single-script,
+        length 3, rescue should keep it."""
+        data = _tsv(
+            ("ООО", 58.0, 1, 1, 1, 1),
+            ("ГЕКСАФОРМ", 90.0, 1, 1, 1, 2),
+        )
+        out = reconstruct_text_from_tsv(
+            data, min_confidence=60.0, soft_rescue=True,
+        )
+        assert out == "ООО ГЕКСАФОРМ"
+
+    def test_rescues_date_with_dot_separators(self) -> None:
+        """``12.08.2024`` at 50% with threshold 60 — digit+sep token
+        should rescue."""
+        data = _tsv(
+            ("12.08.2024", 50.0, 1, 1, 1, 1),
+        )
+        out = reconstruct_text_from_tsv(
+            data, min_confidence=60.0, soft_rescue=True,
+        )
+        assert out == "12.08.2024"
+
+    def test_rescues_amount_with_comma_and_dot(self) -> None:
+        """Russian-formatted amount ``1,200.50`` at 50% rescues."""
+        data = _tsv(
+            ("1,200.50", 50.0, 1, 1, 1, 1),
+        )
+        out = reconstruct_text_from_tsv(
+            data, min_confidence=60.0, soft_rescue=True,
+        )
+        assert out == "1,200.50"
+
+    def test_does_not_rescue_below_absolute_floor(self) -> None:
+        """A lexically-clean digit run at 40% is BELOW the 45% absolute
+        floor — must still drop even though the shape looks fine. This
+        protects against wild thresholds from misconfigured profiles."""
+        data = _tsv(
+            ("1234567890", 40.0, 1, 1, 1, 1),
+        )
+        out = reconstruct_text_from_tsv(
+            data, min_confidence=60.0, soft_rescue=True,
+        )
+        assert out == ""
+
+    def test_does_not_rescue_outside_soft_margin(self) -> None:
+        """A lexically-clean token at 30% is well outside the 15%
+        margin below the threshold. Drop."""
+        data = _tsv(
+            ("ГЕКСАФОРМ", 30.0, 1, 1, 1, 1),
+        )
+        out = reconstruct_text_from_tsv(
+            data, min_confidence=60.0, soft_rescue=True,
+        )
+        assert out == ""
+
+    def test_does_not_rescue_mixed_script_short_token(self) -> None:
+        """``нe`` — 2 chars, Cyrillic н + Latin e — is exactly the
+        signature-scribble failure mode rescue must AVOID, even at
+        50% conf which is inside the band."""
+        data = _tsv(
+            ("нe", 50.0, 1, 1, 1, 1),
+        )
+        out = reconstruct_text_from_tsv(
+            data, min_confidence=60.0, soft_rescue=True,
+        )
+        assert out == ""
+
+    def test_does_not_rescue_two_char_cyrillic(self) -> None:
+        """``ба`` at 50% — single-script but only 2 chars, below the
+        length-3 minimum. Stamp / noise territory."""
+        data = _tsv(
+            ("ба", 50.0, 1, 1, 1, 1),
+        )
+        out = reconstruct_text_from_tsv(
+            data, min_confidence=60.0, soft_rescue=True,
+        )
+        assert out == ""
+
+    def test_does_not_rescue_punctuation_tail(self) -> None:
+        """``к.`` at 50% — letter+punct, fails the single-script check
+        because the dot isn't a letter AND the token isn't digit-shaped.
+        Drop."""
+        data = _tsv(
+            ("к.", 50.0, 1, 1, 1, 1),
+        )
+        out = reconstruct_text_from_tsv(
+            data, min_confidence=60.0, soft_rescue=True,
+        )
+        assert out == ""
+
+    def test_high_conf_always_kept_regardless_of_shape(self) -> None:
+        """Above-threshold words are accepted untouched — soft-rescue
+        only affects the sub-threshold band. A mixed-script 90-conf
+        token (shouldn't happen in practice, but some Tesseract
+        versions do emit them) is kept."""
+        data = _tsv(
+            ("Скаnia", 90.0, 1, 1, 1, 1),
+        )
+        out = reconstruct_text_from_tsv(
+            data, min_confidence=60.0, soft_rescue=True,
+        )
+        assert out == "Скаnia"
+
+    def test_rescue_band_respects_threshold(self) -> None:
+        """At threshold=80, band = [65, 80). A 70% digit token should
+        rescue; a 60% one should not."""
+        data = _tsv(
+            ("1234567890", 70.0, 1, 1, 1, 1),  # rescued
+            ("9876543210", 60.0, 1, 1, 1, 2),  # dropped (below 65)
+        )
+        out = reconstruct_text_from_tsv(
+            data, min_confidence=80.0, soft_rescue=True,
+        )
+        assert out == "1234567890"
+
+    def test_realistic_form_page_preserves_content_and_drops_noise(
+        self,
+    ) -> None:
+        """Combined scenario: body text, ИНН, and signature scribble all
+        on the same page. Soft-rescue recovers the ИНН that would
+        otherwise be lost to the strict threshold AND still drops the
+        scribble."""
+        data = _tsv(
+            # Body paragraph (high conf)
+            ("ООО",           92.0, 1, 1, 1, 1),
+            ("ГЕКСАФОРМ",     88.0, 1, 1, 1, 2),
+            ("СПБ",           90.0, 1, 1, 1, 3),
+            # Underweighted real content in rescue band
+            ("7813266190",    55.0, 1, 1, 2, 1),  # ИНН — rescue
+            ("12.08.2024",    58.0, 1, 1, 2, 2),  # date — rescue
+            # Signature / stamp scribble — stays out
+            ("нe",            22.0, 2, 1, 1, 1),
+            ("Taw",           18.0, 2, 1, 1, 2),
+            ("ба",            30.0, 3, 1, 1, 1),
+        )
+        out = reconstruct_text_from_tsv(
+            data, min_confidence=60.0, soft_rescue=True,
+        )
+        lines = out.splitlines()
+        # First line: body text
+        assert lines[0] == "ООО ГЕКСАФОРМ СПБ"
+        # Second line: rescued ИНН + date
+        assert lines[1] == "7813266190 12.08.2024"
+        # Noise stayed out
+        for junk in ("нe", "Taw", "ба"):
+            assert junk not in out
+
+
+class TestIsLexicallyValidRescue:
+    """Unit coverage for the rescue predicate itself — cheaper than
+    going through the full TSV path for boundary-case sweeps."""
+
+    def test_pure_digit_token_valid(self) -> None:
+        from src.core.confidence_filter import _is_lexically_valid_rescue
+
+        assert _is_lexically_valid_rescue("1234567890")
+
+    def test_digit_with_separators_valid(self) -> None:
+        from src.core.confidence_filter import _is_lexically_valid_rescue
+
+        assert _is_lexically_valid_rescue("12.08.2024")
+        assert _is_lexically_valid_rescue("1,200.50")
+        assert _is_lexically_valid_rescue("7813-2661-90")
+
+    def test_all_cyrillic_letters_valid(self) -> None:
+        from src.core.confidence_filter import _is_lexically_valid_rescue
+
+        assert _is_lexically_valid_rescue("ГЕКСАФОРМ")
+        assert _is_lexically_valid_rescue("ООО")
+        assert _is_lexically_valid_rescue("Ёлка")
+
+    def test_all_latin_letters_valid(self) -> None:
+        from src.core.confidence_filter import _is_lexically_valid_rescue
+
+        assert _is_lexically_valid_rescue("hello")
+        assert _is_lexically_valid_rescue("SCANIA")
+
+    def test_mixed_script_invalid(self) -> None:
+        from src.core.confidence_filter import _is_lexically_valid_rescue
+
+        assert not _is_lexically_valid_rescue("Скаnia")  # cyr+lat
+        assert not _is_lexically_valid_rescue("нe")       # cyr+lat
+
+    def test_short_tokens_invalid(self) -> None:
+        from src.core.confidence_filter import _is_lexically_valid_rescue
+
+        assert not _is_lexically_valid_rescue("ба")   # 2 chars
+        assert not _is_lexically_valid_rescue("a")    # 1 char
+        assert not _is_lexically_valid_rescue("12")   # 2 chars digit
+
+    def test_letter_with_punctuation_invalid(self) -> None:
+        from src.core.confidence_filter import _is_lexically_valid_rescue
+
+        assert not _is_lexically_valid_rescue("к.")
+        assert not _is_lexically_valid_rescue("hello!")
+
+    def test_empty_invalid(self) -> None:
+        from src.core.confidence_filter import _is_lexically_valid_rescue
+
+        assert not _is_lexically_valid_rescue("")
+        assert not _is_lexically_valid_rescue("   ")
+
+
 def test_module_exports_reconstruct_only() -> None:
     """The module deliberately exports one public name — this test is a
     tripwire: if someone adds another function without updating the
