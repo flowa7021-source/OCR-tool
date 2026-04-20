@@ -90,14 +90,38 @@ class ParsedRow:
         )
 
     def to_json_dict(self) -> dict:
+        """JSON-friendly dict with an explicit ``overall_confidence`` scalar.
+
+        ``asdict`` already flattens the nested ``FieldConfidence``, but
+        downstream consumers (UI panel, Excel export, snapshot sidecar,
+        feedback diff) don't want to re-compute the mean on every
+        access — they read ``overall_confidence`` directly. Duplicating
+        the scalar here keeps the per-row dict self-describing: a row
+        taken out of ``ParsedDocument.rows`` still knows its own
+        confidence without needing the surrounding document.
+        """
         d = asdict(self)
-        # confidence уже сериализуется через asdict
+        d["overall_confidence"] = self.confidence.overall()
         return d
 
     @classmethod
     def from_json_dict(cls, d: dict) -> ParsedRow:
-        conf = d.pop("confidence", None)
-        row = cls(**d)
+        """Rebuild a ParsedRow from :meth:`to_json_dict` output.
+
+        Does NOT mutate the input — callers routinely hold onto the
+        source dict (e.g. ``job_result.parsed.rows``) and reuse it for
+        UI rendering after calling this method through the Excel
+        exporter. Mutating away ``confidence`` there would make the
+        panel's colour band fall back to 0 %% on every subsequent
+        redraw.
+        """
+        # Copy first; both ``confidence`` (nested) and
+        # ``overall_confidence`` (derived scalar) are dropped before
+        # constructing — the dataclass doesn't accept the latter.
+        data = dict(d)
+        conf = data.pop("confidence", None)
+        data.pop("overall_confidence", None)
+        row = cls(**data)
         if isinstance(conf, dict):
             row.confidence = FieldConfidence(**conf)
         return row

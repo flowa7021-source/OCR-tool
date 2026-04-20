@@ -1138,22 +1138,25 @@ jobs:
           Write-Host "Running tn_upd + Excel export via installed CLI..."
           $sw = [System.Diagnostics.Stopwatch]::StartNew()
           # ``--profile tn_upd`` activates ``extract.enabled=True`` in
-          # the bundled profile (PR #2). ``--txt`` is NOT needed —
-          # the parser writes its own xlsx via ExportManager.export_excel
-          # and the accompanying .log / .snapshot.json sidecars.
+          # the bundled profile (PR #2). ``--excel`` tells the CLI to
+          # delegate to ExportManager.export_excel, which in turn
+          # calls tn_parser.excel.write_excel_safe — the same code
+          # path GUI export uses. The xlsx path is derived from ``-o``
+          # by swapping the ``.pdf`` suffix for ``.xlsx``. Two sidecars
+          # appear next to it:
+          #   * ``<stem>.log``               — human-readable report
+          #   * ``<stem>.xlsx.snapshot.json`` — feedback-loop snapshot
           #
-          # NOTE: ``-o`` below points at the output PDF. Excel is
-          # derived from it by the pipeline (same stem, .xlsx ext) —
-          # see export_manager.export_excel defaulting path
-          # convention. We pass --workers 1 to keep the smoke
-          # deterministic and to sidestep ProcessPool-on-Windows
-          # quirks that don't belong in a pipeline-verification test.
+          # We pass --workers 1 to keep the smoke deterministic and
+          # to sidestep ProcessPool-on-Windows quirks that don't
+          # belong in a pipeline-verification test.
           $proc = Start-Process -FilePath $cli `
               -ArgumentList @(
                 "--cli",
                 $tnPdf,
                 "-o", $outPdf,
                 "--profile", "tn_upd",
+                "--excel",
                 "--workers", "1"
               ) `
               -NoNewWindow -PassThru -Wait `
@@ -1168,22 +1171,45 @@ jobs:
             throw "Installed CLI (tn_upd) exited with code $($proc.ExitCode)"
           }
 
-          # The existing CLI prints an OCR'd PDF only; Excel export
-          # is wired through the GUI flow (ExportManager.export_excel)
-          # or the future `--export excel` flag (not yet in cli.py).
-          # For PR #7 the smoke proves:
-          #   * OCRStudio.exe launches cleanly with ``--profile tn_upd``
-          #     (i.e. the parser dependencies — rapidfuzz, openpyxl,
-          #     src.tn_parser.* — are reachable from the frozen
-          #     bundle),
-          #   * the pipeline reports a successful run (exit 0) on a
-          #     real TN PDF,
-          #   * the output PDF carries the same text-layer content
-          #     we fed in (no regression from adding extract hook).
+          # --- File-output assertions ---------------------------------
+          # Output PDF — exists + non-trivial size. Input was already
+          # OCR'd, so skip_text=true in tn_upd should copy the text
+          # layer through cleanly without a regression.
           if (-not (Test-Path $outPdf)) {
             throw "Installed CLI did not produce an output PDF at $outPdf"
           }
           Write-Host "Parser smoke: output PDF size $((Get-Item $outPdf).Length) bytes"
+
+          # Excel artefact — derived path, same stem as ``-o`` with
+          # .xlsx suffix (see src.cli.process_single).
+          $expectedXlsx = [System.IO.Path]::ChangeExtension($outPdf, ".xlsx")
+          if (-not (Test-Path $expectedXlsx)) {
+            throw "Installed CLI did not produce an Excel file at $expectedXlsx — parser may have returned no rows, or Excel export failed silently"
+          }
+          $xlsxSize = (Get-Item $expectedXlsx).Length
+          if ($xlsxSize -lt 3000) {
+            # openpyxl-produced xlsx files are ≥ 4-5 KB even for a
+            # single-row sheet (zip container + styles + shared
+            # strings). Anything under 3 KB is almost certainly a
+            # truncated / corrupt write.
+            throw "Excel artefact at $expectedXlsx is suspiciously small ($xlsxSize bytes)"
+          }
+          Write-Host "Parser smoke: Excel artefact $xlsxSize bytes at $expectedXlsx"
+
+          # Snapshot sidecar — required by scripts/collect_feedback.py
+          # to diff operator edits against the original parser output.
+          $snapshotPath = "$expectedXlsx.snapshot.json"
+          if (-not (Test-Path $snapshotPath)) {
+            throw "Snapshot sidecar missing: $snapshotPath (feedback-loop tooling would break)"
+          }
+          Write-Host "Parser smoke: snapshot sidecar OK at $snapshotPath"
+
+          # .log sidecar — human-readable report with per-row status.
+          $logSidecar = [System.IO.Path]::ChangeExtension($expectedXlsx, ".log")
+          if (-not (Test-Path $logSidecar)) {
+            throw "Log sidecar missing: $logSidecar"
+          }
+          Write-Host "Parser smoke: log sidecar OK at $logSidecar"
 
           # Bundle-file probe. ``--windowed`` PyInstaller builds have no
           # standalone ``python*.exe`` to run an import test through, so

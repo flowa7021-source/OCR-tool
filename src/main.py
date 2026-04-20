@@ -22,13 +22,23 @@ _CLI_FLAGS: frozenset[str] = frozenset({
     "--workers",
     "--txt",
     "--docx",
+    "--excel",
+    "--check-engine",
+    "-v", "--verbose",
+    "-vv", "-vvv",
     "--version",
     "-h", "--help",
+    # Top-level subcommand dispatched by ``src.cli.main`` itself.
+    # Without this sentinel ``OCRStudio.exe parser golden`` would
+    # start the GUI because none of the flags above are present —
+    # the user's intent is clearly "run a parser dev-subcommand",
+    # not "double-click to open a file."
+    "parser",
 })
 
 
 def _should_route_to_cli(argv: list[str]) -> bool:
-    """Return True when argv contains any CLI-only flag."""
+    """Return True when argv contains any CLI-only flag or subcommand."""
     return any(a in _CLI_FLAGS for a in argv[1:])
 
 
