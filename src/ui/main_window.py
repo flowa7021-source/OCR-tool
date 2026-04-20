@@ -46,6 +46,7 @@ from src.shared.constants import (
 )
 from src.shared.types import ExportFormat, JobStatus
 from src.ui.icons import app_icon, load_icon
+from src.ui.invoice_parser_panel import InvoiceParserPanel
 from src.ui.pdf_viewer import PDFViewer
 from src.ui.postprocess_panel import PostprocessPanel
 from src.ui.preferences_dialog import PreferencesDialog
@@ -400,6 +401,7 @@ class MainWindow(QMainWindow):
         self.queue_panel = QueuePanel(self)
         self.progress_widget = ProgressWidget(self)
         self.results_panel = ResultsPanel(self)
+        self.invoice_parser_panel = InvoiceParserPanel(self)
 
         # Minimum widths reduced so the full UI fits on a 1280×720 screen.
         # Each config panel now lives inside a QScrollArea so it keeps
@@ -480,6 +482,24 @@ class MainWindow(QMainWindow):
         self.results_dock.setMinimumHeight(160)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.results_dock)
         self.tabifyDockWidget(self.queue_dock, self.results_dock)
+
+        # Parser dock — structured ТН / УПД fields. Stays hidden in the
+        # tab stack until a job with ``extract.enabled=True`` finishes;
+        # the ``_apply_job_result`` slot raises this tab automatically
+        # when ``result.parsed`` has rows so the user sees the extracted
+        # grid the moment parsing completes. Tabifying with the other
+        # two docks keeps the bottom area height-bounded on a 720p
+        # monitor — a fourth horizontal dock would force a rescale
+        # cascade every time the window resized.
+        self.invoice_parser_panel.setMinimumHeight(140)
+        self.invoice_parser_dock = QDockWidget("Парсер накладных", self)
+        self.invoice_parser_dock.setObjectName("invoiceParserDock")
+        self.invoice_parser_dock.setWidget(self.invoice_parser_panel)
+        self.invoice_parser_dock.setMinimumHeight(160)
+        self.addDockWidget(
+            Qt.DockWidgetArea.BottomDockWidgetArea, self.invoice_parser_dock,
+        )
+        self.tabifyDockWidget(self.queue_dock, self.invoice_parser_dock)
         self.queue_dock.raise_()
 
         # Reserve ~180 px for the dock by default so the viewer + panels
@@ -676,6 +696,7 @@ class MainWindow(QMainWindow):
         self.queue_panel.open_output_requested.connect(self._on_open_job_output)
         self.results_panel.export_requested.connect(self._on_export_requested)
         self.results_panel.open_pdf_requested.connect(self._on_open_pdf_result)
+        self.invoice_parser_panel.export_requested.connect(self._on_export_requested)
 
     # ------------------------------------------------------------ profiles
     def _load_profiles_to_combobox(self) -> None:
@@ -996,6 +1017,29 @@ class MainWindow(QMainWindow):
     def _apply_job_result(self, job_id: str, result: object) -> None:
         self._last_result = result
         self.results_panel.set_result(result)  # type: ignore[arg-type]
+        # Populate the structured-fields table too. ``set_result``
+        # is no-op-safe when ``result.parsed is None`` — no extra
+        # gate here so the panel always reflects the latest job,
+        # whether extraction ran or not.
+        try:
+            self.invoice_parser_panel.set_result(result)  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001
+            logger.debug("InvoiceParserPanel.set_result failed", exc_info=True)
+        # Auto-focus the parser tab when a job produced structured
+        # rows — otherwise the result is invisible to a user who
+        # hasn't clicked the tab yet. The raise is best-effort:
+        # a detached (floating) dock raises inside its own window,
+        # which is the intended behaviour.
+        try:
+            if (
+                isinstance(result, JobResult)
+                and result.parsed is not None
+                and result.parsed.rows
+            ):
+                self.invoice_parser_dock.show()
+                self.invoice_parser_dock.raise_()
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not raise parser dock", exc_info=True)
         # Feed word boxes to the viewer so the overlay works on the result
         # PDF. Crucially this must NOT block the main thread: on a
         # 500-page output the old synchronous loop iterated ~150 k word
@@ -1115,24 +1159,29 @@ class MainWindow(QMainWindow):
                 ExportFormat.TXT: "txt",
                 ExportFormat.DOCX: "docx",
                 ExportFormat.PDF: "pdf",
+                ExportFormat.EXCEL: "xlsx",
             }.get(fmt, "")
             filter_map = {
                 ExportFormat.TXT: "Text (*.txt)",
                 ExportFormat.DOCX: "Word (*.docx)",
                 ExportFormat.PDF: "PDF (*.pdf)",
+                ExportFormat.EXCEL: "Excel (*.xlsx)",
             }
             # For PDF default to the existing job output filename (so users
             # see e.g. "document_ocr.pdf", same as when they let the pipeline
-            # pick the path). For TXT/DOCX reuse the input stem + extension.
+            # pick the path). For TXT/DOCX/XLSX reuse the input stem + ext.
             if fmt is ExportFormat.PDF:
                 default_name = Path(self._last_result.output_path).name
             elif default_ext:
                 default_name = Path(self._last_result.input_path).with_suffix(f".{default_ext}").name
             else:
                 default_name = ""
-            dialog_title = (
-                "Сохранить PDF как" if fmt is ExportFormat.PDF else "Сохранить"
-            )
+            if fmt is ExportFormat.PDF:
+                dialog_title = "Сохранить PDF как"
+            elif fmt is ExportFormat.EXCEL:
+                dialog_title = "Сохранить Excel как"
+            else:
+                dialog_title = "Сохранить"
             target, _ = QFileDialog.getSaveFileName(
                 self, dialog_title, default_name, filter_map.get(fmt, "Все файлы (*.*)")
             )
