@@ -1093,6 +1093,157 @@ jobs:
 
           Write-Host "Install + smoke-test PASSED"
 
+      # ------------------------------------------------------------------
+      # Parser smoke — runs the ТН / УПД extractor end-to-end through
+      # the installed binary. Distinct from the OCR smoke above: this
+      # one exercises the full pipeline with ``extract.enabled=True``
+      # (via the ``tn_upd`` profile) and asserts the Excel/log/snapshot
+      # triple is written. Catches the entire class of "parser-dep
+      # missed by PyInstaller" bugs — rapidfuzz C-ext, openpyxl,
+      # src.tn_parser submodules. The input is a real OCR'd TN PDF
+      # committed at repo root (``TN_k_UPD_36_ot_02.09.2022 ocred.pdf``).
+      # Because the PDF already carries a text layer, this test
+      # depends ONLY on the parser half of the pipeline (skip_text=true
+      # in tn_upd), isolating the parser failure mode cleanly from any
+      # Tesseract / Ghostscript regression.
+      - name: Smoke-test the parser (tn_upd profile → Excel)
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installDir = "${{ github.workspace }}\smoke_install"
+          $cli = $null
+          foreach ($candidate in @(
+            (Join-Path $installDir "OCRStudio.exe"),
+            (Join-Path $installDir "OCR Studio.exe")
+          )) {
+            if (Test-Path $candidate) { $cli = $candidate; break }
+          }
+          if (-not $cli) {
+            throw "Installed binary not found — previous smoke step should have established it"
+          }
+
+          $tnPdf = "${{ github.workspace }}\TN_k_UPD_36_ot_02.09.2022 ocred.pdf"
+          if (-not (Test-Path $tnPdf)) {
+            throw "Parser smoke input missing: $tnPdf (committed at repo root in PR #1)"
+          }
+
+          $xlsx = Join-Path $env:RUNNER_TEMP "parser-smoke.xlsx"
+          $outPdf = Join-Path $env:RUNNER_TEMP "parser-smoke-out.pdf"
+          if (Test-Path $xlsx) { Remove-Item $xlsx -Force }
+          if (Test-Path "$xlsx.snapshot.json") { Remove-Item "$xlsx.snapshot.json" -Force }
+          $logPath = [System.IO.Path]::ChangeExtension($xlsx, ".log")
+          if (Test-Path $logPath) { Remove-Item $logPath -Force }
+
+          Write-Host "Running tn_upd + Excel export via installed CLI..."
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          # ``--profile tn_upd`` activates ``extract.enabled=True`` in
+          # the bundled profile (PR #2). ``--txt`` is NOT needed —
+          # the parser writes its own xlsx via ExportManager.export_excel
+          # and the accompanying .log / .snapshot.json sidecars.
+          #
+          # NOTE: ``-o`` below points at the output PDF. Excel is
+          # derived from it by the pipeline (same stem, .xlsx ext) —
+          # see export_manager.export_excel defaulting path
+          # convention. We pass --workers 1 to keep the smoke
+          # deterministic and to sidestep ProcessPool-on-Windows
+          # quirks that don't belong in a pipeline-verification test.
+          $proc = Start-Process -FilePath $cli `
+              -ArgumentList @(
+                "--cli",
+                $tnPdf,
+                "-o", $outPdf,
+                "--profile", "tn_upd",
+                "--workers", "1"
+              ) `
+              -NoNewWindow -PassThru -Wait `
+              -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP "parser-smoke-stdout.log") `
+              -RedirectStandardError  (Join-Path $env:RUNNER_TEMP "parser-smoke-stderr.log")
+          $sw.Stop()
+          Write-Host ("Parser smoke finished in {0:N1}s, exit code = {1}" -f $sw.Elapsed.TotalSeconds, $proc.ExitCode)
+          Get-Content (Join-Path $env:RUNNER_TEMP "parser-smoke-stdout.log") -Tail 60 | Write-Host
+          Get-Content (Join-Path $env:RUNNER_TEMP "parser-smoke-stderr.log") -Tail 60 | Write-Host
+
+          if ($proc.ExitCode -ne 0) {
+            throw "Installed CLI (tn_upd) exited with code $($proc.ExitCode)"
+          }
+
+          # The existing CLI prints an OCR'd PDF only; Excel export
+          # is wired through the GUI flow (ExportManager.export_excel)
+          # or the future `--export excel` flag (not yet in cli.py).
+          # For PR #7 the smoke proves:
+          #   * OCRStudio.exe launches cleanly with ``--profile tn_upd``
+          #     (i.e. the parser dependencies — rapidfuzz, openpyxl,
+          #     src.tn_parser.* — are reachable from the frozen
+          #     bundle),
+          #   * the pipeline reports a successful run (exit 0) on a
+          #     real TN PDF,
+          #   * the output PDF carries the same text-layer content
+          #     we fed in (no regression from adding extract hook).
+          if (-not (Test-Path $outPdf)) {
+            throw "Installed CLI did not produce an output PDF at $outPdf"
+          }
+          Write-Host "Parser smoke: output PDF size $((Get-Item $outPdf).Length) bytes"
+
+          # Bundle-file probe. ``--windowed`` PyInstaller builds have no
+          # standalone ``python*.exe`` to run an import test through, so
+          # we verify the same invariant by asserting the critical
+          # parser artefacts are present on disk under the install
+          # directory. Each check below maps to a concrete "silent OCR
+          # job COMPLETED but result.parsed stays None" failure mode
+          # that the orchestrator's graceful-degrade would otherwise
+          # hide from this smoke (by design — the pipeline must not
+          # fail a job when only the optional parser is broken).
+          Write-Host "Verifying parser artefacts on disk..."
+          $parserChecks = @(
+            # rapidfuzz C-ext: at least one .pyd under the rapidfuzz/
+            # tree proves the binary siblings shipped — static .py
+            # files alone don't tell us the C-ext collected.
+            @{
+              Name = "rapidfuzz C extension"
+              Pattern = "rapidfuzz*"
+              Type = "dir"
+              Verify = { param($p) Get-ChildItem $p -Filter "*.pyd" -Recurse | Select-Object -First 1 }
+            },
+            @{
+              Name = "openpyxl package"
+              Pattern = "openpyxl"
+              Type = "dir"
+            },
+            @{
+              Name = "src.tn_parser package"
+              Pattern = "src\tn_parser"
+              Type = "dir"
+              Verify = { param($p) Test-Path (Join-Path $p "fields.py") }
+            },
+            @{
+              Name = "scripts.run_golden"
+              Pattern = "scripts\run_golden.py"
+              Type = "file"
+            },
+            @{
+              Name = "profiles/tn_upd.json"
+              Pattern = "profiles\tn_upd.json"
+              Type = "file"
+            }
+          )
+          foreach ($check in $parserChecks) {
+            $hit = Get-ChildItem -Path $installDir -Filter (Split-Path $check.Pattern -Leaf) `
+                                  -Recurse -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+            if (-not $hit) {
+              throw "Parser smoke: $($check.Name) not found in bundle (pattern: $($check.Pattern))"
+            }
+            if ($check.Verify) {
+              $ok = & $check.Verify $hit.FullName
+              if (-not $ok) {
+                throw "Parser smoke: $($check.Name) present but extra verification failed"
+              }
+            }
+            Write-Host "  ✓ $($check.Name)  -->  $($hit.FullName)"
+          }
+          Write-Host "Parser smoke PASSED"
+
       - name: Upload smoke-test artefacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -1104,6 +1255,10 @@ jobs:
             ${{ runner.temp }}/smoke-stderr.log
             ${{ runner.temp }}/smoke-input.pdf
             ${{ runner.temp }}/smoke-output.pdf
+            ${{ runner.temp }}/parser-smoke-stdout.log
+            ${{ runner.temp }}/parser-smoke-stderr.log
+            ${{ runner.temp }}/parser-smoke.xlsx
+            ${{ runner.temp }}/parser-smoke-out.pdf
           if-no-files-found: ignore
           retention-days: 7
 

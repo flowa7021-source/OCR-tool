@@ -6,6 +6,55 @@
 ## [Unreleased]
 
 ### Added
+- **Извлечение полей ТН / УПД как пост-OCR шаг** — парсер
+  `src.tn_parser` (ранее отдельный `OCR parser/`) интегрирован в
+  основной конвейер и доступен через профиль, UI-вкладку и CLI:
+  - Встроенный профиль **`tn_upd`** (schema v11): PSM=SINGLE_BLOCK,
+    OTSU, `border_removal=True`, `load_freq_dawg=0`,
+    `validate_identifiers/entities=True` + `extract.enabled=True`.
+    Сигналит пайплайну запускать парсер после OCR.
+  - Новая секция **`ProfileData.extract`** (`ExtractConfig` +
+    `LlmFallbackConfig`) в JSON-профилях. Миграция v10→v11
+    прозрачна: profile без extract → `enabled=False`.
+  - **`JobResult.parsed: ParsedDocument | None`** — строки
+    (`ParsedRow.to_json_dict()`) + `overall_confidence` +
+    `snapshot_path`. Core-слой не зависит от `src.tn_parser` в
+    compile-time (dict-форма).
+  - **Hook в `OCRPipeline`**: `_maybe_run_parser()` вызывается из
+    всех трёх completion-путей (cache-hit, text-layer-bypass,
+    OCR-main). Orchestrator `src.application.parsers.tn_orchestrator`
+    никогда не бросает — падение парсера не валит OCR-задачу.
+  - **UI-вкладка «Парсер накладных»** (`InvoiceParserPanel`,
+    `QTableView` 13 колонок, цвета confidence #F4CCCC/#FFF2CC/
+    #D9EAD3 byte-exact с excel.py, empty-state placeholder,
+    кнопка «Экспорт в Excel…»).
+  - **`ExportFormat.EXCEL`** в `ExportManager.export()` →
+    делегирует `tn_parser.excel.write_excel_safe` (xlsx + .log +
+    .snapshot.json-сайдкар). Обрабатывает `PermissionError`
+    (файл открыт в Excel), `ENOSPC`, fallback-имя при lock'е.
+  - **CLI**: флаг `--excel` рядом с `--txt`/`--docx`; подкоманды
+    `ocr-cli parser golden / update-golden / collect-feedback /
+    feedback-stats` (обёртки над `scripts/*.py`, диспатчер через
+    `importlib.import_module` не тянет OCR-движок).
+  - **LLM-fallback opt-in** (`[project.optional-dependencies.llm]`
+    — `anthropic`, `pydantic`). Ключ хранится в
+    `AppSettings.anthropic_api_key` (settings.json, НЕ в профиле —
+    экспорт профиля не утекает credentials). UI-поле в
+    `PreferencesDialog` (PasswordEchoOnEdit, trim whitespace).
+    `src.infrastructure.llm_credentials.apply_to_environment`
+    синхронизирует ключ в `ANTHROPIC_API_KEY` с sentinel-защитой
+    shell-set env'а. Оффлайн-билд Windows-installer'а остаётся
+    полностью локальным — `anthropic` не попадает в бандл.
+  - **Installer / CI**: `build.py` +4 флага PyInstaller
+    (`--collect-all=rapidfuzz`, `--collect-all=scripts`,
+    `--collect-submodules=src.tn_parser`,
+    `--hidden-import=openpyxl`); новый smoke-шаг
+    `build-installer.yml` поднимает установленный `OCRStudio.exe`
+    на реальном TN PDF и проверяет наличие `rapidfuzz/*.pyd`,
+    `openpyxl/`, `src/tn_parser/fields.py`, `scripts/run_golden.py`,
+    `profiles/tn_upd.json` в распакованном бандле. Отдельная
+    job `parser-tests` в `ci.yml` — Ubuntu, ~30 сек, минимальный
+    dep-set `pymupdf openpyxl rapidfuzz`.
 - **Pluggable OCR engines + GOT-OCR 2.0 для рукописного текста**:
   - Абстрактный `OCREngine` интерфейс (`src/application/engines/`),
     через который пайплайн вызывает движок. Tesseract обёрнут в

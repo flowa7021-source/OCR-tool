@@ -188,6 +188,11 @@ class ExportFormat(StrEnum):
     TXT = "txt"
     DOCX = "docx"
     CLIPBOARD = "clipboard"
+    #: Structured-field Excel for the ТН / УПД parser. Only usable
+    #: on jobs whose profile had ``extract.enabled=True`` — requires
+    #: :attr:`JobResult.parsed` to be populated; raises ``ExportError``
+    #: otherwise.
+    EXCEL = "excel"
 
 
 class OCREngineKind(StrEnum):

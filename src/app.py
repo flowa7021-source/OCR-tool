@@ -114,6 +114,21 @@ def create_application(argv: list[str]) -> tuple[QApplication, MainWindow]:
     settings_storage = SettingsStorage()
     settings = settings_storage.load()
 
+    # Push the stored Anthropic API key (if any) into ``ANTHROPIC_API_KEY``
+    # BEFORE any worker / orchestrator is wired. This is the single place
+    # the credential crosses from settings.json into the process
+    # environment; downstream code (parser's ``llm_fallback.improve_row``)
+    # only sees the env var, never the storage object, so the key cannot
+    # leak through log lines or profile exports. Failure is non-fatal —
+    # an offline install without the key is still fully functional,
+    # just without LLM rescue.
+    try:
+        from src.infrastructure.llm_credentials import apply_to_environment
+
+        apply_to_environment(settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("LLM credential propagation failed: %s", exc)
+
     # Adaptive defaults on low-spec machines: 2 parallel workers at
     # 300 DPI peak at ~1.4 GB RAM, which pushes 4 GB laptops into swap.
     # Drop the worker count + cache budget in that case so the app

@@ -203,6 +203,63 @@ jobs:
           print('OK')
           "
 
+  parser-tests:
+    # Fast Linux leg for the ТН / УПД parser suite. The parser has
+    # zero Tesseract / Ghostscript / Qt runtime requirements — it
+    # operates on already-extracted text — so it costs us nothing to
+    # run it on Ubuntu under 30 seconds, while the main ``tests``
+    # matrix leg on Windows takes several minutes. Gives the
+    # parser-related PRs near-instant CI feedback AND provides a
+    # cross-platform canary for the pure-Python code paths (regexes
+    # in ``fields.py``, ``sections.py``, ``normalize.py``).
+    #
+    # Kept as a separate job (rather than an extra matrix entry on
+    # ``tests``) so a flaky Windows Tesseract install doesn't mask a
+    # parser regression — this job has its own status check and must
+    # pass on every PR regardless of what happens downstream.
+    name: Parser unit tests (Ubuntu, fast)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install parser dependencies only
+        # NO PySide6 / ocrmypdf / opencv — the parser suite skips the
+        # Qt-dependent UI tests via pytest.importorskip, and the
+        # orchestrator / core paths never touch the OCR pipeline. A
+        # lean install matches what a user running ``ocr-cli parser
+        # <cmd>`` actually needs to have on their machine.
+        run: |
+          python -m pip install --upgrade pip
+          pip install pymupdf openpyxl rapidfuzz
+          pip install pytest pytest-mock
+
+      - name: Run parser test suite
+        # tests/parsers/ — the 165-test golden + fixture suite that
+        # moved in from ``OCR parser/tests/`` during the PR #1
+        # mechanical migration.
+        # tests/unit/test_extract_config.py — schema v11 migrations
+        # + the tn_upd builtin from PR #2.
+        # tests/unit/test_tn_orchestrator.py — orchestrator gate
+        # behaviour from PR #3.
+        # tests/unit/test_cli_parser_subcommand.py — the
+        # ``ocr-cli parser`` dispatcher from PR #6.
+        #
+        # Explicit list instead of ``tests/`` so this leg stays
+        # lean (ditto: we deliberately don't install Qt / ocrmypdf
+        # here). A future parser test that needs Qt would be added
+        # to the Windows ``tests`` leg instead.
+        run: |
+          pytest -q --tb=short \
+            tests/parsers/ \
+            tests/unit/test_extract_config.py \
+            tests/unit/test_tn_orchestrator.py \
+            tests/unit/test_cli_parser_subcommand.py
+
   benchmarks:
     # Non-blocking: benchmarks fluctuate too much across runners to
     # gate merges on absolute thresholds, but failing to even RUN the

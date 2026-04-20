@@ -20,6 +20,8 @@ from src.core.models import (
     DenoiseStep,
     DeskewConfig,
     DewarpConfig,
+    ExtractConfig,
+    LlmFallbackConfig,
     OCRConfig,
     PostprocessConfig,
     PreprocessConfig,
@@ -45,6 +47,7 @@ BUILTIN_NAMES: tuple[str, ...] = (
     "low_quality_scan",
     "contracts_ru",
     "english_text",
+    "tn_upd",
 )
 
 
@@ -171,6 +174,7 @@ class ProfileManager:
             "low_quality_scan": self._build_low_quality,
             "contracts_ru": self._build_contracts_ru,
             "english_text": self._build_english_text,
+            "tn_upd": self._build_tn_upd,
         }
         for name, builder in builders.items():
             try:
@@ -664,6 +668,91 @@ class ProfileManager:
             preprocess=preprocess,
             ocr=ocr,
             postprocess=PostprocessConfig(),
+        )
+
+    def _build_tn_upd(self) -> ProfileData:
+        """Russian waybills + UPD: table-oriented OCR + structured extraction.
+
+        Tuned for the ``src.tn_parser`` pipeline (см. `PR #1`):
+
+          * Препроцессинг близок к ``contracts_ru`` (PSM=SINGLE_BLOCK,
+            минимум шагов), НО с включённым ``border_removal`` — в ТН
+            рамки таблиц Tesseract систематически сливает с соседним
+            текстом.
+          * ``skip_text=True`` — если PDF уже содержит slой текста
+            (поле "ocred" в названии файла), OCR пропускается и мы
+            идём прямо в парсер.
+          * ``load_freq_dawg=0`` — ИНН / КПП / ОГРН — длинные цифровые
+            последовательности, для них freq-DAWG — источник ошибок,
+            не помощи.
+          * ``postprocess.validate_identifiers=True`` — чтобы
+            исправить 1-edit опечатки в ИНН/ОГРН по каталогу
+            ``expected/*.json`` ещё ДО того, как регулярки парсера
+            попробуют вытащить поле.
+          * ``extract.enabled=True``, ``kind="tn_upd"`` — включает
+            пост-OCR парсер. Multi-document on: в сводных УПД обычно
+            несколько ТН на один PDF. LLM-fallback по умолчанию
+            выключен — офлайн-first; пользователь включает вручную
+            в настройках (ANTHROPIC_API_KEY в settings.json).
+        """
+        preprocess = PreprocessConfig(
+            auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
+            deskew=DeskewConfig(enabled=True, auto_detect=True),
+            dewarp=DewarpConfig(enabled=False),
+            binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
+            denoise=DenoiseConfig(enabled=False),
+            contrast=ContrastConfig(clahe_enabled=False),
+            background=BackgroundConfig(enabled=False),
+            border_removal=BorderRemovalConfig(
+                enabled=True, min_line_length=50,
+            ),
+        )
+        ocr = OCRConfig(
+            languages=["rus", "eng"],
+            primary_language="rus",
+            psm=PSM.SINGLE_BLOCK,
+            oem=OEM.LSTM_ONLY,
+            dpi=300,
+            optimize_level=OptimizeLevel.LOSSLESS,
+            skip_text=True,
+            extra_tesseract_params={
+                **_COMMON_TESSERACT_PARAMS,
+                "load_freq_dawg": "0",
+            },
+        )
+        postprocess = PostprocessConfig(
+            autocorrect_russian=True,
+            autocorrect_english=True,
+            merge_hyphenated=True,
+            normalize_whitespace=True,
+            normalize_unicode=True,
+            remove_artifacts=True,
+            fix_cyrillic_latin_confusion=True,
+            validate_identifiers=True,
+            validate_entities=True,
+        )
+        extract = ExtractConfig(
+            enabled=True,
+            kind="tn_upd",
+            multi_document=True,
+            low_text_threshold=200,
+            cache_enabled=True,
+            org_lookup=True,
+            llm_fallback=LlmFallbackConfig(enabled=False),
+        )
+        return ProfileData(
+            name="tn_upd",
+            description=(
+                "Транспортные накладные и УПД: таблично-ориентированная "
+                "OCR + извлечение структурированных полей (номер, дата, "
+                "грузоотправитель/получатель, груз, ТС, водитель, приём). "
+                "Excel + лог формируются парсером ``src.tn_parser`` "
+                "при включённом ``extract.enabled``."
+            ),
+            preprocess=preprocess,
+            ocr=ocr,
+            postprocess=postprocess,
+            extract=extract,
         )
 
     def _build_english_text(self) -> ProfileData:

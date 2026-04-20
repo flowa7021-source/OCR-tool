@@ -349,7 +349,11 @@ class ProfileStorage:
 
 #: Bumped whenever a breaking change to :class:`AppSettings` requires
 #: a migration step in :meth:`AppSettings.from_dict`.
-SETTINGS_SCHEMA_VERSION: int = 1
+#: v1 → v2 (Apr 2026): added ``anthropic_api_key`` for opt-in LLM
+#: fallback in the ТН / УПД parser. Default empty — v1 settings.json
+#: files load unchanged with LLM disabled, preserving the offline-
+#: first default.
+SETTINGS_SCHEMA_VERSION: int = 2
 
 
 @dataclass
@@ -385,6 +389,18 @@ class AppSettings:
     # damaged scan or the wrong profile. ``0.0`` disables the floor
     # (legacy behaviour: cache whatever we got).
     ocr_cache_min_confidence: float = 50.0
+    #: Claude API key for the optional ТН / УПД parser LLM-fallback.
+    #: Stored here (NOT inside :class:`ProfileData`) so exporting a
+    #: profile via ``ProfileManager.export_profile`` never leaks the
+    #: user's credential to a shared profile file. Default empty —
+    #: an empty key disables LLM even when a profile has
+    #: ``extract.llm_fallback.enabled=True``; the parser silently
+    #: falls back to regex-only extraction. The value is pushed to
+    #: the ``ANTHROPIC_API_KEY`` environment variable at app startup
+    #: via :func:`src.infrastructure.llm_credentials.apply_to_environment`
+    #: so the bundled parser's :func:`src.tn_parser.llm_fallback.improve_row`
+    #: finds it without any additional plumbing.
+    anthropic_api_key: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-friendly dictionary."""
@@ -402,6 +418,7 @@ class AppSettings:
             "notify_on_complete": self.notify_on_complete,
             "ocr_cache_max_mb": self.ocr_cache_max_mb,
             "ocr_cache_min_confidence": self.ocr_cache_min_confidence,
+            "anthropic_api_key": self.anthropic_api_key,
             "app_version": APP_VERSION,
         }
 
@@ -461,6 +478,9 @@ class AppSettings:
                         )
                     ),
                 ),
+            ),
+            anthropic_api_key=str(
+                data.get("anthropic_api_key", defaults.anthropic_api_key)
             ),
         )
 

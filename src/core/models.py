@@ -499,6 +499,70 @@ class PostprocessConfig:
 
 
 # ---------------------------------------------------------------------------
+# Post-OCR structured-field extraction (parser: waybill / UPD / invoice)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LlmFallbackConfig:
+    """Optional Claude-API fallback for fields the regex parser left MISSING.
+
+    Default OFF to preserve the app's offline-first guarantee. When
+    enabled, the orchestrator calls
+    :func:`src.tn_parser.llm_fallback.improve_row` for rows whose
+    overall confidence is below :attr:`min_confidence`. The ANTHROPIC
+    API key is NOT stored in the profile (exporting a profile would
+    then leak credentials); it lives in the user's settings.json.
+
+    When the ``anthropic`` package is missing or the key is absent,
+    :func:`improve_row` returns the row unchanged, so ``enabled=True``
+    on an offline install silently degrades to the regex-only path.
+    """
+
+    enabled: bool = False
+    min_confidence: float = 0.4
+    model: str = "claude-opus-4-7"
+    max_text_chars: int = 20_000
+
+
+@dataclass
+class ExtractConfig:
+    """Post-OCR structured-field extraction configuration.
+
+    When ``enabled=False`` (the default) the pipeline does not invoke
+    the parser — profiles authored before schema v11 behave exactly
+    as they did. When ``enabled=True`` the orchestrator dispatches on
+    :attr:`kind` to pick the parser module:
+
+        ``"tn_upd"`` → :mod:`src.tn_parser` (Russian транспортные
+        накладные + УПД)
+
+    Additional parsers register their key here without modifying
+    :class:`~src.application.pipeline.OCRPipeline`.
+    """
+
+    enabled: bool = False
+    #: Dispatcher key. Unused while ``enabled=False``.
+    kind: str = "tn_upd"
+    #: Allow one PDF to contain several documents (via ``\f`` between
+    #: pages). Matches the parser's ``split_documents`` stage.
+    multi_document: bool = True
+    #: Minimum character count after normalisation; below this the
+    #: parser emits a ``LOW_TEXT`` note instead of extracting. Mirrors
+    #: ``src.tn_parser.core.LOW_TEXT_THRESHOLD`` so the value can be
+    #: tuned per profile without editing parser constants.
+    low_text_threshold: int = 200
+    #: When True, parser output is cached by SHA1(path|size|mtime).
+    #: Off in CI / golden-test runs to force a clean parse.
+    cache_enabled: bool = True
+    #: Consult :mod:`src.tn_parser.org_lookup` to enrich party fields
+    #: with ИНН → name/address data from the bundled catalogue. Pure
+    #: local lookup; no network access.
+    org_lookup: bool = True
+    llm_fallback: LlmFallbackConfig = field(default_factory=LlmFallbackConfig)
+
+
+# ---------------------------------------------------------------------------
 # Profiles
 # ---------------------------------------------------------------------------
 
@@ -507,7 +571,7 @@ class PostprocessConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 10
+PROFILE_SCHEMA_VERSION: int = 11
 
 
 @dataclass
@@ -520,6 +584,10 @@ class ProfileData:
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     ocr: OCRConfig = field(default_factory=OCRConfig)
     postprocess: PostprocessConfig = field(default_factory=PostprocessConfig)
+    #: Post-OCR structured-field extraction. Default ``enabled=False``
+    #: means the OCR pipeline behaves exactly as in schema v10 —
+    #: existing profiles round-trip unchanged.
+    extract: ExtractConfig = field(default_factory=ExtractConfig)
     builtin: bool = False
     created_at: str = field(
         default_factory=lambda: datetime.now(UTC).isoformat()
@@ -674,7 +742,30 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         data["schema_version"] = 10
         version = 10
 
-    # Future migrations go here: `if version < 11: ...`
+    # v10 → v11: add ``extract`` section for post-OCR parser
+    # (транспортные накладные / УПД). Default ``enabled=False`` keeps
+    # the OCR pipeline behaviourally identical for every pre-v11
+    # profile; the ``tn_upd`` builtin (added in the same release)
+    # ships with ``enabled=True``. The ``llm_fallback`` sub-section
+    # is nested so future parser knobs can live alongside it without
+    # another schema bump.
+    if version < 11:
+        extract = data.setdefault("extract", {})
+        extract.setdefault("enabled", False)
+        extract.setdefault("kind", "tn_upd")
+        extract.setdefault("multi_document", True)
+        extract.setdefault("low_text_threshold", 200)
+        extract.setdefault("cache_enabled", True)
+        extract.setdefault("org_lookup", True)
+        llm = extract.setdefault("llm_fallback", {})
+        llm.setdefault("enabled", False)
+        llm.setdefault("min_confidence", 0.4)
+        llm.setdefault("model", "claude-opus-4-7")
+        llm.setdefault("max_text_chars", 20_000)
+        data["schema_version"] = 11
+        version = 11
+
+    # Future migrations go here: `if version < 12: ...`
 
     return data
 
@@ -717,6 +808,48 @@ class PageResult:
 
 
 @dataclass
+class ParsedDocument:
+    """Structured fields extracted from a job by the post-OCR parser.
+
+    Populated when the profile's :class:`ExtractConfig` had
+    ``enabled=True`` and the parser produced at least one row.
+    ``None`` on :attr:`JobResult.parsed` means extraction was
+    disabled, the parser was unavailable, or the text was too short
+    / produced no rows — distinguishing those cases is the
+    orchestrator's job, visible through the application log.
+
+    :attr:`rows` stores rows in the JSON-dict form produced by
+    :meth:`src.tn_parser.models.ParsedRow.to_json_dict`, NOT the
+    dataclass instances. Storing dicts keeps :mod:`src.core` free
+    of a compile-time dependency on :mod:`src.tn_parser` (the parser
+    lives in a parallel top-level package and must not become a
+    hard dependency of core domain types — the layer boundary
+    matters: a user running a pipeline without ``extract.enabled``
+    should be able to import :mod:`src.core.models` even if
+    ``src.tn_parser`` is absent from a custom build).
+
+    Attributes:
+        rows: One dict per extracted document. The average ТН PDF
+            contributes one; сводные УПД + реестр may contribute
+            several. Each dict has the field names documented on
+            :class:`src.tn_parser.models.ParsedRow`.
+        overall_confidence: Mean of per-row ``confidence.overall()``
+            values in the ``[0.0, 1.0]`` range. Zero when ``rows``
+            is empty. Use to colour UI rows and to gate "auto-open
+            the editor on finish".
+        snapshot_path: Populated by the Excel exporter when the
+            ``.xlsx.snapshot.json`` sidecar is written. Used by the
+            feedback-loop tooling (``scripts/collect_feedback.py``)
+            to diff operator corrections against the original parser
+            output. Remains ``None`` when no Excel was exported.
+    """
+
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    overall_confidence: float = 0.0
+    snapshot_path: str | None = None
+
+
+@dataclass
 class JobResult:
     """Aggregated result for a completed job."""
 
@@ -727,6 +860,12 @@ class JobResult:
     pages: list[PageResult] = field(default_factory=list)
     total_time_sec: float = 0.0
     error: str | None = None
+    #: Structured-field extraction output from the post-OCR parser,
+    #: or ``None`` when extraction was disabled / unavailable / yielded
+    #: no rows. Populated by
+    #: :func:`src.application.parsers.tn_orchestrator.extract_from_pages`
+    #: when the profile's :attr:`ProfileData.extract.enabled` is True.
+    parsed: ParsedDocument | None = None
 
     @property
     def page_count(self) -> int:

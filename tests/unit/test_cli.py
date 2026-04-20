@@ -24,6 +24,12 @@ class TestArgumentParsing:
         assert args.workers == 1
         assert args.txt is False
         assert args.docx is False
+        assert args.excel is False
+
+    def test_excel_flag(self) -> None:
+        """--excel flag enables the Excel exporter; defaults to False."""
+        args = cli.build_parser().parse_args(["in.pdf", "--excel"])
+        assert args.excel is True
 
     def test_output_flag(self) -> None:
         args = cli.build_parser().parse_args(["in.pdf", "-o", "out.pdf"])
@@ -255,6 +261,54 @@ class TestProcessSingle:
 
         assert rc == 0
         assert em_instance.export.called
+
+    def test_excel_export_uses_export_manager(self, tmp_path: Path) -> None:
+        """``--excel`` routes to ``exporter.export(..., ExportFormat.EXCEL)``.
+
+        Verifies the CLI contract plumbs through: build_parser →
+        process_single → ExportManager.export with the xlsx path
+        derived from ``-o``. The actual Excel writing is handled by
+        ``tn_parser.excel.write_excel_safe`` (covered by
+        ``test_export_excel.py``); here we only assert the dispatch.
+        """
+        from src.shared.types import ExportFormat
+
+        pdf = tmp_path / "in.pdf"
+        pdf.write_bytes(b"%PDF-1.7\n")
+        out = tmp_path / "out.pdf"
+
+        fake_result = JobResult(
+            job_id="j",
+            status=JobStatus.COMPLETED,
+            input_path=str(pdf),
+            output_path=str(out),
+            pages=[PageResult(page_number=1, text="hi")],
+        )
+
+        with patch("src.application.pipeline.OCRPipeline") as pipeline_cls, \
+             patch("src.application.export_manager.ExportManager") as em_cls, \
+             patch("src.infrastructure.tesseract_wrapper.TesseractWrapper"):
+            pipeline_cls.return_value.run.return_value = fake_result
+            em_instance = MagicMock()
+            em_instance.export.return_value = out.with_suffix(".xlsx")
+            em_cls.return_value = em_instance
+
+            rc = cli.process_single(
+                pdf, out, "default", False, False, want_excel=True,
+            )
+
+        assert rc == 0
+        # At least one call to export(..., ExportFormat.EXCEL).
+        excel_calls = [
+            c for c in em_instance.export.call_args_list
+            if ExportFormat.EXCEL in c.args
+        ]
+        assert excel_calls, (
+            f"expected an ExportFormat.EXCEL export call; got "
+            f"{em_instance.export.call_args_list!r}"
+        )
+        # The xlsx path uses the ``-o`` stem with a ``.xlsx`` suffix.
+        assert excel_calls[0].args[1] == out.with_suffix(".xlsx")
 
 
 # ---------------------------------------------------------------------------

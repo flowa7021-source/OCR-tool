@@ -23,9 +23,25 @@ dependencies = [
     "scikit-image>=0.22",
     "Pillow>=10.0",
     "psutil>=5.9",
+    "openpyxl>=3.1",
+    "rapidfuzz>=3.0",
 ]
 
 [project.optional-dependencies]
+# Opt-in LLM-fallback (Claude API) for the ТН / УПД parser. NOT
+# bundled by default — the shipped Windows installer stays fully
+# offline per CLAUDE.md ("приложение должно работать без сети").
+# Installed by users who want the rescue for low-confidence rows:
+#
+#     pip install "ocr-studio[llm]"
+#
+# ``anthropic`` pulls in httpx + pydantic; the pinned pydantic here
+# matches the version ``anthropic.messages.parse(output_format=...)``
+# uses for structured-output validation.
+llm = [
+    "anthropic>=0.34",
+    "pydantic>=2.7",
+]
 dev = [
     "pytest>=8.0",
     "pytest-qt>=4.4",
@@ -72,7 +88,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 # Default test runs ignore tests/benchmarks/ — those are slow and meant
 # to be invoked explicitly with `pytest tests/benchmarks --benchmark-only`.
-testpaths = ["tests/unit", "tests/integration"]
+testpaths = ["tests/unit", "tests/integration", "tests/parsers"]
 python_files = "test_*.py"
 addopts = "-v --tb=short"
 markers = [

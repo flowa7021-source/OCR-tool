@@ -187,6 +187,10 @@ class OCRPipeline:
         cached = self._try_cache_hit(input_path, job.profile, output_path, job_id)
         if cached is not None:
             self._report(cached.page_count or 1, cached.page_count or 1, "cache-hit")
+            # Profile may have flipped ``extract.enabled=True`` since
+            # this cache entry was stored — run the parser on the
+            # cached text so the user still gets structured output.
+            self._maybe_run_parser(cached, job)
             return cached
 
         workdir: Path | None = None
@@ -289,6 +293,10 @@ class OCRPipeline:
                     started=started,
                 )
                 if bypass_result is not None:
+                    # Digital PDFs (Word/LaTeX exports) skip OCR but
+                    # still benefit from structured extraction —
+                    # call the parser on the extracted text layer.
+                    self._maybe_run_parser(bypass_result, job)
                     return bypass_result
 
             self._report(0, total_pages, "analyze")
@@ -467,6 +475,12 @@ class OCRPipeline:
             self._report(total_pages, total_pages, "postprocess")
 
             result.pages = page_results
+            # Post-OCR structured-field extraction (ТН / УПД parser)
+            # runs AFTER postprocess so it sees the same text the
+            # user will see in the results panel. Populates
+            # ``result.parsed`` when the profile asks for it; else
+            # leaves it ``None``.
+            self._maybe_run_parser(result, job)
             result.status = JobStatus.COMPLETED
             result.total_time_sec = time.time() - started
 
@@ -1369,6 +1383,47 @@ class OCRPipeline:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Postprocess failed: %s", exc)
             return text
+
+    def _maybe_run_parser(self, result: JobResult, job: OCRJobConfig) -> None:
+        """Invoke the post-OCR structured-field parser, if requested.
+
+        Populates ``result.parsed`` in place. This method is the SINGLE
+        entry point to the ТН / УПД parser from the pipeline — it is
+        called from each of the three completion paths (cache hit,
+        text-layer bypass, full OCR) so every successful job gets the
+        same extraction treatment regardless of how the OCR phase
+        completed.
+
+        Never raises. Any exception — including the orchestrator's
+        own import error if ``src.application.parsers.tn_orchestrator``
+        can't be loaded — is caught here and logged. An OCR job that
+        succeeded on the OCR side must complete with ``status=COMPLETED``
+        even when the parser layer is broken; ``parsed`` simply stays
+        ``None`` and the UI falls back to showing the raw OCR text.
+        """
+        try:
+            from src.application.parsers.tn_orchestrator import (
+                extract_from_pages,
+            )
+        except ImportError as exc:
+            logger.warning(
+                "Post-OCR extraction unavailable (orchestrator import "
+                "failed: %s); skipping",
+                exc,
+            )
+            return
+        try:
+            result.parsed = extract_from_pages(
+                pages=result.pages,
+                config=job.profile.extract,
+                source_path=Path(result.input_path),
+            )
+        except Exception as exc:  # noqa: BLE001 — belt-and-braces
+            logger.exception(
+                "Pipeline parser hook raised despite orchestrator catch: %s",
+                exc,
+            )
+            result.parsed = None
 
     def _compute_confidences(
         self,

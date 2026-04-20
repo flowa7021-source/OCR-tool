@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QLabel,
+    QLineEdit,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -117,6 +118,44 @@ class PreferencesDialog(QDialog):
         ui_form.addRow(self.notify_on_complete)
         root.addWidget(ui_group)
 
+        # --- LLM fallback (opt-in) -----------------------------------------
+        # CLAUDE.md: приложение должно работать полностью оффлайн.
+        # Пустой ключ здесь = LLM-fallback выключен; парсер ТН/УПД
+        # тихо деградирует до regex-only пути. Пользователь заполняет
+        # поле, только если явно хочет рескью на низко-confidence
+        # строках (≤ 40 %) с тарифицируемым Claude API.
+        llm_group = QGroupBox("LLM-фоллбэк (опционально)", self)
+        llm_form = QFormLayout(llm_group)
+        self.llm_api_key = QLineEdit(self)
+        # EchoMode.PasswordEchoOnEdit — показывает значение пока
+        # пользователь печатает, потом скрывает точками. Даёт
+        # возможность проверить вставку ключа без постоянно
+        # открытой секретной строки.
+        self.llm_api_key.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
+        self.llm_api_key.setPlaceholderText(
+            "sk-ant-api03-… (оставьте пустым, чтобы отключить)"
+        )
+        self.llm_api_key.setToolTip(
+            "Anthropic API key для Claude-fallback парсера ТН/УПД. "
+            "Хранится в settings.json пользователя (НЕ в профиле — "
+            "экспорт профиля не утекает ключ). Используется, когда "
+            "профиль включает ``extract.llm_fallback.enabled=True`` "
+            "И строка парсера имеет общую уверенность ниже 40 %. "
+            "При пустом ключе парсер работает без LLM."
+        )
+        llm_form.addRow("Anthropic API key:", self.llm_api_key)
+
+        llm_hint = QLabel(
+            "Ключ передаётся в ANTHROPIC_API_KEY окружения на время "
+            "сессии. Установите пакет Anthropic SDK отдельно: "
+            "<code>pip install \"ocr-studio[llm]\"</code>.",
+            self,
+        )
+        llm_hint.setWordWrap(True)
+        llm_hint.setTextFormat(Qt.TextFormat.RichText)
+        llm_form.addRow(llm_hint)
+        root.addWidget(llm_group)
+
         note = QLabel(
             "<i>Некоторые настройки применяются после перезапуска.</i>",
             self,
@@ -149,6 +188,7 @@ class PreferencesDialog(QDialog):
             # custom number is still honoured until they change it.
             idx = self.cache_budget.findData(2048)
         self.cache_budget.setCurrentIndex(max(0, idx))
+        self.llm_api_key.setText(self._settings.anthropic_api_key or "")
 
     # --------------------------------------------------------------- save
     def _on_accept(self) -> None:
@@ -168,6 +208,10 @@ class PreferencesDialog(QDialog):
         cache_mb = self.cache_budget.currentData()
         if isinstance(cache_mb, int):
             self._settings.ocr_cache_max_mb = int(cache_mb)
+        # Strip the API key — users routinely copy-paste a trailing
+        # newline or space from password managers, which makes the
+        # stored credential silently invalid.
+        self._settings.anthropic_api_key = self.llm_api_key.text().strip()
         try:
             self._storage.save(self._settings)
         except Exception as exc:  # noqa: BLE001
@@ -176,6 +220,16 @@ class PreferencesDialog(QDialog):
             logger.exception("Failed to save preferences: %s", exc)
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить настройки: {exc}")
             return
+
+        # Reflect the (possibly changed) key into the process
+        # environment immediately — no restart required. Mirrors the
+        # same call made at app startup in :func:`src.app.create_application`.
+        try:
+            from src.infrastructure.llm_credentials import apply_to_environment
+
+            apply_to_environment(self._settings)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("LLM credential re-apply failed: %s", exc)
         # Sync the main window's View→Theme checkbox with the saved choice.
         parent = self.parent()
         action = getattr(parent, "action_light_theme", None)

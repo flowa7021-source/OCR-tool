@@ -20,11 +20,11 @@ def test_initialize_builtins_creates_all(manager: ProfileManager) -> None:
     names = {p.name for p in manager.list_profiles()}
     for expected in BUILTIN_NAMES:
         assert expected in names
-    # 6 built-in profiles after the GOT-OCR 2.0 removal (Apr 2026)
-    # pulled ``handwritten_mixed`` out. Adding a new profile means
-    # bumping this count so the "initialize_builtins wrote what we
-    # expected" contract stays pinned.
-    assert len(BUILTIN_NAMES) == 6
+    # 7 built-in profiles after ``tn_upd`` was added in schema v11
+    # (Apr 2026) alongside the ``extract`` section. Adding a new
+    # profile means bumping this count so the "initialize_builtins
+    # wrote what we expected" contract stays pinned.
+    assert len(BUILTIN_NAMES) == 7
 
 
 def test_builtins_marked_builtin(manager: ProfileManager) -> None:
