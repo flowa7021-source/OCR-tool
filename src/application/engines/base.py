@@ -89,6 +89,8 @@ class OCREngine(ABC):
         output_pdf: Path,
         config: OCRConfig,
         progress_callback: ProgressCallback | None = None,
+        *,
+        original_input_pdf: Path | None = None,
     ) -> list[PageOCRResult]:
         """Execute OCR on ``preprocessed_pdf`` and write searchable PDF.
 
@@ -100,6 +102,13 @@ class OCREngine(ABC):
             config: User-facing OCR configuration.
             progress_callback: Optional ``(current, total, stage)``
                 callback; may be called from worker threads.
+            original_input_pdf: Optional path to the ORIGINAL user
+                PDF (before any pipeline preprocessing). Engines use
+                this for retry tiers that need the raw raster — the
+                preprocessed version has already been binarised and
+                is destructive to reapply heavy preprocessing to.
+                ``None`` means "fall back to ``preprocessed_pdf``"
+                for backwards compatibility with existing engines.
 
         Returns:
             One :class:`PageOCRResult` per page of the input PDF.

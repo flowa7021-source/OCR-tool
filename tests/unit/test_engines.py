@@ -206,6 +206,7 @@ class TestTesseractEngine:
 
         out = tmp_path / "out.pdf"
         call_log: list[tuple[str, int]] = []
+        aggressive_called = [0]
 
         def _write_text_pdf(path):
             """Write a tiny PDF with a real text layer."""
@@ -218,16 +219,43 @@ class TestTesseractEngine:
                 d.close()
 
         def _fake_run(opts):
-            """Fail on page 2 primary attempt; succeed everywhere else
-            (including on the aggressive-preprocessing retry)."""
+            """Fail on page 2 primary attempt; succeed everywhere else.
+            The aggressive retry no longer goes through run_ocrmypdf —
+            it uses pytesseract.image_to_pdf_or_hocr directly — so
+            run_ocrmypdf is NEVER called on the ``*_aggressive.pdf``
+            name and the fake's job is just to fail once on the
+            failing page."""
             name = opts.input_file.name
             call_log.append((name, opts.psm))
             if name == "page_0002.pdf":
                 raise RuntimeError("simulated Tesseract layout crash")
             _write_text_pdf(opts.output_file)
 
+        def _fake_image_to_pdf(*args, **kwargs):
+            """Aggressive retry's direct pytesseract call. Return a
+            minimal 1-page PDF with a text layer so the retry is
+            recorded as a successful recovery."""
+            aggressive_called[0] += 1
+            d = fitz.open()
+            try:
+                page = d.new_page(width=200, height=200)
+                page.insert_text(
+                    (10, 50), "aggressive recovery", fontsize=12,
+                )
+                buf = d.tobytes()
+            finally:
+                d.close()
+            return buf
+
         with patch.object(engine, "is_available", return_value=(True, "")), \
-             patch("src.application.engines.tesseract_engine.run_ocrmypdf", side_effect=_fake_run):
+             patch(
+                 "src.application.engines.tesseract_engine.run_ocrmypdf",
+                 side_effect=_fake_run,
+             ), \
+             patch(
+                 "pytesseract.image_to_pdf_or_hocr",
+                 side_effect=_fake_image_to_pdf,
+             ):
             results = engine.run(
                 preprocessed_pdf=in_pdf,
                 output_pdf=out,
@@ -239,13 +267,13 @@ class TestTesseractEngine:
         assert out.exists()
 
         # The aggressive-preprocessing retry must have been issued —
-        # that's the first tier after a primary fail.
-        aggressive_entries = [
-            entry for entry in call_log if "aggressive" in entry[0]
-        ]
-        assert aggressive_entries, (
-            "Expected an aggressive-preprocessing retry for the "
-            f"failing page, but call log was {call_log!r}"
+        # pytesseract.image_to_pdf_or_hocr is called once per retry
+        # attempt, which should be exactly once (on the failing page 2).
+        assert aggressive_called[0] >= 1, (
+            "Expected the aggressive-preprocessing retry to invoke "
+            f"pytesseract.image_to_pdf_or_hocr at least once, but "
+            f"got {aggressive_called[0]} calls; run_ocrmypdf log was "
+            f"{call_log!r}"
         )
 
     def test_failing_page_retry_escalates_to_last_resort_tier(
@@ -293,8 +321,21 @@ class TestTesseractEngine:
                 return
             raise RuntimeError("simulated layout crash")
 
+        def _fake_image_to_pdf(*args, **kwargs):
+            """Aggressive retry goes through pytesseract directly.
+            Fail it by returning a minimal PDF without any text layer
+            so the engine escalates to the simpler-settings tier."""
+            d = fitz.open()
+            try:
+                d.new_page(width=200, height=200)
+                buf = d.tobytes()
+            finally:
+                d.close()
+            return buf
+
         with patch.object(engine, "is_available", return_value=(True, "")), \
-             patch("src.application.engines.tesseract_engine.run_ocrmypdf", side_effect=_fake_run):
+             patch("src.application.engines.tesseract_engine.run_ocrmypdf", side_effect=_fake_run), \
+             patch("pytesseract.image_to_pdf_or_hocr", side_effect=_fake_image_to_pdf):
             engine.run(
                 preprocessed_pdf=in_pdf,
                 output_pdf=out,

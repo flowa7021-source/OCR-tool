@@ -390,14 +390,40 @@ class OCRPipeline:
             t_stage = time.time()
             try:
                 engine = get_engine(engine_kind)
-                engine_results = engine.run(
-                    preprocessed_pdf=preprocessed_pdf,
-                    output_pdf=output_path,
-                    config=job.profile.ocr,
-                    progress_callback=lambda c, t, s: self._report(
-                        total_pages * c // max(1, t), total_pages, s
-                    ),
+                progress_fn = lambda c, t, s: self._report(  # noqa: E731
+                    total_pages * c // max(1, t), total_pages, s
                 )
+                # Give the engine the RAW user PDF so retry tiers
+                # that need to re-preprocess
+                # (``_retry_page_with_aggressive_preprocessing``) can
+                # rasterise the untouched source instead of the
+                # already-binarised preprocessed PDF. Aggressive-on-
+                # top-of-binary is a no-op / destructive combo — the
+                # original is what aggressive preprocessing needs.
+                # Engines / stubs that predate this kwarg fall back
+                # to the older four-argument signature.
+                try:
+                    engine_results = engine.run(
+                        preprocessed_pdf=preprocessed_pdf,
+                        output_pdf=output_path,
+                        config=job.profile.ocr,
+                        progress_callback=progress_fn,
+                        original_input_pdf=input_path,
+                    )
+                except TypeError as te:
+                    if "original_input_pdf" not in str(te):
+                        raise
+                    logger.debug(
+                        "Engine %s does not accept original_input_pdf "
+                        "kwarg — falling back to legacy 4-arg call",
+                        engine_kind,
+                    )
+                    engine_results = engine.run(
+                        preprocessed_pdf=preprocessed_pdf,
+                        output_pdf=output_path,
+                        config=job.profile.ocr,
+                        progress_callback=progress_fn,
+                    )
             except (OCRmyPDFError, EngineNotAvailableError, KeyError) as exc:
                 result.status = JobStatus.FAILED
                 result.error = str(exc)

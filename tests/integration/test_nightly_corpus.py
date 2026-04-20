@@ -147,42 +147,22 @@ class TestNightlyCorpusMatrix:
             if empty_pages:
                 empty_page_failures.append((doc_path.name, empty_pages))
 
-        # The ``faded_noisy_{03,04}`` fixtures are designed as visual
-        # stress-tests: fg/bg contrast of only ~80 grayscale levels plus
-        # 2.5–3 % salt-pepper noise. Tesseract 5.3's LSTM physically
-        # cannot read them — every retry tier (aggressive preprocessing,
-        # 200 DPI simpler, 150 DPI sparse-text) comes back empty, which
-        # is the correct behaviour for "truly unreadable input" rather
-        # than a regression we can fix with preprocessing alone. We
-        # carve these two out of the must-succeed set so the nightly
-        # suite signals real regressions (retry ladder broke, profile
-        # reverted, etc.) instead of red-noising on fixtures beyond
-        # Tesseract's pixel-contrast limit. Every OTHER fixture in the
-        # corpus still has to pass.
-        known_unreadable: frozenset[str] = frozenset({
-            "faded_noisy_03.pdf",
-            "faded_noisy_04.pdf",
-        })
-        real_failures = [
-            entry for entry in failures if entry[0] not in known_unreadable
-        ]
-        real_empty = [
-            entry for entry in empty_page_failures
-            if entry[0] not in known_unreadable
-        ]
-
-        # Aggregate report — show ALL failures at once rather than first
-        assert not real_failures, (
-            f"profile={profile_name} crashed on {len(real_failures)} "
-            "corpus docs (excluding known-unreadable stress fixtures):\n"
-            + "\n".join(f"  {n}: {e}" for n, e in real_failures)
+        # Aggregate report — show ALL failures at once rather than first.
+        # After the aggressive-preprocessing retry now uses
+        # pytesseract directly on the grayscale Sauvola output (bypassing
+        # OCRmyPDF's re-thresholding which destroyed the text on faded
+        # fixtures), every nightly fixture including faded_noisy_02/03/04
+        # recovers a non-empty text layer.
+        assert not failures, (
+            f"profile={profile_name} crashed on {len(failures)} corpus "
+            f"docs:\n"
+            + "\n".join(f"  {n}: {e}" for n, e in failures)
         )
-        assert not real_empty, (
+        assert not empty_page_failures, (
             f"profile={profile_name} left pages empty on "
-            f"{len(real_empty)} corpus docs (excluding known-unreadable "
-            "stress fixtures):\n"
+            f"{len(empty_page_failures)} corpus docs:\n"
             + "\n".join(
                 f"  {n}: empty pages {p}"
-                for n, p in real_empty
+                for n, p in empty_page_failures
             )
         )
