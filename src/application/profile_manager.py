@@ -403,6 +403,20 @@ class ProfileManager:
           * **Post-processing: everything enabled** — Russian +
             English autocorrect, NFC, hyphen merge, artifact strip.
             These are pure-Python and cannot fail the job.
+          * **Word-level confidence filter + soft-rescue ON** — in
+            practice ``quick_reliable`` reports noticeably higher
+            mean_conf than ``universal_accurate`` (its scans are
+            already clean enough that the 300 DPI / OTSU path
+            produces mostly 80+ %-confidence words), so dropping the
+            30–40 % tail is almost pure upside: the stamp / logo /
+            signature noise goes away without losing body text.
+            Soft-rescue keeps the borderline band
+            ``[max(50-15, 45), 50)`` for lexically-clean tokens
+            (ИНН-runs, даты, суммы, all-caps acronyms) so the
+            conservative filter doesn't eat real content. Output
+            contract unchanged: empty filtered text falls back to
+            the original OCR, so a flaky-conf page still yields
+            whatever Tesseract returned.
 
         Marketed as "use this when anything else breaks" — documented
         explicitly in the profile description so UI users see it.
@@ -429,6 +443,16 @@ class ProfileManager:
             tesseract_timeout=300,
             optimize_level=OptimizeLevel.LOSSLESS,
             skip_text=True,
+            # Word-level confidence filter + soft-rescue. Rationale in
+            # the docstring above. Threshold stays at 50 (lower than
+            # universal_accurate's 60) because quick_reliable targets
+            # scans where raw Tesseract conf is already high — a 60-cut
+            # here would be overly aggressive. Rescue band at this
+            # threshold collapses to [45, 50) per the absolute floor,
+            # which is the narrowest rescue possible. See
+            # ``src.core.confidence_filter`` for the mechanism.
+            drop_low_conf_words=True,
+            soft_rescue_dropped_words=True,
         )
         return ProfileData(
             name="quick_reliable",
