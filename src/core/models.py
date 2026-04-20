@@ -808,6 +808,48 @@ class PageResult:
 
 
 @dataclass
+class ParsedDocument:
+    """Structured fields extracted from a job by the post-OCR parser.
+
+    Populated when the profile's :class:`ExtractConfig` had
+    ``enabled=True`` and the parser produced at least one row.
+    ``None`` on :attr:`JobResult.parsed` means extraction was
+    disabled, the parser was unavailable, or the text was too short
+    / produced no rows — distinguishing those cases is the
+    orchestrator's job, visible through the application log.
+
+    :attr:`rows` stores rows in the JSON-dict form produced by
+    :meth:`src.tn_parser.models.ParsedRow.to_json_dict`, NOT the
+    dataclass instances. Storing dicts keeps :mod:`src.core` free
+    of a compile-time dependency on :mod:`src.tn_parser` (the parser
+    lives in a parallel top-level package and must not become a
+    hard dependency of core domain types — the layer boundary
+    matters: a user running a pipeline without ``extract.enabled``
+    should be able to import :mod:`src.core.models` even if
+    ``src.tn_parser`` is absent from a custom build).
+
+    Attributes:
+        rows: One dict per extracted document. The average ТН PDF
+            contributes one; сводные УПД + реестр may contribute
+            several. Each dict has the field names documented on
+            :class:`src.tn_parser.models.ParsedRow`.
+        overall_confidence: Mean of per-row ``confidence.overall()``
+            values in the ``[0.0, 1.0]`` range. Zero when ``rows``
+            is empty. Use to colour UI rows and to gate "auto-open
+            the editor on finish".
+        snapshot_path: Populated by the Excel exporter when the
+            ``.xlsx.snapshot.json`` sidecar is written. Used by the
+            feedback-loop tooling (``scripts/collect_feedback.py``)
+            to diff operator corrections against the original parser
+            output. Remains ``None`` when no Excel was exported.
+    """
+
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    overall_confidence: float = 0.0
+    snapshot_path: str | None = None
+
+
+@dataclass
 class JobResult:
     """Aggregated result for a completed job."""
 
@@ -818,6 +860,12 @@ class JobResult:
     pages: list[PageResult] = field(default_factory=list)
     total_time_sec: float = 0.0
     error: str | None = None
+    #: Structured-field extraction output from the post-OCR parser,
+    #: or ``None`` when extraction was disabled / unavailable / yielded
+    #: no rows. Populated by
+    #: :func:`src.application.parsers.tn_orchestrator.extract_from_pages`
+    #: when the profile's :attr:`ProfileData.extract.enabled` is True.
+    parsed: ParsedDocument | None = None
 
     @property
     def page_count(self) -> int:
