@@ -714,6 +714,7 @@ class TesseractEngine(OCREngine):
         from src.core.models import (
             BackgroundConfig,
             BinarizationConfig,
+            BorderRemovalConfig,
             ContrastConfig,
             DenoiseConfig,
             DenoiseStep,
@@ -723,9 +724,13 @@ class TesseractEngine(OCREngine):
         from src.shared.types import BinarizationMethod, DenoiseMethod
 
         try:
+            # Keep colour if available — Sauvola needs the grayscale
+            # projection but the RGB raster carries more info for the
+            # CLAHE + background-division passes. ImagePreprocessor
+            # handles the grayscale conversion internally.
             with fitz.open(str(page_pdf)) as src:
                 page = src[0]
-                pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+                pix = page.get_pixmap(dpi=dpi, alpha=False)
             if pix.n == 1:
                 arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
                     pix.height, pix.width,
@@ -735,6 +740,13 @@ class TesseractEngine(OCREngine):
                     pix.height, pix.width, pix.n,
                 )
 
+            # This mirrors the pre-Apr-2026 universal_accurate preset,
+            # which empirically recovered faded-noisy scans that the
+            # newer lean tuning can't. The tradeoff ("lots of diacritics
+            # on clean docs" — bug 3 from the benchmark findings) is
+            # irrelevant HERE because this tier only runs AFTER the
+            # primary attempt already failed, i.e. on documents where
+            # the lean preprocessing didn't produce any text.
             aggressive_cfg = PreprocessConfig(
                 deskew=DeskewConfig(enabled=True, auto_detect=True, max_angle=45.0),
                 binarization=BinarizationConfig(
@@ -745,14 +757,17 @@ class TesseractEngine(OCREngine):
                 denoise=DenoiseConfig(
                     enabled=True,
                     steps=[
-                        DenoiseStep(method=DenoiseMethod.NLM, h=15),
                         DenoiseStep(method=DenoiseMethod.MEDIAN, ksize=3),
+                        DenoiseStep(method=DenoiseMethod.MORPH_CLOSE, morph_ksize=3),
                     ],
                 ),
                 contrast=ContrastConfig(
                     clahe_enabled=True, clahe_clip=3.0, clahe_tile=8,
                 ),
                 background=BackgroundConfig(enabled=True, blur_kernel=55),
+                border_removal=BorderRemovalConfig(
+                    enabled=True, min_line_length=75,
+                ),
             )
 
             preprocessor = ImagePreprocessor()
