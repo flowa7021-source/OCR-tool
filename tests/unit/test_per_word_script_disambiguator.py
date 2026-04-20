@@ -75,6 +75,34 @@ class TestIsLatinBrandSuspect:
         assert is_latin_brand_suspect("TRANSINZKO")  # 10 chars
         assert is_latin_brand_suspect("ТРАНСИНЖКО")
 
+    def test_punctuation_glued_brand_still_suspect(self) -> None:
+        """Tesseract routinely glues a CAPS brand to its neighbour
+        with ``/`` or ``,`` — the composite stretches past the
+        10-char ceiling, but the CAPS segment inside still flags
+        the whole token as suspect.
+        """
+        # Real case from transport invoices: т.м. TENSAR/скотч
+        # primary OCR produces "ТЕМЗАК/скотч," as ONE bbox with
+        # 14 chars total.
+        assert is_latin_brand_suspect("ТЕМЗАК/скотч,")
+        assert is_latin_brand_suspect("TENSAR/скотч")
+        # Glued brand + another alphabetic token.
+        assert is_latin_brand_suspect("SCANIA/Volvo")
+
+    def test_only_lowercase_segment_not_suspect(self) -> None:
+        """If every alphabetic segment is lowercase, don't trigger —
+        Russian prose with embedded punctuation shouldn't churn.
+        """
+        assert not is_latin_brand_suspect("контракт,версия")
+        assert not is_latin_brand_suspect("договор/приложение")
+
+    def test_empty_segments_ignored(self) -> None:
+        """Repeated non-alpha characters produce empty segments —
+        shouldn't confuse the splitter."""
+        assert not is_latin_brand_suspect("///")
+        assert not is_latin_brand_suspect(",.,.")
+        assert is_latin_brand_suspect(",TENSAR,")
+
 
 def _fake_tsv(words: list[str], confs: list[float]) -> dict:
     """Build a pytesseract.image_to_data DICT-style payload."""

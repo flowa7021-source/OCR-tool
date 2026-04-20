@@ -1000,6 +1000,21 @@ class OCRPipeline:
         slots: list[PageResult | None] = [None] * page_count
         png_slots: list[Path | None] = [None] * page_count
 
+        # When the profile's per-word script disambiguator is on, also
+        # save a pre-binarisation grayscale alongside the final binary
+        # PNG. ``_compute_confidences`` passes this to
+        # :func:`disambiguate_word` so the ``-l eng`` re-OCR sees the
+        # surviving thin-stroke evidence instead of a binary mask.
+        # Concretely: ``TENSAR`` at 35-50 % confidence on faded ink
+        # survives in grayscale long enough for the Latin pass to
+        # pick it up; after Sauvola / OTSU that same token dissolves
+        # into Cyrillic look-alikes Tesseract reports with high
+        # confidence (``ТЕМЗАК``) that the disambiguator can't
+        # break at the binary layer.
+        want_gray = bool(
+            getattr(profile.ocr, "per_word_script_disambiguation", False)
+        )
+
         def _worker(idx: int) -> None:
             page_num = idx + 1
             t0 = time.time()
@@ -1008,9 +1023,17 @@ class OCRPipeline:
                 img = self._rasterize_page(
                     input_path, idx, dpi=profile.ocr.dpi
                 )
-                processed, angle = self.preprocessor.process(
-                    img, profile.preprocess, dpi=profile.ocr.dpi
-                )
+                if want_gray:
+                    processed, gray, angle = self.preprocessor.process(
+                        img, profile.preprocess, dpi=profile.ocr.dpi,
+                        return_pre_binarization=True,
+                    )
+                    gray_path = workdir / f"page_{page_num:05d}_gray.png"
+                    self._save_png(gray, gray_path)
+                else:
+                    processed, angle = self.preprocessor.process(
+                        img, profile.preprocess, dpi=profile.ocr.dpi
+                    )
                 self._save_png(processed, png_path)
                 slots[idx] = PageResult(
                     page_number=page_num,
@@ -1482,12 +1505,54 @@ class OCRPipeline:
                             )
                         except (TypeError, ValueError, IndexError):
                             continue
+                        # Prefer the pre-binarisation grayscale for
+                        # re-OCR when the preprocess stage saved one
+                        # (faded Latin brands dissolve into Cyrillic
+                        # hallucinations after OTSU — ``TENSAR`` →
+                        # ``ТЕМЗАК`` — and only the pre-binary image
+                        # retains enough stroke evidence for the
+                        # ``-l eng`` pass to win the confidence race).
+                        disambig_image = img
+                        gray_path = png_path.with_name(
+                            png_path.stem + "_gray.png",
+                        )
+                        if gray_path.exists():
+                            try:
+                                raw_g = np.frombuffer(
+                                    gray_path.read_bytes(), dtype=np.uint8,
+                                )
+                                gray_img = (
+                                    cv2.imdecode(raw_g, cv2.IMREAD_UNCHANGED)
+                                    if raw_g.size else None
+                                )
+                                if gray_img is not None:
+                                    disambig_image = gray_img
+                            except Exception as exc:  # noqa: BLE001
+                                logger.debug(
+                                    "page %d: failed to read pre-binary "
+                                    "grayscale for disambiguator (%s) — "
+                                    "falling back to binary",
+                                    pr.page_number, exc,
+                                )
                         new_word, new_conf = disambiguate_word(
-                            img, bbox, word, c, tess_cfg,
+                            disambig_image, bbox, word, c, tess_cfg,
                         )
                         if new_word != word:
                             texts[i] = new_word
-                            confs_raw[i] = str(new_conf)
+                            # Disambiguator wins get a confidence
+                            # floor so the downstream adaptive
+                            # threshold (``70.0`` on noisy pages)
+                            # can't drop a brand token the per-word
+                            # re-OCR recovered with high confidence
+                            # under one specific language. The swap
+                            # happened because eng beat rus by ≥ 5
+                            # lift on the same crop — that's a
+                            # stronger signal than the single-pass
+                            # self-reported confidence of either
+                            # language alone, so the reported conf
+                            # gets bumped to max(new_conf, 80) to
+                            # clear any reasonable adaptive ceiling.
+                            confs_raw[i] = str(max(new_conf, 80.0))
 
                     # Rebuild the confidences list from the possibly-
                     # updated data so the downstream mean / threshold

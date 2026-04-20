@@ -201,7 +201,8 @@ class ImagePreprocessor:
         config: PreprocessConfig,
         *,
         dpi: int | None = None,
-    ) -> tuple[np.ndarray, float]:
+        return_pre_binarization: bool = False,
+    ) -> tuple[np.ndarray, float] | tuple[np.ndarray, np.ndarray, float]:
         """Apply the full preprocessing pipeline to ``image``.
 
         Order:
@@ -305,10 +306,33 @@ class ImagePreprocessor:
             logger.debug("Preprocess: denoise chain (%d steps)", len(config.denoise.steps))
             current = self._apply_denoise(current, config.denoise, dpi=dpi)
 
+        # Snapshot the image AFTER deskew / contrast / background /
+        # denoise but BEFORE binarisation. Downstream callers that
+        # need the original pixel-space bbox alignment (the per-word
+        # script disambiguator, specifically) benefit from seeing
+        # a grayscale image with thin strokes intact instead of the
+        # binary OTSU output. OTSU on faded-ink brand names like
+        # ``TENSAR`` on a Russian contract destroys the Latin-only
+        # visual evidence the re-OCR relies on. The snapshot shares
+        # the preprocessed image's coordinate system (same dims,
+        # same rotation, same border-removal crop) so bboxes from
+        # ``image_to_data`` are directly reusable.
+        pre_binary = current if return_pre_binarization else None
+        if pre_binary is not None and pre_binary.ndim == 3:
+            # Sauvola / adaptive are grayscale-only; normalise to
+            # grayscale so callers get a single-channel buffer
+            # regardless of whether the input raster was RGB or L.
+            pre_binary = _to_grayscale(pre_binary)
+        if pre_binary is not None:
+            pre_binary = pre_binary.copy()
+
         if config.binarization.method != BinarizationMethod.NONE:
             logger.debug("Preprocess: binarization %s", config.binarization.method.value)
             current = self._apply_binarization(current, config.binarization, dpi=dpi)
 
+        if return_pre_binarization:
+            assert pre_binary is not None  # noqa: S101 - control-flow narrowing
+            return current, pre_binary, angle
         return current, angle
 
     # ------------------------------------------------------------------

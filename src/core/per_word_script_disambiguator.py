@@ -67,30 +67,49 @@ def is_latin_brand_suspect(word: str) -> bool:
     hallucination biased by the dominant script. The classifier
     can't recover that without image-level re-OCR.
 
-    This heuristic picks up the class of suspicious tokens that
-    SHOULD be re-OCR'd despite not being "mixed":
+    The heuristic runs against every alphabetic SEGMENT of the
+    input (split on non-letter characters) — Tesseract routinely
+    glues a CAPS brand to its neighbour with ``/`` or ``,`` ("т.м.
+    ТЕМЗАК/скотч," on real transport invoices), and the composite
+    token stretches past the length ceiling a naïve whole-word
+    check would use. Any CAPS 3-10 letter segment is enough to
+    flag the whole token as suspect:
 
-      * 3-10 chars (short enough to plausibly be a brand abbrev
-        or acronym; longer tokens are prose).
+      * 3-10 chars per segment (short enough to be a brand / code
+        abbrev; longer alphabetic runs are prose).
       * All uppercase — Russian prose has very few all-caps
-        tokens; invoices / catalogues are full of them (ИНН, КПП,
-        ОГРН, brand names, product codes).
-      * Alphabetic only (no digits / punctuation) — digit-mixed
-        codes are caught by the numeric-context path in the
-        postprocessor.
+        tokens; invoices are full of them (ИНН, КПП, ОГРН,
+        brand names, product codes).
 
-    Russian all-caps acronyms (``ИНН``, ``ОГРН`` etc) trigger this
-    heuristic too, but that's fine: the disambiguator will run
-    both ``-l rus`` and ``-l eng`` re-OCR and Russian wins the
+    Russian all-caps acronyms (``ИНН``, ``ОГРН`` etc) trigger the
+    heuristic too, but that's fine: the disambiguator runs both
+    ``-l rus`` and ``-l eng`` re-OCR and Russian wins the
     confidence race for a genuinely-Cyrillic token. Cost is one
-    extra Tesseract call per candidate, which is ~5-15 tokens per
-    page on typical Russian business docs.
+    extra Tesseract call per candidate, typically 5-15 tokens per
+    page on Russian business documents.
     """
-    if not (3 <= len(word) <= 10):
+    if not word:
         return False
-    if not word.isupper():
+    # Digit-mixed codes (``INV-5``, ``USD123``) are handled by the
+    # numeric-context path in the text postprocessor; skip them here
+    # to avoid double-processing.
+    if any(ch.isdigit() for ch in word):
         return False
-    return all(ch.isalpha() for ch in word)
+    # Split on non-alphabetic characters so ``ТЕМЗАК/скотч,`` yields
+    # ``["ТЕМЗАК", "скотч"]``. Any CAPS 3-10-letter segment flags
+    # the whole token as suspect.
+    segments: list[str] = []
+    buf: list[str] = []
+    for ch in word:
+        if ch.isalpha():
+            buf.append(ch)
+        elif buf:
+            segments.append("".join(buf))
+            buf = []
+    if buf:
+        segments.append("".join(buf))
+
+    return any(3 <= len(seg) <= 10 and seg.isupper() for seg in segments)
 
 
 def _run_single_lang_ocr(
@@ -98,9 +117,18 @@ def _run_single_lang_ocr(
 ) -> tuple[str, float] | None:
     """Run ``pytesseract.image_to_data`` on a crop with one language.
 
-    Returns ``(joined_text, mean_confidence)`` on success or ``None``
-    when the crop produced no recognised words — the latter is the
-    signal that this language simply isn't the one in the image.
+    Returns ``(best_word, best_confidence)`` on success or ``None``
+    when the crop produced no recognised words.
+
+    "Best" is the highest-confidence recognised word from the crop,
+    NOT the mean across all words. Rationale: Tesseract routinely
+    splits a bbox-wide crop into a real-word token plus nearby
+    junk (punctuation, fragments of adjacent words). Averaging
+    drags the measurement down — a ``TENSAR`` correctly recovered
+    at 80 % confidence looks like 60 % mean when Tesseract also
+    emits a low-conf ``cxory,`` artefact next to it. Picking the
+    single best token keeps the comparison apples-to-apples with
+    the primary pass's per-word confidence.
     """
     if pytesseract is None:  # pragma: no cover
         return None
@@ -117,8 +145,8 @@ def _run_single_lang_ocr(
         )
         return None
 
-    words: list[str] = []
-    confs: list[float] = []
+    best_word: str | None = None
+    best_conf: float = -1.0
     for word, conf in zip(
         data.get("text", []), data.get("conf", []), strict=False,
     ):
@@ -130,11 +158,12 @@ def _run_single_lang_ocr(
             continue
         if c < 0:
             continue
-        words.append(word)
-        confs.append(c)
-    if not words:
+        if c > best_conf:
+            best_conf = c
+            best_word = word
+    if best_word is None:
         return None
-    return " ".join(words), sum(confs) / len(confs)
+    return best_word, best_conf
 
 
 def disambiguate_word(
@@ -195,29 +224,52 @@ def disambiguate_word(
     rus_result = _run_single_lang_ocr(crop, "rus", config)
     eng_result = _run_single_lang_ocr(crop, "eng", config)
 
-    candidates: list[tuple[str, float, str]] = []  # (word, conf, lang)
-    if rus_result is not None:
-        candidates.append((rus_result[0], rus_result[1], "rus"))
-    if eng_result is not None:
-        candidates.append((eng_result[0], eng_result[1], "eng"))
-
-    if not candidates:
+    # No single-language pass recovered anything — nothing to do.
+    if rus_result is None and eng_result is None:
         return original_word, original_confidence
 
-    best_word, best_conf, best_lang = max(candidates, key=lambda c: c[1])
+    # Compare the two SINGLE-LANGUAGE readings against each other, not
+    # against the primary pass's confidence. Primary runs with
+    # ``-l rus+eng`` and gets to pick the easier interpretation, which
+    # inflates its self-reported confidence — we've measured 64 % on
+    # a flat-out wrong ``ТЕМЗАК`` reading of ``TENSAR`` while
+    # ``-l eng`` alone scores the correct ``TENSAR`` at 61 % and
+    # ``-l rus`` on the same crop scores its own ``ТЕМЗАВ`` at 17 %.
+    # Comparing to primary there rejects the swap; comparing
+    # single-lang vs single-lang picks eng by a clear 44-point margin.
+    #
+    # The tie-breaker when one direction is absent falls back to the
+    # original comparison (single lang vs primary) to keep behaviour
+    # for previously-"mixed" tokens unchanged.
+    if rus_result is not None and eng_result is not None:
+        rus_word, rus_conf = rus_result
+        eng_word, eng_conf = eng_result
+        if eng_conf >= rus_conf + _MIN_CONFIDENCE_LIFT and eng_word != original_word:
+            logger.debug(
+                "per-word disambiguation: %r (%.1f) → %r "
+                "(eng %.1f vs rus %.1f)",
+                original_word, original_confidence,
+                eng_word, eng_conf, rus_conf,
+            )
+            return eng_word, eng_conf
+        if rus_conf >= eng_conf + _MIN_CONFIDENCE_LIFT and rus_word != original_word:
+            logger.debug(
+                "per-word disambiguation: %r (%.1f) → %r "
+                "(rus %.1f vs eng %.1f)",
+                original_word, original_confidence,
+                rus_word, rus_conf, eng_conf,
+            )
+            return rus_word, rus_conf
+        # Neither side beats the other by enough margin — keep primary.
+        return original_word, original_confidence
 
-    # Require a clear lift over the original. The alternative we
-    # picked has to be meaningfully more confident than what the
-    # line-level pass emitted; otherwise we might swap in a re-OCR
-    # artefact (whitespace quirks, joined punctuation).
+    # Only one language produced a candidate — fall back to the
+    # original primary-vs-candidate comparison.
+    candidate = rus_result if rus_result is not None else eng_result
+    assert candidate is not None  # noqa: S101 — narrowed by the above
+    best_word, best_conf = candidate
     if best_conf < original_confidence + _MIN_CONFIDENCE_LIFT:
         return original_word, original_confidence
-
-    logger.debug(
-        "per-word disambiguation: %r (%.1f) → %r (%.1f) via -l %s",
-        original_word, original_confidence,
-        best_word, best_conf, best_lang,
-    )
     return best_word, best_conf
 
 
