@@ -63,6 +63,9 @@ resources/icons/app.ico
 tests/test_data/*_ocr.pdf
 tests/test_data/output/
 
+# Local OCR input samples — per-developer test docs, not shipped
+inputs/
+
 # Generated test fixtures — produced by tests/fixtures/generate_fixtures.py
 # and tests/fixtures/accuracy_corpus/generate.py on first test run, not
 # committed (300+ MB of synthetic PDFs total). The generators are
