@@ -187,6 +187,41 @@ def build_pyinstaller(onefile: bool = False) -> int:
         "--collect-data=pikepdf",
         "--hidden-import=PIL._tkinter_finder",
         "--hidden-import=skimage.filters",
+        # ТН / УПД parser dependencies.
+        #
+        # * ``rapidfuzz`` is a Cython C-extension (Levenshtein / token-
+        #   sort matchers). PyInstaller's static analyser collects the
+        #   top-level ``rapidfuzz`` module but sometimes misses the
+        #   compiled ``.pyd`` siblings (``rapidfuzz.distance``,
+        #   ``rapidfuzz.process_cpp``) that `sections.py` loads through
+        #   re-export. Missing .pyd → ``ImportError: DLL load failed``
+        #   the first time a user opens the ``tn_upd`` profile. The
+        #   ``--collect-all`` directive fetches submodules + data +
+        #   binaries in one go — the safest mode for C-ext libraries.
+        # * ``src.tn_parser`` submodules (``fields``, ``validators``,
+        #   ``sections``, …) are all relative-imported inside the
+        #   package, which PyInstaller usually follows. Declaring the
+        #   whole subtree explicitly costs nothing and protects
+        #   against the "lazy import inside a function missed by the
+        #   static analyser" failure mode.
+        # * ``scripts`` ships the four ``ocr-cli parser <cmd>``
+        #   backing modules. ``cli.py`` imports them via
+        #   ``importlib.import_module`` — PyInstaller cannot see that
+        #   call at build time, so without ``--collect-all=scripts``
+        #   every parser subcommand in the installed build would
+        #   raise ``ModuleNotFoundError: scripts.run_golden`` (or
+        #   similar) even though the CLI entry itself works. Using
+        #   ``collect-all`` instead of ``collect-submodules`` picks up
+        #   the (empty) ``__init__.py`` alongside the leaf modules.
+        # * ``openpyxl`` is pure-Python and usually auto-detected
+        #   through ``src.tn_parser.excel``. The explicit hidden-
+        #   import is a belt-and-braces for stripped builds where
+        #   an ``__all__`` reshuffle in a future openpyxl release
+        #   could hide the import from PyInstaller's scanner.
+        "--collect-all=rapidfuzz",
+        "--collect-all=scripts",
+        "--collect-submodules=src.tn_parser",
+        "--hidden-import=openpyxl",
     ]
 
     # Attach Windows .ico if it was generated/placed before the build.
