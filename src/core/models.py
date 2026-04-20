@@ -394,6 +394,18 @@ class PostprocessConfig:
     #: without a custom encoder. Accepted values: ``"disabled"``,
     #: ``"lenient"`` (default), ``"strict"``.
     garbage_filter_strictness: str = "lenient"
+    #: When True, replace Tesseract blocks whose mean per-word
+    #: confidence is below 40 % (and contain ≥ 3 words) with the
+    #: marker ``⟨рукописный текст⟩`` in the user-facing text.
+    #: Tesseract's Russian LSTM was trained on printed text and
+    #: returns long runs of low-confidence noise on handwritten
+    #: regions — the word-conf filter correctly drops that noise
+    #: but leaves a silent gap the user can't distinguish from
+    #: "nothing was there". The marker makes the gap explicit so
+    #: the user knows WHERE to type the handwritten content
+    #: manually. Off by default for backwards-compatibility;
+    #: ``universal_accurate`` opts in.
+    mark_suspect_handwritten_blocks: bool = False
     #: When True, scan the OCR output for digit-only tokens that look
     #: like Russian business identifiers (ИНН 10/12-digit, ОГРН 13/15-
     #: digit) and replace a 1-edit-distance typo with the canonical
@@ -415,7 +427,7 @@ class PostprocessConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 4
+PROFILE_SCHEMA_VERSION: int = 5
 
 
 @dataclass
@@ -521,6 +533,17 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         ocr.setdefault("per_word_script_disambiguation", False)
         data["schema_version"] = 4
         version = 4
+
+    # v4 → v5: add ``mark_suspect_handwritten_blocks`` to post-
+    # processing. Old profiles get ``False`` (opt-out by default —
+    # preserves byte-identical output for pre-v5 profiles); the
+    # builtin builders turn it on for the opinionated presets
+    # (``universal_accurate``, ``quick_reliable``).
+    if version < 5:
+        post = data.setdefault("postprocess", {})
+        post.setdefault("mark_suspect_handwritten_blocks", False)
+        data["schema_version"] = 5
+        version = 5
 
     return data
 

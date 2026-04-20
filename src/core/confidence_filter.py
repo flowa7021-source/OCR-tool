@@ -75,10 +75,94 @@ def _should_keep_despite_low_conf(word: str, conf: float) -> bool:
     return bool(_CAPS_COMPANY_RE.match(word))
 
 
+#: Marker inserted in place of a handwritten-looking block's text.
+#: The angle brackets are ``U+27E8`` / ``U+27E9`` (mathematical angle
+#: brackets) rather than ASCII ``<>`` or French ``‹›`` — they're
+#: uncommon in Russian prose so they won't be produced by a
+#: legitimate Tesseract run, which lets downstream consumers
+#: unambiguously recognise the marker.
+HANDWRITTEN_MARKER: str = "⟨рукописный текст⟩"
+
+
+def detect_handwritten_blocks(
+    data: Mapping[str, Sequence[Any]],
+    *,
+    max_mean_confidence: float = 40.0,
+    min_words: int = 3,
+) -> set[tuple[int, int]]:
+    """Return ``(block_num, par_num)`` keys for groups whose text looks
+    like handwriting.
+
+    Tesseract's Russian LSTM was trained on printed text; handwritten
+    regions produce long runs of 10–40 %-confidence noise that the
+    word-level filter correctly drops, leaving the user staring at a
+    silent gap in the results panel with no indication that there
+    was content they need to transcribe manually. The heuristic here
+    picks up that signal at the BLOCK level (Tesseract's layout
+    analyser clusters contiguous handwritten ink into one block) and
+    returns the set of block keys so the caller can surface a marker
+    (``⟨рукописный текст⟩``) on the user-facing text.
+
+    Args:
+        data: ``image_to_data`` DICT shape.
+        max_mean_confidence: A block qualifies when its mean per-word
+            confidence is below this value. 40 % is empirically where
+            printed-text blocks stop (well above that) and handwritten
+            blocks cluster (well below). Tighter thresholds lose
+            faded printed text to false positives; looser ones miss
+            cleanly-written handwriting.
+        min_words: A block needs at least this many valid words to
+            be considered. Short 1–2 word fragments are usually
+            stamp-overlay noise or the page-header date — leave
+            those to the drop_low_conf_words filter rather than
+            swallowing them with the marker.
+
+    Returns:
+        Set of ``(block_num, par_num)`` tuples to treat as
+        handwritten. Empty when no block qualifies.
+    """
+    texts = list(data.get("text", []))
+    confs = list(data.get("conf", []))
+    blocks = list(data.get("block_num", []))
+    pars = list(data.get("par_num", []))
+
+    # Accumulate per-(block, par) word counts and confidence sums.
+    per_block_total: dict[tuple[int, int], int] = {}
+    per_block_sum: dict[tuple[int, int], float] = {}
+    for i, word in enumerate(texts):
+        if not isinstance(word, str) or not word.strip():
+            continue
+        try:
+            conf = float(confs[i]) if i < len(confs) else -1.0
+        except (TypeError, ValueError):
+            continue
+        if conf < 0:
+            continue
+        try:
+            b = int(blocks[i]) if i < len(blocks) else 0
+            p = int(pars[i]) if i < len(pars) else 0
+        except (TypeError, ValueError):
+            continue
+        key = (b, p)
+        per_block_total[key] = per_block_total.get(key, 0) + 1
+        per_block_sum[key] = per_block_sum.get(key, 0.0) + conf
+
+    suspects: set[tuple[int, int]] = set()
+    for key, count in per_block_total.items():
+        if count < min_words:
+            continue
+        mean = per_block_sum[key] / count
+        if mean < max_mean_confidence:
+            suspects.add(key)
+    return suspects
+
+
 def reconstruct_text_from_tsv(
     data: Mapping[str, Sequence[Any]],
     *,
     min_confidence: float,
+    handwritten_blocks: set[tuple[int, int]] | None = None,
+    handwritten_marker: str = HANDWRITTEN_MARKER,
 ) -> str:
     """Rebuild text from a pytesseract ``image_to_data`` dict.
 
@@ -94,15 +178,26 @@ def reconstruct_text_from_tsv(
             unconditionally. Pass the same number the caller uses for
             ``PageResult.low_confidence_words`` bookkeeping so the two
             views agree.
+        handwritten_blocks: Optional set of ``(block_num, par_num)``
+            keys to replace with a marker. Use
+            :func:`detect_handwritten_blocks` to compute this set.
+            Each flagged block contributes ONE marker line to the
+            output (not one per line inside the block) so the user
+            gets a single unambiguous placeholder per handwritten
+            region.
+        handwritten_marker: Text to insert for each flagged block.
+            Default :data:`HANDWRITTEN_MARKER`.
 
     Returns:
         Text with one output line per TSV ``(block, par, line)`` group,
         words joined by single spaces in ascending ``word_num`` order.
-        Empty when no word passes the threshold — callers should treat
-        that as "no replacement, keep whatever you already had" to
-        avoid blanking out a result just because confidence scoring
-        was unreliable.
+        Flagged handwritten blocks appear as a single marker line
+        instead of their per-line words. Empty when no word passes
+        the threshold — callers should treat that as "no replacement,
+        keep whatever you already had" to avoid blanking out a result
+        just because confidence scoring was unreliable.
     """
+    hw_blocks = handwritten_blocks if handwritten_blocks else set()
     texts = list(data.get("text", []))
     confs = list(data.get("conf", []))
     blocks = list(data.get("block_num", []))
@@ -154,7 +249,7 @@ def reconstruct_text_from_tsv(
         word_num = _safe_int(word_nums, i)
         grouped.setdefault(key, []).append((word_num, word))
 
-    if not grouped:
+    if not grouped and not hw_blocks:
         logger.debug(
             "reconstruct_text_from_tsv: no words passed conf>=%.1f — "
             "returning empty string, caller should keep existing text",
@@ -163,13 +258,38 @@ def reconstruct_text_from_tsv(
         return ""
 
     out_lines: list[str] = []
+    emitted_hw_blocks: set[tuple[int, int]] = set()
     # Sort by (block, par, line) so output reflects reading order. Words
     # inside a line keep their word_num order — Tesseract emits them
     # left-to-right, which matches word_num ascending.
-    for key in sorted(grouped.keys()):
+    #
+    # Flagged handwritten blocks contribute ONE marker line each
+    # (the FIRST time we see that (block, par) key); subsequent lines
+    # in the same block are skipped so the output doesn't repeat the
+    # marker per paragraph line.
+    all_keys = set(grouped.keys())
+    # Include handwritten blocks even if they had zero words passing
+    # the threshold — their marker still has to surface so the user
+    # sees there WAS content in that region.
+    for b, p in hw_blocks:
+        all_keys.add((b, p, 0))
+    for key in sorted(all_keys):
+        block_par = (key[0], key[1])
+        if block_par in hw_blocks:
+            if block_par in emitted_hw_blocks:
+                continue
+            out_lines.append(handwritten_marker)
+            emitted_hw_blocks.add(block_par)
+            continue
+        if key not in grouped:
+            continue
         words = sorted(grouped[key], key=lambda w: w[0])
         out_lines.append(" ".join(w for _, w in words))
     return "\n".join(out_lines)
 
 
-__all__ = ["reconstruct_text_from_tsv"]
+__all__ = [
+    "HANDWRITTEN_MARKER",
+    "detect_handwritten_blocks",
+    "reconstruct_text_from_tsv",
+]

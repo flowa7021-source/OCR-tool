@@ -1629,11 +1629,42 @@ class OCRPipeline:
                 # than what the user is actually looking at.
                 if job.profile.ocr.drop_low_conf_words:
                     from src.core.confidence_filter import (
+                        detect_handwritten_blocks,
                         reconstruct_text_from_tsv,
                     )
 
+                    # Handwritten-block detection is layered on top of
+                    # the word-conf filter: entire blocks whose mean
+                    # per-word confidence is below 40 % (and contain
+                    # ≥ 3 words) are replaced with the
+                    # ``⟨рукописный текст⟩`` marker. Tesseract's
+                    # Russian LSTM wasn't trained on handwriting, so
+                    # those blocks would otherwise show up as silent
+                    # gaps (individual low-conf words dropped by the
+                    # per-word filter) and the user wouldn't know
+                    # there was content to transcribe manually.
+                    hw_blocks: set[tuple[int, int]] = set()
+                    if getattr(
+                        job.profile.postprocess,
+                        "mark_suspect_handwritten_blocks",
+                        False,
+                    ):
+                        hw_blocks = detect_handwritten_blocks(
+                            data,
+                            max_mean_confidence=40.0,
+                            min_words=3,
+                        )
+                        if hw_blocks:
+                            logger.info(
+                                "Page %d: %d handwritten-looking "
+                                "block(s) detected, inserting marker",
+                                pr.page_number, len(hw_blocks),
+                            )
+
                     filtered = reconstruct_text_from_tsv(
-                        data, min_confidence=effective_threshold,
+                        data,
+                        min_confidence=effective_threshold,
+                        handwritten_blocks=hw_blocks,
                     )
                     if filtered.strip():
                         pr.text = self._postprocess_text(

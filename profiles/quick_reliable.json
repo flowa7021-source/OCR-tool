@@ -86,9 +86,10 @@
     "remove_artifacts": true,
     "fix_cyrillic_latin_confusion": true,
     "validate_identifiers": true,
+    "mark_suspect_handwritten_blocks": true,
     "custom_rules": []
   },
   "builtin": true,
   "created_at": "2026-04-16T20:30:00.000000",
-  "schema_version": 4
+  "schema_version": 5
 }

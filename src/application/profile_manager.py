@@ -354,6 +354,15 @@ class ProfileManager:
             # scanned forms; needs per-document benchmarking before
             # flipping.
             garbage_filter_strictness="lenient",
+            # Surface ``⟨рукописный текст⟩`` markers for blocks
+            # Tesseract can't read reliably (handwritten regions
+            # the Russian LSTM wasn't trained on). The word-conf
+            # filter would otherwise drop them silently, hiding
+            # from the user that there was content to type
+            # manually. 40 % mean-conf + 3-word minimum gates
+            # keep the marker off legitimate faded-but-printed
+            # blocks.
+            mark_suspect_handwritten_blocks=True,
             custom_rules=[],
         )
         return ProfileData(
@@ -503,7 +512,12 @@ class ProfileManager:
             # canonical form when a unique 1-edit match exists in
             # the catalog loaded from ``expected/*.json``. Silent
             # no-op when the catalog is empty or absent.
-            postprocess=PostprocessConfig(validate_identifiers=True),
+            postprocess=PostprocessConfig(
+                validate_identifiers=True,
+                # Flag handwritten regions with ``⟨рукописный текст⟩``
+                # so users see where to transcribe manually.
+                mark_suspect_handwritten_blocks=True,
+            ),
         )
 
     def _build_low_quality(self) -> ProfileData:
