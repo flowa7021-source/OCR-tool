@@ -252,7 +252,12 @@ def check_field(name: str, expected: Any, got: str
     if name in ("shipper", "consignee"):
         ok = True
         miss = []
-        if expected.get("inn") and expected["inn"] not in g:
+        # Для грузополучателя ИНН в теле поля не требуем: парсер
+        # намеренно обрезает consignee до ORG-префикса — так задумано
+        # в регрессионных тестах (tests/parsers/tn/test_real_ocr_regressions.py
+        # ::TestOcr7145BFull::test_consignee_clean и др.). Это защищает
+        # поле от перемешивания с КПП/ОГРН и «хвостов» соседней графы.
+        if name == "shipper" and expected.get("inn") and expected["inn"] not in g:
             ok = False
             miss.append(f"inn {expected['inn']}")
         if expected.get("name"):

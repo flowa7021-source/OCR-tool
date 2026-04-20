@@ -30,8 +30,14 @@ except ImportError:  # pragma: no cover
 # Для shipper/consignee — несколько синонимов: в ТН «Грузоотправитель» /
 # «Грузополучатель», в счёте-фактуре / УПД — «Продавец» / «Покупатель»,
 # иногда «Поставщик».
+# «Погрузка» даёт секцию reception в пост-OCR структурированном формате —
+# там «Владелец инфраструктуры: ООО X, ИНН N» совпадает с infrastructure_owner
+# из экспертной разметки. «Лицо, принимающее груз» — отдельный блок,
+# игнорируется (в inputs это обычно не сторона с ИНН, а ФИО кладовщиков).
 _ROLE_TITLES: list[tuple[str, tuple[str, ...]]] = [
-    ("reception", ("прием груза", "приём груза", "погрузка груза")),
+    ("reception", (
+        "прием груза", "приём груза", "погрузка груза", "погрузка",
+    )),
     ("consignee", ("грузополучатель", "покупатель")),
     ("shipper", ("грузоотправитель", "продавец", "поставщик")),
     ("vehicle", ("транспортное средство",)),
@@ -40,6 +46,11 @@ _ROLE_TITLES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 # Заголовки, которые мы узнаём как стоп-маркеры, но контент не забираем.
+# В пост-OCR структурированном формате добавлены «— СТОРОНЫ —»,
+# «— ОСНОВАНИЕ —», «— РАЗГРУЗКА —», «— ПОДПИСИ И ПЕЧАТИ —»,
+# «— ПРИМЕЧАНИЯ О СКАНЕ —», «заказчик перевозки», «разгрузка»,
+# «подписи и печати», «примечания о скане» — их контент не надо
+# выгружать в поля, но они служат границами между секциями.
 _IGNORED_TITLES: tuple[str, ...] = (
     "сопроводительные документы",
     "указания грузоотправителя",
@@ -54,6 +65,16 @@ _IGNORED_TITLES: tuple[str, ...] = (
     "отметки",
     "выдача груза",
     "сдача груза",
+    "стороны",
+    "основание",
+    "разгрузка",
+    "подписи и печати",
+    "примечания о скане",
+    "заказчик перевозки",
+    "доверенность",
+    "объект строительства",
+    "лицо, принимающее груз",
+    "лицо принимающее груз",
 )
 
 
@@ -81,6 +102,24 @@ _BARE = re.compile(
     r"(?mi)^\s*("
     + "|".join(re.escape(name) for name in _KNOWN_TITLES)
     + r")\b[^\n]{0,80}$"
+)
+
+# Заголовок в квадратных скобках: «[Грузоотправитель]», «[Перевозчик]»,
+# «[Лицо, принимающее груз]». Используется в пост-OCR структурированном
+# формате (inputs/TN_k_UPD_*.txt).
+_BRACKETED = re.compile(
+    r"(?mi)^\s*\[\s*("
+    + "|".join(re.escape(name) for name in _KNOWN_TITLES)
+    + r")[^\]\n]{0,80}\]\s*$"
+)
+
+# Заголовок в em-dash обрамлении: «— ГРУЗ —», «— ТРАНСПОРТНОЕ СРЕДСТВО —»,
+# «— ПОГРУЗКА —», «— СТОРОНЫ —». Дефисы могут быть разных юникодных форм
+# (\u2014 «—», \u2013 «–», ASCII «-»). Используется в пост-OCR формате.
+_EMDASH_WRAPPED = re.compile(
+    r"(?mi)^\s*[\u2014\u2013\u2015\-]{1,2}\s*("
+    + "|".join(re.escape(name) for name in _KNOWN_TITLES)
+    + r")\b[^\n]{0,80}?[\u2014\u2013\u2015\-]{1,2}\s*$"
 )
 
 
@@ -216,6 +255,18 @@ def _find_markers(text: str) -> list[tuple[int, str]]:
         if role is not None:
             candidates.append((m.start(), role))
 
+    # 4) Заголовки в квадратных скобках «[Грузоотправитель]».
+    for m in _BRACKETED.finditer(text):
+        role = _classify_title(m.group(1))
+        if role is not None:
+            candidates.append((m.start(), role))
+
+    # 5) Заголовки в em-dash обрамлении «— ГРУЗ —».
+    for m in _EMDASH_WRAPPED.finditer(text):
+        role = _classify_title(m.group(1))
+        if role is not None:
+            candidates.append((m.start(), role))
+
     # Первое вхождение каждой роли.
     seen_roles: set[str] = set()
     markers: list[tuple[int, str]] = []
@@ -257,9 +308,15 @@ def split_sections(text: str) -> dict[str, str]:
         header_line = chunk if nl < 0 else chunk[:nl]
         rest = "" if nl < 0 else chunk[nl + 1 :].strip()
 
-        # Inline-значение в заголовке: "1. Грузоотправитель: ООО Ромашка".
+        # Заголовки в em-dash / квадратных скобках — «[Грузоотправитель]»,
+        # «— ГРУЗ —» — не имеют inline-значения. Снимаем обрамление
+        # (скобки и em-dash'и по краям), чтобы inline-split не засосал
+        # хвостовой «—» или «]» как значение поля.
+        stripped_header = header_line.strip(
+            " \t\u2014\u2013\u2015\u2010\u2011\u2012-[]"
+        )
         inline = ""
-        inline_split = re.split(r"[:\-–—]", header_line, maxsplit=1)
+        inline_split = re.split(r"[:\-–—]", stripped_header, maxsplit=1)
         if len(inline_split) == 2 and inline_split[1].strip():
             inline = inline_split[1].strip()
 

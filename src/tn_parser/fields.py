@@ -70,8 +70,26 @@ _NUMBER_LAX = re.compile(
     re.IGNORECASE,
 )
 
+# Шаблон высокой точности: «№ <значение> от YYYY-MM-DD» или
+# «№ <значение> от DD.MM.YYYY». Встречается в пост-OCR формате
+# (inputs/TN_k_UPD_*.txt) сразу под заголовком ТН. Срабатывает раньше
+# остальных (_NUMBER_STICKY и Co.), потому что структура «№ … от <дата>»
+# однозначно идентифицирует пару (номер ТН, дата ТН) — в отличие от
+# одиночных «№ N» внутри прозы или в «ДОКУМЕНТ №1».
+_NUMBER_WITH_DATE = re.compile(
+    r"(?:№|\bNo\.?)\s*"
+    r"([A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9\-_/.]{1,48})"
+    r"\s+от\s+(\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4})",
+    re.IGNORECASE,
+)
+
+# Якорь для поиска номера и даты ТН — «Транспортная накладная» в
+# именительном падеже. Косвенные падежи («транспортной накладной»,
+# «транспортную накладную») типичны для резюмирующей прозы
+# («Скан содержит один экземпляр транспортной накладной …») и
+# для ссылок на форму; в них номер ТН не следует.
 _WAYBILL_HEADER = re.compile(
-    r"транспортн(?:ая|ой)\s+накладн(?:ая|ой)", re.IGNORECASE
+    r"транспортная\s+накладная", re.IGNORECASE
 )
 
 # Строки-служебки, которые надо пропустить в начале раздела контрагента.
@@ -172,7 +190,7 @@ _ORG_PREFIX_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
-_INN_INCLUSIVE_RE = re.compile(r"\bИНН\s*\d{10,12}", re.IGNORECASE)
+_INN_INCLUSIVE_RE = re.compile(r"\bИНН[:\s]*\d{10,12}", re.IGNORECASE)
 _FINANCIAL_MARKER_RE = re.compile(
     r"\b(?:ИНН|КПП|ОГРН|ОКПО|ОКВЭД|БИК)\b", re.IGNORECASE
 )
@@ -204,6 +222,24 @@ _QTY_SHT_INLINE_RE = re.compile(
 )
 _NETTO_BRUTTO_RE = re.compile(
     r"нетто[^\n]*брутто[^\n]*(?:объ[её]м|м[³3])[^\n]*", re.IGNORECASE
+)
+
+# Компоненты тройки (мест, нетто, объём), встречающиеся в пост-OCR
+# структурированном формате отдельными строками:
+#   Количество мест: 129
+#   Масса нетто: 7.3095 т
+#   Объем: 57.948 м³
+# Допускаем «Кол-во мест», «Количество мест», «Мест:», OCR-варианты
+# единиц («т.», «Т», «тонн», «м3», «м³», «куб»), десятичный
+# разделитель — запятая или точка.
+_PLACES_LINE_RE = re.compile(
+    r"(?im)^\s*(?:кол[-\s]?во|количество)?\s*мест(?:а)?\s*[:\-–—]\s*(\d+)\b"
+)
+_NETTO_LINE_RE = re.compile(
+    r"(?im)(?:масса\s+)?нетто\s*[:\-–—]\s*(\d+(?:[,.]\d+)?)\s*(?:т|тн|тонн)\b"
+)
+_VOLUME_LINE_RE = re.compile(
+    r"(?im)об[ъь][её]м\s*[:\-–—]\s*(\d+(?:[,.]\d+)?)\s*(?:м[³3]|куб)"
 )
 _CARGO_ATTR_SPLIT_RE = re.compile(
     r"(?i)\b(?:класс\s+опасност|упаковк|тара\b"
@@ -389,10 +425,14 @@ def extract_number_and_date(
                     continue
                 # Полное начало строки — для длинных заголовков
                 # («Приложение No 4», «Постановление Правительства», «Договор No …»).
+                # «ДОКУМЕНТ №N — …» — нумерация документа внутри пост-OCR
+                # пакета (inputs/UPD_* / TN_k_UPD_*). N — это порядковый
+                # индекс, а не номер ТН.
                 line_ctx = region[line_start: m.start()].lower()
                 if ("приложение" in line_ctx or "прил." in line_ctx
                         or "постановлен" in line_ctx or "договор" in line_ctx
-                        or "к правилам" in line_ctx):
+                        or "к правилам" in line_ctx
+                        or "документ" in line_ctx):
                     continue
                 # Широкое окно (300 симв. включая предыдущие строки) —
                 # OCR часто переносит «(в ред. Постановления … № 2116)»
@@ -435,7 +475,29 @@ def extract_number_and_date(
         anchor = _WAYBILL_HEADER.search(source)
         if anchor:
             tail = source[anchor.end(): anchor.end() + 500]
-            number, conf_num = _pick_number(tail, 0.9 if head else 0.6)
+            # Высокоприоритетный паттерн «№ X от YYYY-MM-DD» — если
+            # сработал, даёт сразу и номер, и дату ТН. Это устойчивее
+            # к ложным «№» в шапке («ДОКУМЕНТ №1», «Приложение № 4»)
+            # и в самой строке «(в ред. … № 2116)».
+            m_nd = _NUMBER_WITH_DATE.search(tail)
+            if m_nd:
+                cand = m_nd.group(1).strip(" .,:;")
+                if cand and re.search(r"\d", cand) and cand not in (
+                    "1137", "2116", "2200", "2311", "272", "534", "1117",
+                ) and not is_garbage(cand):
+                    number = cand
+                    conf_num = 0.95 if head else 0.7
+                    date_raw = m_nd.group(2)
+                    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_raw):
+                        y, mo, d = date_raw.split("-")
+                        cand_date = f"{d}.{mo}.{y}"
+                    else:
+                        cand_date = date_raw
+                    if is_valid_date(cand_date) and cand_date not in _FORM_METADATA_DATES:
+                        date = cand_date
+                        conf_date = 1.0 if head else 0.7
+            if number == MISSING:
+                number, conf_num = _pick_number(tail, 0.9 if head else 0.6)
             for date_m in _DATE_ANY.finditer(tail):
                 cand = date_m.group(1)
                 if not is_valid_date(cand):
@@ -561,7 +623,8 @@ def extract_shipper(section_body: str, full_text: str) -> tuple[str, float]:
 def extract_consignee(section_body: str, full_text: str) -> tuple[str, float]:
     """Грузополучатель: ORG-префикс → перед первым ИНН/КПП/ОГРН/ОКПО.
 
-    Получатель всегда без ИНН и КПП.
+    Получатель всегда без ИНН и КПП (тот, кто принимает груз, не
+    обязан раскрывать налоговые реквизиты в теле поля).
     """
     if section_body:
         joined = _collect_org_lines(section_body, max_lines=4)
@@ -703,25 +766,63 @@ _KOL_VO_MEST_VALUE_RE = re.compile(
 )
 
 
-def extract_volume(cargo_section: str, full_text: str) -> tuple[str, float]:
-    """Объём / количество мест.
+def _extract_triplet(source: str) -> list[str]:
+    """Извлекает тройку (мест, нетто, объём) из отдельных строк секции.
 
-    Формат вывода: склейка того, что нашлось, через «, »:
-        «N мест» (количество упаковочных мест),
-        «M шт» (штуки товара внутри наименования),
-        «Нетто — X т., Брутто — Y т., Объём — Z м³».
-    Если ничего — MISSING.
+    Порядок в выводе фиксированный: «N мест, X т, Y м³» — чтобы golden-
+    проверка умела вычленять отдельные числа. Если какой-то из
+    компонентов отсутствует — пропускаем его, не ставим плейсхолдер.
+    """
+    parts: list[str] = []
+    m = _PLACES_LINE_RE.search(source)
+    if m:
+        parts.append(f"{m.group(1)} мест")
+    m = _NETTO_LINE_RE.search(source)
+    if m:
+        parts.append(f"{m.group(1)} т")
+    m = _VOLUME_LINE_RE.search(source)
+    if m:
+        parts.append(f"{m.group(1)} м³")
+    return parts
+
+
+def extract_volume(cargo_section: str, full_text: str) -> tuple[str, float]:
+    """Объём / количество.
+
+    Правило (согласовано с пользователем):
+        1. Если наименование груза уже содержит «N шт» — это и есть
+           «должный вид» ответа. Выводим «N шт» без лишнего шума.
+        2. Иначе собираем тройку (мест, нетто, объём) из отдельных
+           строк секции «— ГРУЗ —» / кол-во-мест блока.
+        3. Если и тройка пуста, пробуем legacy-формы (однострочный
+           «Нетто … Брутто … Объём …», «Кол-во мест — N»).
+        4. Иначе MISSING.
     """
     for source, conf in ((cargo_section, 0.9), (full_text, 0.5)):
         if not source:
             continue
+
+        # (1) «N шт» внутри наименования груза — приоритетно, как
+        # просил пользователь. Матч ищем только в секции «Груз», чтобы
+        # не подцепить «384 шт» из верхней сводной прозы
+        # («комбинации из 8 мест / 384 шт / 15 мест / 720 шт»).
+        sht = _QTY_SHT_INLINE_RE.search(source)
+        if sht and source is cargo_section:
+            return sht.group(1).strip(), conf
+
+        # (2) Тройка по отдельным строкам — структурированный формат
+        # «Количество мест: 129\n Масса нетто: 7.3095 т\n Объем: 57.948 м³».
+        triplet = _extract_triplet(source)
+        if triplet:
+            return ", ".join(triplet), conf
+
+        # (3) Legacy: однострочный «Нетто … Брутто … Объём …».
         parts: list[str] = []
         m = _KOL_VO_MEST_VALUE_RE.search(source)
         if m:
             parts.append(f"{m.group(1)} мест")
-        m = _QTY_SHT_INLINE_RE.search(source)
-        if m:
-            parts.append(m.group(1).strip())
+        if sht:
+            parts.append(sht.group(1).strip())
         m = _NETTO_BRUTTO_RE.search(source)
         if m:
             parts.append(m.group(0).strip(" ,;"))
