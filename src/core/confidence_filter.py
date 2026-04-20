@@ -18,6 +18,20 @@ existing profiles and tests see no behavioural change. The
 ``universal_accurate`` profile — explicitly the "maximum perceived
 accuracy" preset — turns it on by default.
 
+Soft-rescue (opt-in via ``soft_rescue=True``):
+    Tesseract systematically underweights confidence on short numeric
+    runs (amounts, ИНН/КПП, dates) and clean all-caps acronyms — a
+    legitimate ``7813266190`` or ``ООО`` often reads at 55–59 % on a
+    noisy form even though it's unambiguous. A strict drop at
+    threshold=60 then eats real content along with the stamp garbage.
+    Soft-rescue keeps words in band ``[max(threshold-15, 45),
+    threshold)`` when the token passes a lexical-validity check:
+    length ≥ 3, single-script (all Cyrillic letters OR all Latin
+    letters OR all-digit with optional separators). Mixed-script
+    short tokens like ``нe`` / ``Taw`` still drop because the OCR
+    typically IS wrong there — the only words we rescue are the ones
+    where the shape of the token makes the OCR read credible.
+
 Scope:
     * Affects ``PageResult.text`` (the string callers see via the
       results panel, TXT export, DOCX export, downstream search).
@@ -34,6 +48,63 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Soft-rescue band: words with ``conf`` in ``[SOFT_FLOOR_ABS, threshold)``
+# AND above ``threshold - SOFT_MARGIN`` may be rescued if they're
+# lexically clean. The absolute floor protects against wild thresholds
+# (e.g., ``threshold=30`` would otherwise rescue 15-conf noise).
+SOFT_MARGIN: float = 15.0
+SOFT_FLOOR_ABS: float = 45.0
+
+# Unicode ranges for single-script validity. We stay narrow on purpose —
+# digits + Cyrillic letters + Latin letters covers ≥99% of Russian
+# business-doc content; adding Greek / extended Latin / Cyrillic
+# Supplement just widens the attack surface for noise.
+_CYRILLIC_RE_STR = r"[\u0400-\u04FFёЁ]"
+_LATIN_RE_STR = r"[A-Za-z]"
+# Digit tokens admit common separators: 1,200.50 / 7813-2661-90 /
+# 12.08.2024 / +7 / 1 200. Leading/trailing separators are handled by
+# ``.strip`` on the original word; the token we test here is what
+# remains after whitespace strip.
+_DIGIT_TOKEN_RE_STR = r"^[+\-]?[0-9][0-9.,\-/ ]*[0-9]$|^[0-9]$"
+
+
+def _is_lexically_valid_rescue(word: str) -> bool:
+    """Return True when ``word`` looks like a legitimate OCR read.
+
+    Used to decide whether a borderline-confidence token should be
+    rescued. Rescuing ``нe`` / ``Taw`` / ``Fam`` / ``ба`` is exactly
+    what we want to AVOID — these are where Tesseract guessed at
+    signature / stamp scribble and the low conf is correct. Rescuing
+    ``ООО`` / ``7813266190`` / ``ГЕКСАФОРМ`` / ``12.08.2024`` is what
+    we want to DO — these are real content that Tesseract underweights
+    on short-form tokens.
+
+    Validity = length ≥ 3 AND single-script (all Cyrillic letters, or
+    all Latin letters, or a digit/separator token). Single-char tokens
+    and mixed-script (``нe``, ``Скаnia``) are never rescued.
+    """
+    import re
+
+    if not word:
+        return False
+    w = word.strip()
+    if len(w) < 3:
+        return False
+
+    # Pure digit token (with optional separators): amounts, ИНН, KPP,
+    # dates, phone numbers. Almost always legitimate when Tesseract
+    # returns it at 45+ conf — the short-run underweighting problem.
+    if re.match(_DIGIT_TOKEN_RE_STR, w):
+        return True
+
+    # Letter-only tokens: must be all Cyrillic OR all Latin, no digits,
+    # no cross-script mixing. ``re.fullmatch`` so the whole token is
+    # same script — a single stray Latin ``a`` in ``Скаnia`` kills
+    # the rescue even though the rest is Cyrillic.
+    if re.fullmatch(rf"{_CYRILLIC_RE_STR}+", w):
+        return True
+    return bool(re.fullmatch(rf"{_LATIN_RE_STR}+", w))
 
 
 #: Absolute floor for the CAPS-Cyrillic-preservation heuristic. A
@@ -161,6 +232,7 @@ def reconstruct_text_from_tsv(
     data: Mapping[str, Sequence[Any]],
     *,
     min_confidence: float,
+    soft_rescue: bool = False,
     handwritten_blocks: set[tuple[int, int]] | None = None,
     handwritten_marker: str = HANDWRITTEN_MARKER,
 ) -> str:
@@ -178,6 +250,18 @@ def reconstruct_text_from_tsv(
             unconditionally. Pass the same number the caller uses for
             ``PageResult.low_confidence_words`` bookkeeping so the two
             views agree.
+        soft_rescue: When True, borderline-conf tokens (band
+            ``[max(min_confidence - 15, 45), min_confidence)``) that
+            pass the lexical-validity check in
+            :func:`_is_lexically_valid_rescue` are kept instead of
+            dropped. Targets the Tesseract under-confidence behaviour
+            on short digit runs (amounts, ИНН, dates) and clean
+            all-caps acronyms — rescues real content without opening
+            the door to signature / stamp scribble. Default ``False``
+            preserves legacy behaviour; ``universal_accurate`` opts in.
+            Composes with the always-on CAPS-company preservation in
+            :func:`_should_keep_despite_low_conf` — either check
+            passing keeps the word.
         handwritten_blocks: Optional set of ``(block_num, par_num)``
             keys to replace with a marker. Use
             :func:`detect_handwritten_blocks` to compute this set.
@@ -209,11 +293,21 @@ def reconstruct_text_from_tsv(
     if n == 0:
         return ""
 
+    # Pre-compute the rescue band once. When ``soft_rescue`` is off the
+    # band is unreachable (rescue_min set above the threshold) so the
+    # inner loop's cheap ``conf >= rescue_min`` check folds to False
+    # without ever invoking the regex validator.
+    if soft_rescue:
+        rescue_min = max(min_confidence - SOFT_MARGIN, SOFT_FLOOR_ABS)
+    else:
+        rescue_min = min_confidence + 1.0  # disabled: no word can match
+
     # Group accepted words by (block, par, line) so we can rebuild with
     # the same paragraph structure Tesseract observed. Using a dict keeps
     # insertion order by group key, then we sort explicitly by the tuple
     # so concurrent blocks / paragraphs serialise top-down reliably.
     grouped: dict[tuple[int, int, int], list[tuple[int, str]]] = {}
+    rescued_count = 0
 
     for i in range(n):
         word = texts[i]
@@ -228,10 +322,22 @@ def reconstruct_text_from_tsv(
             continue
         if conf < 0:
             continue
-        if conf < min_confidence and not _should_keep_despite_low_conf(
-            word, conf,
-        ):
-            continue
+        if conf < min_confidence:
+            # Below threshold — try rescue layers in order of cost.
+            # CAPS-company preservation is always on (cheap regex, no
+            # flag); soft-rescue is opt-in via the ``soft_rescue``
+            # kwarg. Either passing keeps the word; both failing drops
+            # it. We short-circuit on the cheaper check first.
+            if _should_keep_despite_low_conf(word, conf):
+                pass
+            elif conf < rescue_min:
+                # Below the soft-rescue floor — drop.
+                continue
+            elif not _is_lexically_valid_rescue(word):
+                # In band but token shape isn't credible — drop.
+                continue
+            else:
+                rescued_count += 1
 
         def _safe_int(seq: list[Any], idx: int) -> int:
             if idx >= len(seq):
@@ -256,6 +362,13 @@ def reconstruct_text_from_tsv(
             min_confidence,
         )
         return ""
+
+    if rescued_count:
+        logger.debug(
+            "reconstruct_text_from_tsv: soft-rescue kept %d borderline "
+            "tokens in band [%.1f, %.1f)",
+            rescued_count, rescue_min, min_confidence,
+        )
 
     out_lines: list[str] = []
     emitted_hw_blocks: set[tuple[int, int]] = set()

@@ -1825,6 +1825,7 @@ class OCRPipeline:
                     filtered = reconstruct_text_from_tsv(
                         data,
                         min_confidence=effective_threshold,
+                        soft_rescue=job.profile.ocr.soft_rescue_dropped_words,
                         handwritten_blocks=hw_blocks,
                     )
                     if filtered.strip():

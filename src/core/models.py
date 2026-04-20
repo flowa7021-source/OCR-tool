@@ -235,6 +235,27 @@ class OCRConfig:
     #: word Tesseract emitted — regenerating THAT requires rewriting
     #: the hOCR stream and is a larger, separate piece of work.
     drop_low_conf_words: bool = False
+    #: Soft-rescue layer on top of :attr:`drop_low_conf_words`. Tesseract
+    #: systematically underweights its confidence score on short-form
+    #: tokens — pure-digit runs (ИНН, КПП, amounts, phones, dates) and
+    #: clean all-caps Cyrillic acronyms routinely report at 50–59 %
+    #: on a noisy form even though the read is unambiguous. When
+    #: ``drop_low_conf_words`` is enabled at ``confidence_threshold=60``,
+    #: those tokens get cut along with the stamp / signature garbage
+    #: and the user loses real data to the filter.
+    #:
+    #: With ``soft_rescue_dropped_words=True``, words in the band
+    #: ``[max(threshold-15, 45), threshold)`` are kept when the token
+    #: shape passes a lexical-validity check (length ≥ 3, single-script:
+    #: all Cyrillic letters / all Latin letters / all-digit with
+    #: separators). Mixed-script short tokens (``нe``, ``Taw``) and
+    #: anything below the absolute 45-conf floor still drop — the
+    #: rescue targets the specific failure mode where the OCR read is
+    #: credible but Tesseract underweighted it, not every low-conf
+    #: guess. Off by default; ``universal_accurate`` opts in to pair
+    #: with its ``drop_low_conf_words=True``. No effect when
+    #: ``drop_low_conf_words=False``.
+    soft_rescue_dropped_words: bool = False
     #: When ``drop_low_conf_words`` is on, additionally redact the
     #: ENTIRE layout block (as identified by Tesseract's ``block_num``
     #: column) whenever the block is majority-noise. Catches stamp /
@@ -486,7 +507,7 @@ class PostprocessConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 9
+PROFILE_SCHEMA_VERSION: int = 10
 
 
 @dataclass
@@ -641,6 +662,19 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         ocr.setdefault("per_block_psm_retry", False)
         data["schema_version"] = 9
         version = 9
+
+    # v9 → v10: add ``soft_rescue_dropped_words`` flag. Default False
+    # on every existing profile so the filter behaviour is unchanged —
+    # ``universal_accurate`` and ``quick_reliable`` flip it to True
+    # via their builders, not via a migration rewrite, to keep the
+    # migration minimal and reversible.
+    if version < 10:
+        ocr = data.setdefault("ocr", {})
+        ocr.setdefault("soft_rescue_dropped_words", False)
+        data["schema_version"] = 10
+        version = 10
+
+    # Future migrations go here: `if version < 11: ...`
 
     return data
 

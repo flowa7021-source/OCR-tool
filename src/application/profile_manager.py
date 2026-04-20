@@ -320,6 +320,18 @@ class ProfileManager:
             # (60 %), and mean_conf is reported over the kept set.
             # See ``src.core.confidence_filter`` for the mechanism.
             drop_low_conf_words=True,
+            # Soft-rescue band [45, 60) for lexically-clean tokens:
+            # Tesseract underweights confidence on short digit runs
+            # (ИНН, суммы, даты) and all-caps Cyrillic acronyms. A
+            # straight 60%-cut discards real content along with the
+            # stamp noise; soft-rescue keeps only the shape-credible
+            # borderline tokens (single-script letters len≥3 OR
+            # digit/separator tokens). Mixed-script tokens like
+            # ``нe``, ``Taw`` and anything below 45% still drop, so
+            # the stamp / signature garbage stays out. Layers on top
+            # of the CAPS-company preservation already baked into
+            # ``confidence_filter._should_keep_despite_low_conf``.
+            soft_rescue_dropped_words=True,
             # Adaptive threshold: clean pages (mean ≥ 90%) lower the
             # bar to 40 to keep borderline-but-correct words; noisy
             # pages (mean < 70%) raise the bar to 70 to filter harder.
@@ -477,6 +489,20 @@ class ProfileManager:
           * **Post-processing: everything enabled** — Russian +
             English autocorrect, NFC, hyphen merge, artifact strip.
             These are pure-Python and cannot fail the job.
+          * **Word-level confidence filter + soft-rescue ON** — in
+            practice ``quick_reliable`` reports noticeably higher
+            mean_conf than ``universal_accurate`` (its scans are
+            already clean enough that the 300 DPI / OTSU path
+            produces mostly 80+ %-confidence words), so dropping the
+            30–40 % tail is almost pure upside: the stamp / logo /
+            signature noise goes away without losing body text.
+            Soft-rescue keeps the borderline band
+            ``[max(50-15, 45), 50)`` for lexically-clean tokens
+            (ИНН-runs, даты, суммы, all-caps acronyms) so the
+            conservative filter doesn't eat real content. Output
+            contract unchanged: empty filtered text falls back to
+            the original OCR, so a flaky-conf page still yields
+            whatever Tesseract returned.
 
         Marketed as "use this when anything else breaks" — documented
         explicitly in the profile description so UI users see it.
@@ -515,6 +541,16 @@ class ProfileManager:
             # on real transport-invoice scans (Apr 2026): lifts the
             # mean_confidence of surfaced text from ~57 to ~82.
             drop_low_conf_words=True,
+            # Soft-rescue on top of the word filter. Threshold stays
+            # at 50 (quick_reliable's conservative setting), so the
+            # rescue band collapses to [45, 50) per the absolute
+            # floor — the narrowest possible rescue, matching the
+            # "don't aggressively second-guess Tesseract" philosophy.
+            # Catches ИНН / даты / суммы that Tesseract underweights
+            # at 45-49 conf without reintroducing stamp noise (which
+            # sits below the 45 floor or fails the single-script
+            # lexical check). See ``src.core.confidence_filter``.
+            soft_rescue_dropped_words=True,
             # Block-level redaction on top of the per-word pass. When
             # Tesseract's layout analysis clusters a region of majority-
             # noise words (stamps, signatures, fine-print headers), we

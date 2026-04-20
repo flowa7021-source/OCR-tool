@@ -71,6 +71,9 @@ resources/icons/app.ico
 tests/test_data/*_ocr.pdf
 tests/test_data/output/
 
+# Local OCR input samples — per-developer test docs, not shipped
+inputs/
+
 # Benchmark outputs — ``scripts/benchmark_universal.py`` writes its
 # searchable PDF next to the input by default (``<pdf>.ocr.pdf``).
 # These are throwaway artefacts of a measurement run, not fixtures,
