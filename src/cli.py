@@ -85,6 +85,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Дополнительно выгрузить DOCX рядом с PDF",
     )
     p.add_argument(
+        "--excel",
+        action="store_true",
+        help=(
+            "Дополнительно выгрузить Excel рядом с PDF. Требует "
+            "профиль с включённым ``extract.enabled`` (например, "
+            "встроенный ``tn_upd``); иначе парсер не найдёт строк "
+            "и экспорт завершится ошибкой."
+        ),
+    )
+    p.add_argument(
         "--list-profiles",
         action="store_true",
         help="Показать доступные профили и завершить работу",
@@ -163,6 +173,7 @@ def process_single(
     profile_name: str,
     want_txt: bool,
     want_docx: bool,
+    want_excel: bool = False,
 ) -> int:
     """Run the pipeline on one file. Returns 0 on success, nonzero on failure."""
     from src.application.export_manager import ExportManager
@@ -271,6 +282,14 @@ def process_single(
             docx_path = output_path.with_suffix(".docx")
             exporter.export(result, docx_path, ExportFormat.DOCX)
             logger.info("   Сохранён DOCX: %s", docx_path)
+        if want_excel:
+            xlsx_path = output_path.with_suffix(".xlsx")
+            # Delegates to tn_parser.excel.write_excel_safe which
+            # also writes a .log sidecar and .xlsx.snapshot.json for
+            # the feedback loop — consistent with what the standalone
+            # parser CLI produces.
+            actual = exporter.export(result, xlsx_path, ExportFormat.EXCEL)
+            logger.info("   Сохранён Excel: %s", actual)
     except Exception as exc:  # noqa: BLE001
         logger.error("Ошибка экспорта: %s", exc)
         return 3
@@ -283,6 +302,7 @@ def process_batch(
     want_txt: bool,
     want_docx: bool,
     workers: int,
+    want_excel: bool = False,
 ) -> int:
     """Process a batch. Returns 0 if every file succeeded."""
     from src.infrastructure.file_utils import safe_unique_path, suggest_output_path
@@ -291,7 +311,10 @@ def process_batch(
     if workers <= 1:
         for input_path in inputs:
             out = safe_unique_path(suggest_output_path(input_path))
-            rc = process_single(input_path, out, profile_name, want_txt, want_docx)
+            rc = process_single(
+                input_path, out, profile_name,
+                want_txt, want_docx, want_excel,
+            )
             if rc != 0:
                 failures += 1
     else:
@@ -640,10 +663,14 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--output можно использовать только с одним входным файлом")
             return 2
         return process_single(
-            inputs[0], args.output, args.profile, args.txt, args.docx
+            inputs[0], args.output, args.profile,
+            args.txt, args.docx, args.excel,
         )
 
-    return process_batch(inputs, args.profile, args.txt, args.docx, args.workers)
+    return process_batch(
+        inputs, args.profile, args.txt, args.docx, args.workers,
+        want_excel=args.excel,
+    )
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 Пользователь на Windows:
     1. Кладёт PDF-файлы (машиночитаемые или OCR-слой) в папку.
-    2. Запускает CLI `python -m tn_parser <папка>`.
+    2. Запускает CLI `python -m src.tn_parser <папка>`.
     3. Получает `extraction.xlsx` и `extraction.log` рядом.
     4. Открывает Excel и видит по строке на каждую накладную.
 
