@@ -317,6 +317,19 @@ class OCRConfig:
     #: available at rescue time. Off by default;
     #: ``universal_accurate`` opts in.
     user_words_fuzzy_rescue: bool = False
+    #: Per-block PSM retry for low-confidence layout regions. After
+    #: the primary ``image_to_data`` pass, groups TSV rows by
+    #: ``block_num``, and for each block whose mean per-word
+    #: confidence sits below 60 % (and contains ≥ 3 words), re-OCRs
+    #: the block crop with ``--psm 6`` (SINGLE_BLOCK). Targets
+    #: invoice / transport-document tables where the default PSM=3
+    #: layout analyser fragments cells into multiple blocks and
+    #: collapses the per-word confidence. On successful recovery
+    #: (≥ 5-point mean-conf lift) the block's TSV entries are
+    #: replaced in-place so the downstream filter / rescue chain
+    #: sees the cleaner readings. Off by default;
+    #: ``universal_accurate`` opts in.
+    per_block_psm_retry: bool = False
     #: Freeform ``-c key=value`` Tesseract parameters passed through
     #: OCRmyPDF's ``tesseract_config`` kwarg. Profile authors use this
     #: to toggle internal Tesseract behaviour that isn't exposed as a
@@ -473,7 +486,7 @@ class PostprocessConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 8
+PROFILE_SCHEMA_VERSION: int = 9
 
 
 @dataclass
@@ -620,6 +633,14 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         post.setdefault("validate_entities", False)
         data["schema_version"] = 8
         version = 8
+
+    # v8 → v9: add ``per_block_psm_retry`` flag. Default False on
+    # migration; ``universal_accurate`` opts in.
+    if version < 9:
+        ocr = data.setdefault("ocr", {})
+        ocr.setdefault("per_block_psm_retry", False)
+        data["schema_version"] = 9
+        version = 9
 
     return data
 

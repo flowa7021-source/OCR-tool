@@ -1627,6 +1627,33 @@ class OCRPipeline:
                             texts[i] = cur_word
                             confs_raw[i] = str(cur_conf)
 
+                # Block-level PSM retry. Groups the TSV by block_num,
+                # finds blocks whose mean per-word confidence is below
+                # 60 % (with ≥ 3 words), re-OCRs the block crop with
+                # PSM=SINGLE_BLOCK, and replaces the block's TSV
+                # entries in-place when the re-OCR beats the original
+                # by ≥ 5 points. Targets invoice / transport-doc
+                # tables where the AUTO layout analyser fragmented
+                # cells. Runs on the pre-binarisation grayscale when
+                # available — same image_rescue's rationale.
+                use_block_psm_retry = getattr(
+                    job.profile.ocr, "per_block_psm_retry", False,
+                )
+                if use_block_psm_retry:
+                    from src.core.per_block_psm_rescue import (
+                        rescue_low_conf_blocks,
+                    )
+
+                    rescued_count = rescue_low_conf_blocks(
+                        data, rescue_image, lang, tess_cfg,
+                    )
+                    if rescued_count:
+                        logger.info(
+                            "Page %d: per-block PSM rescue replaced "
+                            "%d block(s)",
+                            pr.page_number, rescued_count,
+                        )
+
                 # User-words fuzzy rescue — dictionary-backed post-OCR
                 # correction. Runs LAST so it can fix tokens the image
                 # rescues couldn't (the CROP was readable but the LSTM
@@ -1689,6 +1716,7 @@ class OCRPipeline:
                     or use_clahe_rescue
                     or use_upscale_rescue
                     or use_user_words_rescue
+                    or use_block_psm_retry
                 ):
                     confidences = []
                     for val in confs_raw:

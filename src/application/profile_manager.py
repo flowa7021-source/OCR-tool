@@ -348,6 +348,12 @@ class ProfileManager:
             # but the LSTM's DAWG bias at primary OCR time was too
             # soft (``ИНЦ`` → ``ИНН``, ``Скаnia`` → ``Scania``).
             user_words_fuzzy_rescue=True,
+            # Re-OCR fragmented layout blocks with PSM=SINGLE_BLOCK
+            # when the primary AUTO pass collapsed their per-word
+            # confidence below 60 %. Targets invoice / transport-doc
+            # tables — the user's corpus is ТН / УПД forms with
+            # grid layouts where AUTO regularly mis-segments.
+            per_block_psm_retry=True,
             extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
         )
         postprocess = PostprocessConfig(
