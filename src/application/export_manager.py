@@ -127,6 +127,8 @@ class ExportManager:
             return output_path
         if format == ExportFormat.PDF:
             return self.export_pdf(job_result, output_path)
+        if format == ExportFormat.EXCEL:
+            return self.export_excel(job_result, output_path)
         raise ExportError(f"Неподдерживаемый формат экспорта: {format}")
 
     # ------------------------------------------------------------------
@@ -327,6 +329,123 @@ class ExportManager:
         document.save(str(output_path))
         logger.info("Exported DOCX: %s (%d pages)", output_path, len(pages))
         return output_path
+
+    def export_excel(
+        self,
+        job_result: JobResult,
+        output_path: Path,
+    ) -> Path:
+        """Write the parser's structured rows to an ``.xlsx`` workbook.
+
+        Delegates to :func:`src.tn_parser.excel.write_excel_safe` so the
+        on-disk shape (13 columns, confidence colouring, frozen header,
+        auto-filter, snapshot sidecar) matches byte-for-byte what the
+        standalone ``python -m src.tn_parser`` CLI produces. Also writes
+        a human-readable log next to the xlsx via
+        :func:`src.tn_parser.report.build_log_lines` +
+        :func:`write_log_safe` — the same ``<stem>.log`` operators are
+        used to seeing from the parser's batch run.
+
+        Side effects:
+          * Writes ``<stem>.xlsx`` (or a timestamped fallback name if
+            the primary path is locked by an open Excel window).
+          * Writes ``<stem>.log`` next to it.
+          * Writes ``<stem>.xlsx.snapshot.json`` (used by
+            ``scripts/collect_feedback.py`` to diff operator edits).
+          * Populates ``job_result.parsed.snapshot_path`` so downstream
+            callers (UI, feedback tooling) can locate the sidecar
+            without re-deriving the filename.
+
+        Args:
+            job_result: Finished job. MUST have ``parsed`` populated
+                (profile with ``extract.enabled=True`` + at least one
+                parser row); otherwise :class:`ExportError` is raised
+                — silently producing an empty workbook would hide a
+                profile / extraction-config bug from the user.
+            output_path: Destination ``.xlsx`` path. The parent
+                directory is created if missing.
+
+        Returns:
+            The actual path written. Differs from ``output_path``
+            when the primary file was locked and
+            :func:`write_excel_safe` fell back to a timestamped name.
+
+        Raises:
+            ExportError: When there is no parser output to export,
+                the parser dependencies (openpyxl) are missing, or
+                the filesystem refuses the write.
+        """
+        if job_result.parsed is None or not job_result.parsed.rows:
+            raise ExportError(
+                "Нет распознанных полей для экспорта в Excel. "
+                "Проверьте, что профиль включает `extract.enabled=True` "
+                "и что парсер нашёл хотя бы одну строку."
+            )
+
+        try:
+            from src.tn_parser.excel import write_excel_safe
+            from src.tn_parser.models import ParsedRow
+            from src.tn_parser.report import build_log_lines, write_log_safe
+        except ImportError as exc:
+            # rapidfuzz / openpyxl absent from the frozen build.
+            raise ExportError(
+                "Экспорт в Excel недоступен: парсер накладных не "
+                f"импортируется ({exc}). Переустановите приложение."
+            ) from exc
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        # Rehydrate ParsedRow dataclasses from the JSON-dict form we
+        # stored on result.parsed (core/ is intentionally agnostic of
+        # the parser's dataclass shape — see :class:`ParsedDocument`).
+        rows = [ParsedRow.from_json_dict(d) for d in job_result.parsed.rows]
+
+        try:
+            actual_xlsx = write_excel_safe(rows, str(output_path))
+        except PermissionError as exc:
+            raise ExportError(
+                f"Файл открыт в другой программе:\n{output_path}\n\n"
+                "Закройте его (например, в Excel) и попробуйте снова."
+            ) from exc
+        except OSError as exc:
+            if getattr(exc, "errno", None) == 28 or "full" in str(exc).lower():
+                raise ExportError(
+                    f"Недостаточно места на диске для записи {output_path}"
+                ) from exc
+            raise ExportError(f"Не удалось записать Excel: {exc}") from exc
+
+        actual_xlsx_path = Path(actual_xlsx)
+        # write_excel_safe writes the snapshot sidecar using the actual
+        # path (not the original request), so derive it the same way
+        # to avoid a dangling snapshot_path attribute on fallback.
+        snapshot_path = str(actual_xlsx_path) + ".snapshot.json"
+        job_result.parsed.snapshot_path = snapshot_path
+
+        # Log file — same stem as the xlsx so a .xlsx -> .log pairing
+        # works regardless of whether the xlsx took the fallback name.
+        log_path = actual_xlsx_path.with_suffix(".log")
+        source_name = Path(job_result.input_path).name or "input.pdf"
+        try:
+            log_lines = build_log_lines(
+                input_path=job_result.input_path,
+                output_path=actual_xlsx,
+                elapsed_s=job_result.total_time_sec,
+                rows_by_file={source_name: rows},
+            )
+            write_log_safe(str(log_path), log_lines)
+        except (OSError, PermissionError) as exc:
+            # Log-file problems must NOT kill the export — the
+            # primary artifact (.xlsx) is already on disk. Emit a
+            # WARNING so the support channel still sees the issue.
+            logger.warning(
+                "Excel log sidecar failed (%s: %s); xlsx still written to %s",
+                type(exc).__name__, exc, actual_xlsx,
+            )
+
+        logger.info(
+            "Exported Excel: %s (%d rows, snapshot=%s)",
+            actual_xlsx, len(rows), snapshot_path,
+        )
+        return actual_xlsx_path
 
     def copy_to_clipboard(self, text: str) -> None:
         """Copy ``text`` to the system clipboard via Qt.
