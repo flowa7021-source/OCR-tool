@@ -27,8 +27,17 @@
       "sauvola_k": 0.2
     },
     "denoise": {
-      "enabled": false,
-      "steps": []
+      "enabled": true,
+      "steps": [
+        {
+          "method": "median",
+          "enabled": true,
+          "ksize": 3,
+          "sigma": 1.0,
+          "h": 7,
+          "morph_ksize": 3
+        }
+      ]
     },
     "contrast": {
       "clahe_enabled": true,

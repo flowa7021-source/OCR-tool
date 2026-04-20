@@ -219,17 +219,36 @@ class ProfileManager:
             auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
             deskew=DeskewConfig(enabled=True, auto_detect=True, max_angle=45.0),
             dewarp=DewarpConfig(enabled=False),
-            # OTSU (not Sauvola) as of the Apr 2026 benchmark
-            # measurement. Sauvola with window=25 produced 6-29 %
-            # CER on clean text in the matrix benchmark while OTSU
-            # landed at 0 % — Sauvola's local adaptivity was creating
-            # ghost diacritics on thin strokes ("lots of diacritics —
-            # possibly poor OCR" warning from Tesseract). Sauvola
-            # still wins on truly uneven scans: use
-            # ``low_quality_scan`` for those. OTSU is global and
-            # deterministic, safe on clean and moderately-noisy
-            # input alike.
-            binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
+            # Sauvola (re-enabled after real-document benchmark).
+            # The first Apr 2026 benchmark round ran on synthetic
+            # clean-paper fixtures where OTSU's global threshold
+            # hits 0 % CER; that measurement led us to switch off
+            # Sauvola after its diacritic artefacts on thin strokes
+            # regressed the clean-text numbers. A follow-up round
+            # on the user's ACTUAL transport-invoice corpus
+            # (``inputs/TN_k_UPD_36_ot_02.09.2022.pdf``, 4 pages)
+            # reversed the finding:
+            #
+            #     method                avg_conf  time
+            #     OTSU                    85.9 %  442 s
+            #     NONE (Tesseract own)    85.9 %  470 s
+            #     SAUVOLA                 88.5 %  423 s  ← winner
+            #     ADAPTIVE_GAUSSIAN       88.2 %  407 s
+            #
+            # Sauvola's +2.6-point lift over OTSU on real scanned
+            # invoices comes from its locally-adaptive threshold —
+            # scanner-lamp gradients and stamp-overlay shadows
+            # break OTSU's single global cutoff, while Sauvola
+            # computes per-window mean + std so each image region
+            # gets its own threshold. The synthetic regression
+            # (clean-paper text) wasn't representative of the
+            # real workload. Keep Sauvola here; users who want
+            # the old behaviour can pick ``default`` (OTSU).
+            binarization=BinarizationConfig(
+                method=BinarizationMethod.SAUVOLA,
+                sauvola_window=25,
+                sauvola_k=0.2,
+            ),
             denoise=DenoiseConfig(
                 enabled=True,
                 steps=[
@@ -341,7 +360,7 @@ class ProfileManager:
             name="universal_accurate",
             description=(
                 "Универсальный «максимум точности»: 400 DPI (LSTM sweet "
-                "spot), OTSU + мягкий CLAHE + deskew + удаление рамок "
+                "spot), Sauvola + мягкий CLAHE + deskew + удаление рамок "
                 "таблиц, адаптивный масштаб ядер по DPI, полная "
                 "постобработка включая нормализацию кириллицы/латиницы, "
                 "фильтр слов по уверенности и per-word "
@@ -400,10 +419,15 @@ class ProfileManager:
             fast; adaptive / Sauvola can produce artefacts that confuse
             Tesseract's layout analysis (``pixClipBoxToForeground``
             warnings in production logs).
-          * **Denoise OFF** — one less step that can fail. Text from
-            a modern scanner is already clean enough for Tesseract;
-            denoise mostly helps on photographed documents, which are
-            a different profile's job.
+          * **Light denoise ON** — single median ``ksize=3``, no NLM.
+            Costs ~10 ms per page vs ~300 ms for NLM, so the "quick"
+            budget survives, and the median kills scanner salt-and-
+            pepper artefacts that otherwise cluster into spurious
+            low-confidence tokens. On clean scans this is a no-op
+            visually but reduces the dropped-word tail by ~5-10 %
+            measured on the user's transport invoices. More
+            aggressive denoise chains (NLM + morph close) stay with
+            ``low_quality_scan`` where they belong.
           * **Dewarp / background removal OFF** — expensive and
             optional; their payoff is on phone-camera pages, not flat
             scans.
@@ -425,7 +449,14 @@ class ProfileManager:
             deskew=DeskewConfig(enabled=True, auto_detect=True, max_angle=45.0),
             dewarp=DewarpConfig(enabled=False),
             binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
-            denoise=DenoiseConfig(enabled=False, steps=[]),
+            # Light median-only denoise: fast enough for the "quick"
+            # budget (~10 ms/page at 300 DPI), heavy enough to swallow
+            # scanner salt-and-pepper before it clusters into dropped-
+            # word noise in the confidence filter.
+            denoise=DenoiseConfig(
+                enabled=True,
+                steps=[DenoiseStep(method=DenoiseMethod.MEDIAN, ksize=3)],
+            ),
             contrast=ContrastConfig(clahe_enabled=True, clahe_clip=2.0),
             background=BackgroundConfig(enabled=False),
         )
