@@ -553,8 +553,32 @@ class TesseractEngine(OCREngine):
 
         logger.warning(
             "Page %d/%d primary OCR FAILED (%s); "
-            "retrying with simplified settings",
+            "trying aggressive preprocessing retry",
             page_index, page_count, primary_failed_reason,
+        )
+
+        # Tier 1 of 3 retry tiers — aggressive preprocessing at the
+        # ORIGINAL DPI. Targets faded / noisy / low-contrast scans
+        # where the user's profile preprocessing wasn't aggressive
+        # enough (Sauvola + CLAHE 3.0 + background removal + NLM)
+        # and pixel density still matters for thin-stroke glyphs.
+        aggressive_pdf = self._retry_page_with_aggressive_preprocessing(
+            page_pdf=page_pdf,
+            work_dir=work_dir,
+            page_index=page_index,
+            original_config=original_config,
+        )
+        if aggressive_pdf is not None:
+            logger.info(
+                "Page %d/%d recovered via aggressive-preprocessing retry",
+                page_index, page_count,
+            )
+            return aggressive_pdf, "retry"
+
+        logger.warning(
+            "Page %d/%d aggressive preprocessing also failed; "
+            "falling back to simpler settings",
+            page_index, page_count,
         )
 
         recovered_pdf = self._retry_page_with_simpler_settings(
@@ -589,6 +613,184 @@ class TesseractEngine(OCREngine):
             page_index, page_count,
         )
         return page_pdf, "raster"
+
+    def _retry_page_with_aggressive_preprocessing(
+        self,
+        *,
+        page_pdf: Path,
+        work_dir: Path,
+        page_index: int,
+        original_config: OCRConfig,
+    ) -> Path | None:
+        """First-tier retry: aggressive preprocessing at original DPI.
+
+        Runs BEFORE the simpler-raster tier so we keep pixel density
+        for faded / low-contrast scans that the user's profile
+        preprocessing wasn't aggressive enough for. Applies:
+
+          * Sauvola local-threshold binarisation (window=25, k=0.2)
+            — handles uneven lighting / gradient backgrounds far
+            better than OTSU.
+          * CLAHE contrast (clip=3.0, tile=8) — amplifies faint
+            strokes without the global-histogram over-brightening
+            that a straight equalise would cause.
+          * Background blur-division (blur_kernel=55) — flattens
+            scanner-lamp gradients and yellowed paper before the
+            binariser sees the image.
+          * NLM denoise (h=15) + median — removes the grain and
+            JPEG artefacts common on phone-camera snaps.
+
+        Then re-wraps as a PDF and re-runs OCR with the same language
+        / PSM / OEM as the primary attempt. Keeps PSM=AUTO because
+        aggressive preprocessing usually restores a layout the
+        analyser can handle; simplified-settings tier below is where
+        we drop to SINGLE_BLOCK.
+
+        Returns the path to the recovered page PDF on success, or
+        ``None`` if even aggressive preprocessing couldn't extract
+        text.
+        """
+        aggressive_pdf = self._build_aggressive_preprocessed_page_pdf(
+            page_pdf=page_pdf,
+            work_dir=work_dir,
+            page_index=page_index,
+            dpi=int(original_config.dpi),
+            suffix="aggressive",
+        )
+        if aggressive_pdf is None:
+            return None
+
+        retry_config = dataclasses.replace(
+            original_config,
+            optimize_level=OptimizeLevel.NONE,
+            skip_text=False,
+        )
+
+        page_out = work_dir / f"page_{page_index:04d}_aggressive.pdf"
+        opts = map_ocr_config(retry_config, aggressive_pdf, page_out)
+        try:
+            run_ocrmypdf(opts)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Page %d aggressive-preprocessing retry also failed "
+                "(%s: %s)",
+                page_index, type(exc).__name__, exc,
+            )
+            return None
+        if not _page_pdf_has_text(page_out):
+            logger.warning(
+                "Page %d aggressive-preprocessing retry returned empty "
+                "text layer — escalating to simpler-settings tier",
+                page_index,
+            )
+            return None
+        return page_out
+
+    @staticmethod
+    def _build_aggressive_preprocessed_page_pdf(
+        *,
+        page_pdf: Path,
+        work_dir: Path,
+        page_index: int,
+        dpi: int,
+        suffix: str,
+    ) -> Path | None:
+        """Re-rasterise the page and run aggressive preprocessing through
+        :class:`src.core.image_preprocessor.ImagePreprocessor`.
+
+        Unlike :meth:`_build_simplified_page_pdf` (which flattens and
+        downgrades to recover crashed layout analysis), this helper
+        keeps the original DPI and applies the full aggressive
+        denoise chain — useful when the PROBLEM is insufficient
+        preprocessing rather than over-preprocessing.
+
+        Returns path to the newly-built single-page PDF, or ``None``
+        if rasterisation or preprocessing or PDF assembly fails.
+        """
+        import fitz
+        import numpy as np
+
+        from src.core.image_preprocessor import ImagePreprocessor
+        from src.core.models import (
+            BackgroundConfig,
+            BinarizationConfig,
+            ContrastConfig,
+            DenoiseConfig,
+            DenoiseStep,
+            DeskewConfig,
+            PreprocessConfig,
+        )
+        from src.shared.types import BinarizationMethod, DenoiseMethod
+
+        try:
+            with fitz.open(str(page_pdf)) as src:
+                page = src[0]
+                pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+            if pix.n == 1:
+                arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                    pix.height, pix.width,
+                )
+            else:
+                arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                    pix.height, pix.width, pix.n,
+                )
+
+            aggressive_cfg = PreprocessConfig(
+                deskew=DeskewConfig(enabled=True, auto_detect=True, max_angle=45.0),
+                binarization=BinarizationConfig(
+                    method=BinarizationMethod.SAUVOLA,
+                    sauvola_window=25,
+                    sauvola_k=0.2,
+                ),
+                denoise=DenoiseConfig(
+                    enabled=True,
+                    steps=[
+                        DenoiseStep(method=DenoiseMethod.NLM, h=15),
+                        DenoiseStep(method=DenoiseMethod.MEDIAN, ksize=3),
+                    ],
+                ),
+                contrast=ContrastConfig(
+                    clahe_enabled=True, clahe_clip=3.0, clahe_tile=8,
+                ),
+                background=BackgroundConfig(enabled=True, blur_kernel=55),
+            )
+
+            preprocessor = ImagePreprocessor()
+            processed, _ = preprocessor.process(arr, aggressive_cfg, dpi=dpi)
+            # Save the preprocessed image as a PNG (Unicode-safe via
+            # imencode + raw bytes to match the pipeline's convention),
+            # then wrap it as a one-page PDF.
+            import cv2
+
+            ok, encoded = cv2.imencode(".png", processed)
+            if not ok:
+                logger.warning(
+                    "Page %d aggressive-preprocess imencode failed",
+                    page_index,
+                )
+                return None
+            png_path = work_dir / f"page_{page_index:04d}_{suffix}.png"
+            png_path.write_bytes(encoded.tobytes())
+
+            out_path = work_dir / f"page_{page_index:04d}_{suffix}.pdf"
+            new_doc = fitz.open()
+            try:
+                # Page size in points = pixels * 72 / dpi.
+                pt_w = processed.shape[1] * 72.0 / dpi
+                pt_h = processed.shape[0] * 72.0 / dpi
+                new_page = new_doc.new_page(width=pt_w, height=pt_h)
+                new_page.insert_image(new_page.rect, filename=str(png_path))
+                new_doc.save(str(out_path))
+            finally:
+                new_doc.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not rebuild page %d with aggressive preprocessing "
+                "at %d DPI (%s): %s",
+                page_index, dpi, suffix, exc,
+            )
+            return None
+        return out_path
 
     def _retry_page_with_simpler_settings(
         self,

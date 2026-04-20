@@ -176,21 +176,23 @@ class TestTesseractEngine:
         assert events[0] == (0, 1, "ocr")
         assert events[-1] == (1, 1, "ocr")
 
-    def test_failing_page_is_retried_with_simpler_settings(
+    def test_failing_page_is_retried_with_aggressive_preprocessing(
         self, tmp_path: Path
     ) -> None:
         """When a page crashes on primary settings, the engine MUST
-        retry that page with simpler settings before giving up.
+        first retry with aggressive preprocessing at the original DPI
+        (Sauvola + CLAHE 3.0 + background removal + NLM) before
+        dropping to the simpler-settings tier.
 
         User requirement: every page must end up with a text layer —
         no silent "kept as raster" for pages the user expects to
-        search. The retry uses a lower DPI, grayscale raster, and
-        PSM=SINGLE_BLOCK; those settings rescue the layout-crash
-        cases that the primary run can't handle.
+        search. The aggressive retry targets faded / noisy scans
+        where the user's profile preprocessing wasn't aggressive
+        enough; the subsequent simpler-settings retry targets
+        layout-crash cases where the problem is too MUCH pixel
+        density.
         """
         import fitz
-
-        from src.shared.types import PSM
 
         engine = TesseractEngine()
 
@@ -216,11 +218,10 @@ class TestTesseractEngine:
                 d.close()
 
         def _fake_run(opts):
-            """Fail on page 2 primary attempt; succeed everywhere else."""
+            """Fail on page 2 primary attempt; succeed everywhere else
+            (including on the aggressive-preprocessing retry)."""
             name = opts.input_file.name
             call_log.append((name, opts.psm))
-            # page_0002.pdf is the original split for page 2 — crash it.
-            # page_0002_simpler.pdf is the retry; let it succeed.
             if name == "page_0002.pdf":
                 raise RuntimeError("simulated Tesseract layout crash")
             _write_text_pdf(opts.output_file)
@@ -237,17 +238,14 @@ class TestTesseractEngine:
         assert len(results) == 3
         assert out.exists()
 
-        # A simplified-settings retry must have been issued for the
-        # failing page (the entry we created collides only on name).
-        retry_entries = [entry for entry in call_log if "simpler" in entry[0]]
-        assert retry_entries, (
-            "Expected a simplified-settings retry for the failing "
-            f"page, but call log was {call_log!r}"
-        )
-        # Retry must use PSM=SINGLE_BLOCK (the simpler layout).
-        retry_entry = retry_entries[0]
-        assert retry_entry[1] == int(PSM.SINGLE_BLOCK), (
-            f"Retry should use PSM=SINGLE_BLOCK, got psm={retry_entry[1]}"
+        # The aggressive-preprocessing retry must have been issued —
+        # that's the first tier after a primary fail.
+        aggressive_entries = [
+            entry for entry in call_log if "aggressive" in entry[0]
+        ]
+        assert aggressive_entries, (
+            "Expected an aggressive-preprocessing retry for the "
+            f"failing page, but call log was {call_log!r}"
         )
 
     def test_failing_page_retry_escalates_to_last_resort_tier(
