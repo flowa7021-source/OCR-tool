@@ -378,6 +378,13 @@ class ProfileManager:
             # keep the marker off legitimate faded-but-printed
             # blocks.
             mark_suspect_handwritten_blocks=True,
+            # Normalise dates / amounts / phones to the canonical
+            # Russian business-document shapes (``DD.MM.YYYY``,
+            # ``1 234,56``, ``+7 (XXX) XXX-XX-XX``). Repairs
+            # common letter-digit OCR errors (``12.O1.2O23`` →
+            # ``12.01.2023``) and makes downstream accounting
+            # imports byte-stable across OCR runs.
+            validate_entities=True,
             custom_rules=[],
         )
         return ProfileData(
@@ -532,6 +539,10 @@ class ProfileManager:
                 # Flag handwritten regions with ``⟨рукописный текст⟩``
                 # so users see where to transcribe manually.
                 mark_suspect_handwritten_blocks=True,
+                # Normalise dates / amounts / phones — same
+                # rationale as universal_accurate, just on the
+                # quick profile's cheaper preprocessing chain.
+                validate_entities=True,
             ),
         )
 

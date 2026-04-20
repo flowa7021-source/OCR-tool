@@ -1,7 +1,7 @@
 {
   "name": "contracts_ru",
   "description": "Русские договоры: единый блок текста, минимальная обработка",
-  "schema_version": 7,
+  "schema_version": 8,
   "preprocess": {
     "auto_rotate": {
       "enabled": true,

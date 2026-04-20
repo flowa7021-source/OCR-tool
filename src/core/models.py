@@ -450,6 +450,17 @@ class PostprocessConfig:
     #: silent no-op. Off by default so JSON-profile migrations from
     #: pre-v3 schemas stay byte-exact; ``quick_reliable`` opts in.
     validate_identifiers: bool = False
+    #: When True, normalise dates / amounts / phone numbers in the
+    #: OCR output to their canonical Russian business-document
+    #: forms: ``DD.MM.YYYY``, ``1 234,56`` (thousand-separated),
+    #: and ``+7 (XXX) XXX-XX-XX``. Also repairs single letter-digit
+    #: OCR errors on those entities (``12.O1.2O23`` → ``12.01.2023``,
+    #: ``+7 (495) 725-8O-62`` → ``+7 (495) 725-80-62``,
+    #: ``1 2З4,56`` → ``1 234,56``). Off by default for backwards-
+    #: compatibility; ``universal_accurate`` and ``quick_reliable``
+    #: opt in. Implemented in :mod:`src.core.entity_validators`;
+    #: skips tokens that aren't entity-shaped so prose isn't affected.
+    validate_entities: bool = False
     custom_rules: list[RegexRule] = field(default_factory=list)
 
 
@@ -462,7 +473,7 @@ class PostprocessConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 7
+PROFILE_SCHEMA_VERSION: int = 8
 
 
 @dataclass
@@ -599,6 +610,16 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         ocr.setdefault("user_words_fuzzy_rescue", False)
         data["schema_version"] = 7
         version = 7
+
+    # v7 → v8: add ``validate_entities`` flag to postprocess.
+    # Default False — preserves byte-identical output for old
+    # profiles. Builtin builders turn it on for ``universal_accurate``
+    # and ``quick_reliable``.
+    if version < 8:
+        post = data.setdefault("postprocess", {})
+        post.setdefault("validate_entities", False)
+        data["schema_version"] = 8
+        version = 8
 
     return data
 

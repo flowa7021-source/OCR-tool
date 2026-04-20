@@ -565,6 +565,14 @@ class TextPostprocessor:
             current = self._validate_identifiers(current)
             logger.debug("Postprocess: identifiers validated against catalog")
 
+        # Entity validation — dates / amounts / phones. Independent
+        # of ``validate_identifiers`` so profiles can pick and choose
+        # (an invoice profile might want date + amount normalisation
+        # but no catalog-backed identifier rewrite).
+        if getattr(config, "validate_entities", False):
+            current = self._validate_entities(current)
+            logger.debug("Postprocess: dates / amounts / phones normalised")
+
         return current
 
     # ------------------------------------------------------------------
@@ -718,6 +726,92 @@ class TextPostprocessor:
             return fixed
 
         return self._IDENTIFIER_RE.sub(_replace, text)
+
+    # Regex used by ``_validate_entities`` to FIND entity-shaped
+    # tokens. Deliberately lenient on separators (dots, commas,
+    # spaces, hyphens) so OCR errors on punctuation don't prevent
+    # detection. Each match is passed to the entity-specific
+    # validator, which decides whether to keep or replace it.
+    _DATE_CANDIDATE_RE: Pattern[str] = re.compile(
+        r"\b[0-9OoОо|lIZzBSsGT]{1,2}"
+        r"[.,\s\-/]"
+        r"[0-9OoОо|lIZzBSsGT]{1,2}"
+        r"[.,\s\-/]"
+        r"[0-9OoОо|lIZzBSsGT]{2,4}\b",
+    )
+    #: Amounts — integer + optional fractional with currency hint.
+    #: ``\b`` on both ends keeps us off digit runs that are part of
+    #: longer identifiers (ИНН / phone / account numbers).
+    _AMOUNT_CANDIDATE_RE: Pattern[str] = re.compile(
+        r"\b\d{1,3}(?:[\s\xa0]\d{3})+(?:[,.]\d{1,2})?"
+        r"(?:\s*(?:руб\.?|₽))?\b"
+        r"|\b\d+[,.]\d{2}\s*(?:руб\.?|₽)\b",
+    )
+    _PHONE_CANDIDATE_RE: Pattern[str] = re.compile(
+        r"(?:\+7|\b8)[\s\-().]*"
+        r"[0-9OoОоlIZzBSsG]{3,4}"
+        r"[\s\-().]*"
+        r"[0-9OoОоlIZzBSsG][\s\-().0-9OoОоlIZzBSsG]{5,15}",
+    )
+
+    def _validate_entities(self, text: str) -> str:
+        """Normalise dates / amounts / phones via
+        :mod:`src.core.entity_validators`.
+
+        Each category runs as a regex-scoped substitution: we
+        FIND entity-shaped candidates (loose patterns that accept
+        OCR letter-digit confusion), pass each match to the
+        corresponding ``try_fix_*`` validator, and swap in the
+        canonical form when the validator returns one. The
+        validator returns ``None`` for shapes it can't confidently
+        fix, which leaves the OCR text unchanged — preferring a
+        missed correction over a false-positive rewrite.
+
+        The three categories run in order: dates → amounts →
+        phones. Dates are cheapest to disambiguate (calendar
+        constraint is tight) and may consume digit sequences the
+        amount / phone matchers would otherwise chase; running
+        them first reduces cross-category false positives.
+        """
+        from src.core.entity_validators import (
+            try_fix_amount,
+            try_fix_date,
+            try_fix_phone,
+        )
+
+        def _date_sub(match) -> str:
+            fixed = try_fix_date(match.group(0))
+            if fixed is None or fixed == match.group(0):
+                return match.group(0)
+            logger.debug(
+                "validate_entities: date %r → %r", match.group(0), fixed,
+            )
+            return fixed
+
+        def _amount_sub(match) -> str:
+            fixed = try_fix_amount(match.group(0))
+            if fixed is None or fixed == match.group(0):
+                return match.group(0)
+            logger.debug(
+                "validate_entities: amount %r → %r",
+                match.group(0), fixed,
+            )
+            return fixed
+
+        def _phone_sub(match) -> str:
+            fixed = try_fix_phone(match.group(0))
+            if fixed is None or fixed == match.group(0):
+                return match.group(0)
+            logger.debug(
+                "validate_entities: phone %r → %r",
+                match.group(0), fixed,
+            )
+            return fixed
+
+        text = self._DATE_CANDIDATE_RE.sub(_date_sub, text)
+        text = self._AMOUNT_CANDIDATE_RE.sub(_amount_sub, text)
+        text = self._PHONE_CANDIDATE_RE.sub(_phone_sub, text)
+        return text
 
     def _apply_custom_rules(self, text: str, rules: list[RegexRule]) -> str:
         """Apply user-defined rules one by one, in order.
