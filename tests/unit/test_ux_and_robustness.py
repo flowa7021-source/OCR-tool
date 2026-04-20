@@ -6,7 +6,6 @@ Covers:
     * QueuePanel filter
     * OCRConfig.max_pages truncation in pipeline
     * ExportManager locked-file / disk-full handling
-    * GOT-OCR2 OOM surfaces friendly error
 """
 
 from __future__ import annotations
@@ -347,68 +346,3 @@ class TestExportRobustness:
         ):
             ExportManager().export_txt(result, tmp_path / "doc.txt")
         assert "места на диске" in str(exc_info.value)
-
-
-# ---------------------------------------------------------------------------
-# GOT-OCR2 OOM friendly error
-# ---------------------------------------------------------------------------
-
-
-class TestGOTOOM:
-    def _engine(self, tmp_path: Path):
-        from src.application.engines.got_ocr_engine import GOTOCREngine
-        from src.infrastructure.model_manager import ModelManager
-
-        engine = GOTOCREngine(model_manager=ModelManager(models_dir=tmp_path))
-        # Simulate a loaded model with a .chat that raises OOM
-        engine._model = MagicMock()
-        engine._tokenizer = MagicMock()
-        return engine
-
-    def test_cuda_oom_becomes_runtime_error(self, tmp_path: Path) -> None:
-        engine = self._engine(tmp_path)
-        engine._model.chat.side_effect = RuntimeError("CUDA out of memory")
-
-        page = MagicMock()
-        pix = MagicMock()
-        pix.tobytes.return_value = b"fake"
-        page.get_pixmap.return_value = pix
-
-        with patch("PIL.Image.open") as img_open:
-            img_open.return_value = MagicMock()
-            with pytest.raises(RuntimeError) as exc_info:
-                engine._recognize_page(page)
-        assert "GPU" in str(exc_info.value) or "памяти" in str(exc_info.value)
-
-    def test_system_memory_error_unloads(self, tmp_path: Path) -> None:
-        engine = self._engine(tmp_path)
-        engine._model.chat.side_effect = MemoryError("out of RAM")
-
-        page = MagicMock()
-        pix = MagicMock()
-        pix.tobytes.return_value = b"fake"
-        page.get_pixmap.return_value = pix
-
-        with patch("PIL.Image.open") as img_open:
-            img_open.return_value = MagicMock()
-            with pytest.raises(RuntimeError) as exc_info:
-                engine._recognize_page(page)
-        assert "оперативной памяти" in str(exc_info.value)
-        # unload() was called: state cleared
-        assert engine._model is None
-
-    def test_other_exceptions_return_empty(self, tmp_path: Path) -> None:
-        """Non-OOM exceptions keep the pipeline alive."""
-        engine = self._engine(tmp_path)
-        engine._model.chat.side_effect = ValueError("some random model error")
-
-        page = MagicMock()
-        pix = MagicMock()
-        pix.tobytes.return_value = b"fake"
-        page.get_pixmap.return_value = pix
-
-        with patch("PIL.Image.open") as img_open:
-            img_open.return_value = MagicMock()
-            text, conf = engine._recognize_page(page)
-        assert text == ""
-        assert conf == 0.0

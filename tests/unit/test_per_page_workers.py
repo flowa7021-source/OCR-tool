@@ -58,14 +58,16 @@ class TestCpuCountCap:
             page_count=10, cpu_count=4, available_memory_mb=32_000,
         ) == 4
 
-    def test_max_cap_is_eight_even_on_many_core_cpu(
+    def test_max_cap_is_ten_even_on_many_core_cpu(
         self, resolver,
     ) -> None:
-        # 32-core workstation — we still cap at 8 to avoid
-        # OCRmyPDF's internal thread pool colliding with ours.
+        # 32-core workstation — we still cap at 10 to match the
+        # preprocess / postprocess stage caps so a 10-page bundle
+        # moves through every stage at the same width, and to keep
+        # outer × inner parallel load from thrashing the OS.
         assert resolver(
             page_count=50, cpu_count=32, available_memory_mb=64_000,
-        ) == 8
+        ) == 10
 
 
 class TestMemoryPressure:

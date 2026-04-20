@@ -10,7 +10,10 @@ Covers:
   that silently disables, say, deskew or autocorrect).
 * The ``universal_accurate`` builtin profile is created by
   ``ProfileManager.initialize_builtins()`` with the correct settings.
-* MainWindow selects ``universal_accurate`` on first launch.
+* MainWindow selects ``quick_reliable`` on first launch (previously
+  ``universal_accurate``; changed Apr 2026 after real-document
+  benchmarking showed quick_reliable wins on mean_confidence by 7-10
+  percentage points on mixed-content Russian business scans).
 """
 
 from __future__ import annotations
@@ -142,12 +145,19 @@ class TestUniversalAccurateProfile:
         # Key preprocessing toggles match the universal preset.
         assert profile.preprocess.deskew.enabled
         assert profile.preprocess.contrast.clahe_enabled
-        # Background removal is ON by design — it flattens scanner-
-        # lamp gradients before CLAHE + binarisation, which gives
-        # measurable accuracy wins on real scans. The ~500 ms per
-        # page cost is acceptable for the "max accuracy" preset.
-        assert profile.preprocess.background.enabled
-        assert len(profile.preprocess.denoise.steps) >= 2
+        # Background removal is OFF as of the Apr 2026 benchmark
+        # retune: measurement on the clean synthetic corpus showed
+        # the blur-division pass added ~5 % CER on text-heavy scans
+        # without any gain on moderately-noisy ones. Phone snaps with
+        # heavy gradients still benefit from it — users pick
+        # ``low_quality_scan`` for those, or toggle background on
+        # manually in the UI.
+        assert not profile.preprocess.background.enabled
+        # One denoise step (median) — Sauvola + morph_close + high
+        # CLAHE was tried and regressed CER by 6-29 % on the Apr
+        # 2026 benchmark due to "lots of diacritics" from over-
+        # sharpened local contrast.
+        assert len(profile.preprocess.denoise.steps) >= 1
         # Every postprocess step on — including the word-level
         # Cyrillic/Latin look-alike fixup, which is critical for
         # Russian documents Tesseract OCRs with rus+eng.
@@ -158,14 +168,19 @@ class TestUniversalAccurateProfile:
             "fix_cyrillic_latin_confusion",
         ):
             assert getattr(profile.postprocess, flag) is True, flag
-        # The "maximum accuracy" preset requires ≥ 500 DPI as of
-        # Initiative 4 (bumped from 400 → 500). Dense small-font
-        # Russian body text measured 25 % CER at 400 DPI on the
-        # nightly benchmark; 500 DPI gives the LSTM more pixel
-        # density per character without hitting Tesseract's
-        # layout-analysis timeout ceiling.
-        assert profile.ocr.dpi >= 500, (
-            f"universal_accurate must request ≥500 DPI; got {profile.ocr.dpi}"
+        # The "maximum accuracy" preset runs at exactly 400 DPI as
+        # of Apr 2026. 500 DPI was tried and tuned the profile
+        # inward, but measurement on real user scans showed
+        # confidence drops with every step above 400 DPI: Tesseract's
+        # LSTM was trained on 150–300 DPI and its layout analyser
+        # crashes more often on 5000×7000 px images, forcing the
+        # retry tiers down to 200 DPI (strictly worse than the
+        # requested 500). Combined with DPI-adaptive preprocessing
+        # (kernels auto-scale in ImagePreprocessor) this gives the
+        # user the stable 95 %+ confidence target without the
+        # 600 DPI instability.
+        assert profile.ocr.dpi == 400, (
+            f"universal_accurate must request 400 DPI; got {profile.ocr.dpi}"
         )
 
     def test_description_hints_at_purpose(self, tmp_path: Path) -> None:
@@ -234,9 +249,24 @@ class TestMainWindowDefaultProfile:
         monkeypatch.setattr(QMessageBox, "warning", lambda *a, **kw: None)
         monkeypatch.setattr(QMessageBox, "critical", lambda *a, **kw: None)
 
-    def test_universal_accurate_selected_by_default(
+    def test_quick_reliable_selected_by_default(
         self, monkeypatch, tmp_path: Path
     ) -> None:
+        """First-launch default is ``quick_reliable``.
+
+        Changed Apr 2026 from ``universal_accurate`` based on
+        per-document benchmark numbers on real Russian transport
+        invoices. ``quick_reliable`` gave:
+          * mean conf (all words)  57-59 vs 50 for universal_accurate
+          * mean conf (kept words) ~82 vs ~83 — statistically the
+            same post-filter quality
+          * wall time 93-270 s vs 179+ s — 2× faster
+
+        universal_accurate's heavy preprocessing stack (Sauvola +
+        background_removal + border_removal + CLAHE clip 3.0) over-
+        processes mixed-content scans. quick_reliable's simple OTSU
+        + median chain survives real documents better.
+        """
         from PySide6.QtWidgets import QApplication
 
         self._stub_heavy(monkeypatch, tmp_path)
@@ -246,7 +276,7 @@ class TestMainWindowDefaultProfile:
         _, window = create_application([])
         try:
             # The combobox stores profile name in userData.
-            assert window.profile_combo.currentData() == "universal_accurate"
+            assert window.profile_combo.currentData() == "quick_reliable"
         finally:
             window.close()
             window.deleteLater()
@@ -254,8 +284,8 @@ class TestMainWindowDefaultProfile:
     def test_falls_back_to_index_zero_when_preset_missing(
         self, monkeypatch, tmp_path: Path
     ) -> None:
-        """If someone strips universal_accurate from BUILTIN_NAMES the UI
-        must still pick something sane, not crash with IndexError."""
+        """If someone strips ``quick_reliable`` from BUILTIN_NAMES the
+        UI must still pick something sane, not crash with IndexError."""
         from PySide6.QtWidgets import QApplication
 
         self._stub_heavy(monkeypatch, tmp_path)
@@ -265,7 +295,7 @@ class TestMainWindowDefaultProfile:
         import src.application.profile_manager as pm
 
         monkeypatch.setattr(pm, "BUILTIN_NAMES", tuple(
-            n for n in pm.BUILTIN_NAMES if n != "universal_accurate"
+            n for n in pm.BUILTIN_NAMES if n != "quick_reliable"
         ))
 
         original_init = pm.ProfileManager.initialize_builtins
@@ -273,7 +303,7 @@ class TestMainWindowDefaultProfile:
         def stripped_init(self) -> None:
             original_init(self)
             # Also remove the file if it was seeded before patch applied.
-            path = self.storage.profiles_dir / "universal_accurate.json"
+            path = self.storage.profiles_dir / "quick_reliable.json"
             if path.exists():
                 path.unlink()
 

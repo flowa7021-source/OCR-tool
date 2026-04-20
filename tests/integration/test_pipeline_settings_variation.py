@@ -110,9 +110,8 @@ class _CapturingEngine(OCREngine):
     bytes that reached Tesseract genuinely differed".
 
     The engine returns one ``PageOCRResult`` per page in the PDF, with
-    ``text`` taken from ``page_texts`` (or a fallback). This mirrors
-    GOT-OCR2's behaviour where the engine pre-fills the text and the
-    pipeline then runs postprocess on it.
+    ``text`` taken from ``page_texts`` (or a fallback). The pipeline
+    then runs postprocess on whatever text the engine produced.
     """
 
     kind = OCREngineKind.TESSERACT
@@ -491,9 +490,8 @@ def test_remove_artifacts_flag_drops_pure_punctuation_lines(tmp_path: Path) -> N
 
 @pytest.mark.parametrize(
     "profile_name",
-    # Skip universal_accurate (only built in code, no JSON in repo) and
-    # handwritten_mixed (GOT-OCR2 engine — covered by the engine-dispatch
-    # test in test_e2e.py). The five below ship as JSON in /profiles/.
+    # Skip universal_accurate (only built in code, no JSON in repo).
+    # The five below ship as JSON in /profiles/.
     ["default", "quick_reliable", "low_quality_scan", "contracts_ru", "english_text"],
 )
 def test_bundled_builtin_profile_loads_and_runs_through_pipeline(
@@ -555,8 +553,7 @@ class TestQuickReliableProfile:
     ``universal_accurate`` fails. It MUST avoid every config choice that
     was in any of the production failure logs:
 
-      * Tesseract engine (not GOT-OCR 2.0 — optional model, separate
-        install failure mode);
+      * Tesseract engine (always bundled);
       * DPI strictly below 600 (the DPI that produced the timeout-
         then-graft-crash chain);
       * tesseract_timeout at least 300s (matches the new default and
@@ -573,14 +570,10 @@ class TestQuickReliableProfile:
         assert profile.name == "quick_reliable"
         assert profile.builtin is True
 
-    def test_profile_uses_tesseract_not_got_ocr2(self, tmp_path: Path) -> None:
+    def test_profile_uses_tesseract(self, tmp_path: Path) -> None:
         storage = ProfileStorage(profiles_dir=tmp_path / "user-profiles")
         profile = storage.load("quick_reliable")
-        assert profile.ocr.engine is OCREngineKind.TESSERACT, (
-            "quick_reliable must use Tesseract — GOT-OCR 2.0 depends on "
-            "a separately-downloaded model, which is exactly the failure "
-            "mode this profile exists to route around."
-        )
+        assert profile.ocr.engine is OCREngineKind.TESSERACT
 
     def test_profile_uses_moderate_dpi_and_generous_timeout(
         self, tmp_path: Path
@@ -617,12 +610,11 @@ class TestPipelinePreflight:
     """The pipeline must refuse obviously-broken configurations BEFORE
     doing any expensive work.
 
-    In a pre-fix build, a user with a stale GOT-OCR 2.0 model spent
-    ~25 seconds rasterising + preprocessing 4 pages before the engine
-    load finally crashed with ``OSError``. Preflight now calls
-    ``engine.is_available()`` up front — when False, the job returns
-    FAILED within roughly a second, so the user can fix the config
-    and re-run without waiting.
+    In a pre-fix build, a user with a broken engine spent ~25 seconds
+    rasterising + preprocessing 4 pages before the engine crashed.
+    Preflight now calls ``engine.is_available()`` up front — when
+    False, the job returns FAILED within roughly a second, so the
+    user can fix the config and re-run without waiting.
     """
 
     def _make_stub_unavailable_engine(self) -> OCREngine:
@@ -639,8 +631,8 @@ class TestPipelinePreflight:
 
             def is_available(self) -> tuple[bool, str]:
                 return False, (
-                    "Файлы модели GOT-OCR 2.0 устарели — "
-                    "откройте Настройки → Скачать модель."
+                    "Tesseract binary missing — установите его или "
+                    "проверьте путь в настройках."
                 )
 
             def run(self, *a, **kw):  # pragma: no cover — preflight skips run
@@ -670,7 +662,7 @@ class TestPipelinePreflight:
 
         assert result.status is JobStatus.FAILED
         assert result.error is not None
-        assert "Скачать модель" in result.error, (
+        assert "Tesseract binary missing" in result.error, (
             f"engine.is_available() message should be preserved verbatim; "
             f"got {result.error!r}"
         )
@@ -823,6 +815,224 @@ class TestPipelinePreflight:
             f"ocr_cache.store was invoked {len(store_calls)} time(s) "
             "for an all-empty result — broken pipeline output would "
             "poison the cache"
+        )
+
+    def test_low_confidence_result_is_not_cached(self, tmp_path: Path) -> None:
+        """A COMPLETED job with mean_confidence below the cache floor
+        (``AppSettings.ocr_cache_min_confidence``) must NOT hit the
+        cache. Pairs with the empty-pages guard: that one catches
+        "OCR found nothing", this one catches "OCR found mostly
+        garbage" — a wrong-profile-for-the-document run that would
+        otherwise poison every subsequent attempt.
+        """
+        from src.application.engines.base import OCREngine, PageOCRResult
+
+        class _LowConfEngine(OCREngine):
+            kind = OCREngineKind.TESSERACT
+
+            @property
+            def name(self) -> str:
+                return "low-conf-stub"
+
+            @property
+            def description(self) -> str:
+                return "returns real text at sub-threshold confidence"
+
+            def is_available(self) -> tuple[bool, str]:
+                return True, ""
+
+            def run(self, preprocessed_pdf, output_pdf, config, progress_callback=None):
+                import shutil
+
+                output_pdf.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(preprocessed_pdf, output_pdf)
+                # mean_confidence well below the 50% default floor
+                return [
+                    PageOCRResult(page_number=1, text="garbled", mean_confidence=25.0)
+                ]
+
+        input_pdf = _build_test_pdf(tmp_path / "input.pdf", page_count=1)
+        output_pdf = tmp_path / "out.pdf"
+
+        store_calls: list[object] = []
+        from src.infrastructure import ocr_cache
+
+        real_store = ocr_cache.store
+
+        def spy_store(*a, **kw):
+            store_calls.append((a, kw))
+            return real_store(*a, **kw)
+
+        with patch.object(ocr_cache, "store", side_effect=spy_store), \
+             patch("src.application.engines.get_engine", return_value=_LowConfEngine()):
+            result = _make_pipeline().run(
+                OCRJobConfig(
+                    input_path=str(input_pdf),
+                    output_path=str(output_pdf),
+                    profile=_profile(),
+                )
+            )
+
+        assert result.status is JobStatus.COMPLETED
+        # Result came back structurally OK but with 25% mean_confidence,
+        # below the 50% cache floor → must not be cached.
+        assert store_calls == [], (
+            f"ocr_cache.store was invoked {len(store_calls)} time(s) "
+            "for a 25% mean_confidence result — low-confidence results "
+            "would poison the cache"
+        )
+
+    def test_text_layer_bypass_skips_ocr_on_digital_pdf(
+        self, tmp_path: Path
+    ) -> None:
+        """A PDF whose every page already has substantial text must
+        skip the engine entirely — the bypass copies input → output
+        and extracts text directly, with 100% mean_confidence."""
+        import fitz
+
+        pdf = tmp_path / "digital.pdf"
+        doc = fitz.open()
+        try:
+            for i in range(3):
+                page = doc.new_page(width=500, height=700)
+                # ≥ 50 chars and ≥ 3 words per page triggers bypass
+                page.insert_text(
+                    (50, 100),
+                    (
+                        f"This is page {i + 1} of a digital PDF that "
+                        "already contains a substantial text layer. "
+                        "The OCR pipeline should skip it entirely."
+                    ),
+                )
+            doc.save(str(pdf))
+        finally:
+            doc.close()
+
+        output_pdf = tmp_path / "out.pdf"
+
+        # Spy on the engine registry — it must NEVER be called.
+        engine_calls: list[object] = []
+
+        class _ShouldNotRun(OCREngine):
+            kind = OCREngineKind.TESSERACT
+
+            @property
+            def name(self) -> str:
+                return "should-not-run"
+
+            @property
+            def description(self) -> str:
+                return "fails the test if bypass doesn't kick in"
+
+            def is_available(self) -> tuple[bool, str]:
+                return True, ""
+
+            def run(self, *a, **kw):
+                engine_calls.append((a, kw))
+                raise AssertionError(
+                    "Text-layer bypass should have fired; engine.run() "
+                    "must not be invoked on a digital PDF"
+                )
+
+        with patch(
+            "src.application.engines.get_engine",
+            return_value=_ShouldNotRun(),
+        ):
+            result = _make_pipeline().run(
+                OCRJobConfig(
+                    input_path=str(pdf),
+                    output_path=str(output_pdf),
+                    profile=_profile(),
+                )
+            )
+
+        assert result.status is JobStatus.COMPLETED
+        assert engine_calls == [], (
+            f"engine.run was invoked {len(engine_calls)} time(s) — "
+            "text-layer bypass must skip the engine entirely on a "
+            "digital PDF"
+        )
+        assert len(result.pages) == 3
+        for page in result.pages:
+            assert "digital PDF" in page.text
+            assert page.mean_confidence == 100.0
+        assert output_pdf.exists()
+
+    def test_text_layer_bypass_respects_skip_text_false(
+        self, tmp_path: Path
+    ) -> None:
+        """With skip_text=False on the profile, the user explicitly
+        wants re-OCR — bypass must not kick in even on a digital PDF."""
+        import fitz
+
+        pdf = tmp_path / "digital.pdf"
+        doc = fitz.open()
+        try:
+            page = doc.new_page(width=500, height=700)
+            page.insert_text(
+                (50, 100),
+                "This digital PDF has plenty of text and three words.",
+            )
+            doc.save(str(pdf))
+        finally:
+            doc.close()
+
+        stub = _CapturingEngine()
+        profile = _profile()
+        profile.ocr.skip_text = False  # user wants re-OCR
+
+        with patch("src.application.engines.get_engine", return_value=stub):
+            result = _make_pipeline().run(
+                OCRJobConfig(
+                    input_path=str(pdf),
+                    output_path=str(tmp_path / "out.pdf"),
+                    profile=profile,
+                )
+            )
+
+        assert result.status is JobStatus.COMPLETED
+        assert stub.run_called == 1, (
+            "skip_text=False must force engine.run() to execute — "
+            "bypass is an opt-out for users who want re-OCR"
+        )
+
+    def test_text_layer_bypass_skips_short_pages(
+        self, tmp_path: Path
+    ) -> None:
+        """A PDF where ANY page has < 50 chars of text falls through
+        to the full pipeline — bypass is all-or-nothing per document."""
+        import fitz
+
+        pdf = tmp_path / "mixed.pdf"
+        doc = fitz.open()
+        try:
+            # Page 1: plenty of text
+            page = doc.new_page(width=500, height=700)
+            page.insert_text(
+                (50, 100),
+                "First page has a substantial text layer with many words.",
+            )
+            # Page 2: too short to count as "substantial"
+            page = doc.new_page(width=500, height=700)
+            page.insert_text((50, 100), "Short.")
+            doc.save(str(pdf))
+        finally:
+            doc.close()
+
+        stub = _CapturingEngine()
+        with patch("src.application.engines.get_engine", return_value=stub):
+            result = _make_pipeline().run(
+                OCRJobConfig(
+                    input_path=str(pdf),
+                    output_path=str(tmp_path / "out.pdf"),
+                    profile=_profile(),
+                )
+            )
+
+        assert result.status is JobStatus.COMPLETED
+        assert stub.run_called == 1, (
+            "Any page with insufficient text must bust the bypass — "
+            "engine.run() should have been called for the full pipeline"
         )
 
     def test_preflight_progress_event_fires(self, tmp_path: Path) -> None:

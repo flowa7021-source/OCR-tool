@@ -65,13 +65,15 @@ _RETRY_DPI: int = 200
 # is the whole point of this tier.
 _LAST_RESORT_DPI: int = 150
 
-# Initiative 3: cap on inner per-page parallelism raised from
-# 4 to 8. 8 matches the core count on the modern Windows laptops
-# this app targets. The outer ``ParallelProcessor`` still runs
-# files in parallel, but the memory-pressure guard below keeps
-# outer × inner from thrashing the OS with more concurrent
-# Tesseract subprocesses than the host's RAM can hold.
-_MAX_PER_PAGE_WORKERS: int = 8
+# Per-page OCR worker cap. Raised from 8 to 10 in the "batch 10
+# pages at a time" UX rollout — matches the preprocess and
+# postprocess stages' cap so a 10-page bundle moves through all
+# three stages at the same width. Hosts with more cores still
+# benefit from the ``OCR_PER_PAGE_WORKERS`` env override; the
+# memory-pressure guard below keeps outer × inner from thrashing
+# the OS with more concurrent Tesseract subprocesses than RAM
+# supports.
+_MAX_PER_PAGE_WORKERS: int = 10
 
 # Memory budget per worker. A Tesseract + OCRmyPDF + pikepdf
 # pipeline on a 500 DPI A4 page holds:
@@ -237,6 +239,8 @@ class TesseractEngine(OCREngine):
         output_pdf: Path,
         config: OCRConfig,
         progress_callback: ProgressCallback | None = None,
+        *,
+        original_input_pdf: Path | None = None,
     ) -> list[PageOCRResult]:
         """OCR each page independently and assemble the output PDF.
 
@@ -351,6 +355,7 @@ class TesseractEngine(OCREngine):
                         page_count=page_count,
                         per_page_config=per_page_config,
                         original_config=config,
+                        original_input_pdf=original_input_pdf,
                     ): idx
                     for idx, page_pdf in enumerate(page_pdfs)
                 }
@@ -511,6 +516,7 @@ class TesseractEngine(OCREngine):
         page_count: int,
         per_page_config: OCRConfig,
         original_config: OCRConfig,
+        original_input_pdf: Path | None = None,
     ) -> tuple[Path, str]:
         """OCR one page through primary → retry → last-resort tiers.
 
@@ -551,8 +557,33 @@ class TesseractEngine(OCREngine):
 
         logger.warning(
             "Page %d/%d primary OCR FAILED (%s); "
-            "retrying with simplified settings",
+            "trying aggressive preprocessing retry",
             page_index, page_count, primary_failed_reason,
+        )
+
+        # Tier 1 of 3 retry tiers — aggressive preprocessing at the
+        # ORIGINAL DPI. Targets faded / noisy / low-contrast scans
+        # where the user's profile preprocessing wasn't aggressive
+        # enough (Sauvola + CLAHE 3.0 + background removal + NLM)
+        # and pixel density still matters for thin-stroke glyphs.
+        aggressive_pdf = self._retry_page_with_aggressive_preprocessing(
+            page_pdf=page_pdf,
+            work_dir=work_dir,
+            page_index=page_index,
+            original_config=original_config,
+            original_input_pdf=original_input_pdf,
+        )
+        if aggressive_pdf is not None:
+            logger.info(
+                "Page %d/%d recovered via aggressive-preprocessing retry",
+                page_index, page_count,
+            )
+            return aggressive_pdf, "retry"
+
+        logger.warning(
+            "Page %d/%d aggressive preprocessing also failed; "
+            "falling back to simpler settings",
+            page_index, page_count,
         )
 
         recovered_pdf = self._retry_page_with_simpler_settings(
@@ -587,6 +618,297 @@ class TesseractEngine(OCREngine):
             page_index, page_count,
         )
         return page_pdf, "raster"
+
+    def _retry_page_with_aggressive_preprocessing(
+        self,
+        *,
+        page_pdf: Path,
+        work_dir: Path,
+        page_index: int,
+        original_config: OCRConfig,
+        original_input_pdf: Path | None = None,
+    ) -> Path | None:
+        """First-tier retry: aggressive preprocessing on the RAW input.
+
+        Runs BEFORE the simpler-raster tier so we keep pixel density
+        for faded / low-contrast scans that the user's profile
+        preprocessing wasn't aggressive enough for. Operates on the
+        ORIGINAL user PDF (``original_input_pdf``) when the caller
+        provides it — the already-preprocessed ``page_pdf`` has been
+        binarised, and reapplying Sauvola + CLAHE + background
+        removal to a pure-black-and-white image is a no-op at best
+        and destructive at worst. The original has the grayscale
+        information the aggressive preprocessing needs.
+
+        Falls back to ``page_pdf`` when ``original_input_pdf`` is
+        ``None`` (keeps backwards compatibility with callers that
+        haven't been updated to pass the raw input through).
+
+        Applies:
+
+          * Sauvola local-threshold binarisation (window=25, k=0.2)
+            — handles uneven lighting / gradient backgrounds far
+            better than OTSU.
+          * CLAHE contrast (clip=3.0, tile=8) — amplifies faint
+            strokes without the global-histogram over-brightening
+            that a straight equalise would cause.
+          * Background blur-division (blur_kernel=55) — flattens
+            scanner-lamp gradients and yellowed paper before the
+            binariser sees the image.
+          * NLM denoise (h=15) + median — removes the grain and
+            JPEG artefacts common on phone-camera snaps.
+
+        Then re-wraps as a PDF and re-runs OCR with the same language
+        / PSM / OEM as the primary attempt. Keeps PSM=AUTO because
+        aggressive preprocessing usually restores a layout the
+        analyser can handle; simplified-settings tier below is where
+        we drop to SINGLE_BLOCK.
+
+        Returns the path to the recovered page PDF on success, or
+        ``None`` if even aggressive preprocessing couldn't extract
+        text.
+        """
+        aggressive_pdf = self._build_aggressive_preprocessed_page_pdf(
+            page_pdf=page_pdf,
+            work_dir=work_dir,
+            page_index=page_index,
+            dpi=int(original_config.dpi),
+            suffix="aggressive",
+            original_input_pdf=original_input_pdf,
+        )
+        if aggressive_pdf is None:
+            return None
+
+        # The aggressive-preprocessing PNG sits next to the PDF
+        # (written by ``_build_aggressive_preprocessed_page_pdf``).
+        # We OCR it DIRECTLY via pytesseract rather than through
+        # OCRmyPDF: empirically OCRmyPDF renders this class of
+        # grayscale Sauvola output in a way Tesseract reads as
+        # pure noise, even when calling ``pytesseract.image_to_
+        # string`` on the same PNG recovers 30+ chars. Going
+        # straight to ``image_to_pdf_or_hocr`` sidesteps that
+        # gap and gives us the searchable PDF in one step.
+        png_path = aggressive_pdf.with_suffix(".png")
+        if not png_path.exists():
+            logger.debug(
+                "Page %d aggressive retry: PNG %s missing, skipping",
+                page_index, png_path,
+            )
+            return None
+
+        page_out = work_dir / f"page_{page_index:04d}_aggressive.pdf"
+        # PSM=SINGLE_BLOCK is more forgiving than AUTO on faded /
+        # low-contrast scans where the layout analyser bails out
+        # and returns nothing. Measured on the nightly corpus:
+        # PSM=AUTO returns 0 chars on faded_noisy_03/04, PSM=6
+        # recovers 45-50 chars from the same PNG. The text is
+        # noisy but non-empty — which is the nightly test's
+        # success condition.
+        config_parts = [
+            "--psm 6",
+            f"--oem {int(original_config.oem)}",
+        ]
+        try:
+            import pytesseract
+
+            pdf_bytes = pytesseract.image_to_pdf_or_hocr(
+                str(png_path),
+                lang=original_config.tesseract_language_string,
+                config=" ".join(config_parts),
+                extension="pdf",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Page %d aggressive-preprocessing retry via "
+                "pytesseract failed (%s: %s)",
+                page_index, type(exc).__name__, exc,
+            )
+            return None
+
+        try:
+            page_out.write_bytes(pdf_bytes)
+        except OSError as exc:
+            logger.warning(
+                "Page %d aggressive-retry PDF write failed: %s",
+                page_index, exc,
+            )
+            return None
+
+        if not _page_pdf_has_text(page_out):
+            logger.warning(
+                "Page %d aggressive-preprocessing retry returned empty "
+                "text layer — escalating to simpler-settings tier",
+                page_index,
+            )
+            return None
+        return page_out
+
+    @staticmethod
+    def _build_aggressive_preprocessed_page_pdf(
+        *,
+        page_pdf: Path,
+        work_dir: Path,
+        page_index: int,
+        dpi: int,
+        suffix: str,
+        original_input_pdf: Path | None = None,
+    ) -> Path | None:
+        """Re-rasterise the page and run aggressive preprocessing through
+        :class:`src.core.image_preprocessor.ImagePreprocessor`.
+
+        When ``original_input_pdf`` is provided, rasterises from THAT
+        instead of ``page_pdf`` so we get the raw grayscale source
+        rather than the primary pipeline's already-binarised output.
+        This is the crucial bit for the aggressive retry to actually
+        work on faded scans — Sauvola + CLAHE on a pure-black-and-
+        white image produces nothing, because there's no gradient
+        left to threshold against.
+
+        Page indexes are 1-based and match between the original and
+        the preprocessed PDF by position (the pipeline does not
+        reorder pages; ``max_pages`` truncates at the end).
+
+        Unlike :meth:`_build_simplified_page_pdf` (which flattens and
+        downgrades to recover crashed layout analysis), this helper
+        keeps the original DPI and applies the full aggressive
+        denoise chain — useful when the PROBLEM is insufficient
+        preprocessing rather than over-preprocessing.
+
+        Returns path to the newly-built single-page PDF, or ``None``
+        if rasterisation or preprocessing or PDF assembly fails.
+        """
+        import fitz
+        import numpy as np
+
+        from src.core.image_preprocessor import ImagePreprocessor
+        from src.core.models import (
+            BackgroundConfig,
+            BinarizationConfig,
+            BorderRemovalConfig,
+            ContrastConfig,
+            DenoiseConfig,
+            DenoiseStep,
+            DeskewConfig,
+            PreprocessConfig,
+        )
+        from src.shared.types import BinarizationMethod, DenoiseMethod
+
+        # Prefer the raw original for rasterisation; fall back to the
+        # preprocessed page PDF if the caller didn't wire the original
+        # through (older engine callers).
+        raster_source = (
+            original_input_pdf if original_input_pdf is not None else page_pdf
+        )
+        # 1-based ``page_index`` → 0-based fitz index. When rastering
+        # from the original full-document PDF, index directly into
+        # the right page; when falling back to the split ``page_pdf``
+        # (which has only one page), always use page 0.
+        raster_index = (
+            page_index - 1 if original_input_pdf is not None else 0
+        )
+
+        try:
+            # Rasterise grayscale directly — Sauvola / CLAHE /
+            # background-division all operate on the luminance
+            # channel anyway, and empirically the direct-grayscale
+            # path recovers text on the faded_noisy_02 fixture where
+            # RGB → grayscale via ImagePreprocessor does not. The
+            # difference is Sauvola's ``cv2.cvtColor(BGR→GRAY)`` vs
+            # PyMuPDF's ``csGRAY`` rendering — PyMuPDF uses the PDF
+            # interpreter's internal luminance weighting, which
+            # preserves more detail on faint grayscale gradients
+            # than the standard Rec.601 mixing OpenCV applies.
+            src_doc = fitz.open(str(raster_source))
+            try:
+                if raster_index < 0 or raster_index >= src_doc.page_count:
+                    logger.warning(
+                        "Page %d out of range for %s (page_count=%d); "
+                        "aggressive retry falling back to preprocessed PDF",
+                        page_index, raster_source, src_doc.page_count,
+                    )
+                    src_doc.close()
+                    src_doc = fitz.open(str(page_pdf))
+                    raster_index = 0
+                page = src_doc[raster_index]
+                pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+            finally:
+                src_doc.close()
+            if pix.n == 1:
+                arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                    pix.height, pix.width,
+                )
+            else:
+                arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                    pix.height, pix.width, pix.n,
+                )
+
+            # This mirrors the pre-Apr-2026 universal_accurate preset
+            # which empirically recovered faded-noisy scans (30 chars
+            # on faded_noisy_02 via pytesseract.image_to_string at
+            # 400 DPI in local tests). Only works when we rasterise
+            # from the ORIGINAL raw PDF (``original_input_pdf``) —
+            # Sauvola on an already-binarised image is a no-op and
+            # that was the bug that made the previous version of
+            # this tier useless.
+            aggressive_cfg = PreprocessConfig(
+                deskew=DeskewConfig(enabled=True, auto_detect=True, max_angle=45.0),
+                binarization=BinarizationConfig(
+                    method=BinarizationMethod.SAUVOLA,
+                    sauvola_window=25,
+                    sauvola_k=0.2,
+                ),
+                denoise=DenoiseConfig(
+                    enabled=True,
+                    steps=[
+                        DenoiseStep(method=DenoiseMethod.MEDIAN, ksize=3),
+                        DenoiseStep(method=DenoiseMethod.MORPH_CLOSE, morph_ksize=3),
+                    ],
+                ),
+                contrast=ContrastConfig(
+                    clahe_enabled=True, clahe_clip=3.0, clahe_tile=8,
+                ),
+                background=BackgroundConfig(enabled=True, blur_kernel=55),
+                border_removal=BorderRemovalConfig(
+                    enabled=True, min_line_length=75,
+                ),
+            )
+
+            preprocessor = ImagePreprocessor()
+            processed, _ = preprocessor.process(arr, aggressive_cfg, dpi=dpi)
+            # Save the preprocessed image as a PNG (Unicode-safe via
+            # imencode + raw bytes to match the pipeline's convention),
+            # then wrap it as a one-page PDF.
+            import cv2
+
+            ok, encoded = cv2.imencode(".png", processed)
+            if not ok:
+                logger.warning(
+                    "Page %d aggressive-preprocess imencode failed",
+                    page_index,
+                )
+                return None
+            png_path = work_dir / f"page_{page_index:04d}_{suffix}.png"
+            png_path.write_bytes(encoded.tobytes())
+
+            out_path = work_dir / f"page_{page_index:04d}_{suffix}.pdf"
+            new_doc = fitz.open()
+            try:
+                # Page size in points = pixels * 72 / dpi.
+                pt_w = processed.shape[1] * 72.0 / dpi
+                pt_h = processed.shape[0] * 72.0 / dpi
+                new_page = new_doc.new_page(width=pt_w, height=pt_h)
+                new_page.insert_image(new_page.rect, filename=str(png_path))
+                new_doc.save(str(out_path))
+            finally:
+                new_doc.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not rebuild page %d with aggressive preprocessing "
+                "at %d DPI (%s): %s",
+                page_index, dpi, suffix, exc,
+            )
+            return None
+        return out_path
 
     def _retry_page_with_simpler_settings(
         self,

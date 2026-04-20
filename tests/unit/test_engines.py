@@ -41,17 +41,17 @@ class TestOCRConfigEngineField:
         from src.core.models import ProfileData
 
         profile = ProfileData(name="test")
-        profile.ocr.engine = OCREngineKind.GOT_OCR2
+        profile.ocr.engine = OCREngineKind.TESSERACT
         d = profile.to_dict()
-        assert d["ocr"]["engine"] == "got_ocr2"
+        assert d["ocr"]["engine"] == "tesseract"
 
     def test_engine_deserializes_from_dict(self) -> None:
         from src.core.models import ProfileData
 
         original = ProfileData(name="test")
-        original.ocr.engine = OCREngineKind.GOT_OCR2
+        original.ocr.engine = OCREngineKind.TESSERACT
         restored = ProfileData.from_dict(original.to_dict())
-        assert restored.ocr.engine is OCREngineKind.GOT_OCR2
+        assert restored.ocr.engine is OCREngineKind.TESSERACT
 
 
 # ---------------------------------------------------------------------------
@@ -70,30 +70,10 @@ class TestRegistry:
         b = get_engine(OCREngineKind.TESSERACT)
         assert a is b
 
-    def test_got_ocr_resolves_but_reports_unavailable(self) -> None:
-        # Module is registered but torch/transformers + weights are not
-        # installed by default, so the engine must self-report as
-        # unavailable with an actionable hint.
-        engine = get_engine(OCREngineKind.GOT_OCR2)
-        assert engine.kind is OCREngineKind.GOT_OCR2
-        ok, msg = engine.is_available()
-        assert ok is False
-        assert msg  # non-empty Russian hint
-
-    def test_list_engines_includes_all_kinds(self) -> None:
+    def test_list_engines_includes_tesseract(self) -> None:
         listing = list_engines()
         kinds = [item[0] for item in listing]
         assert OCREngineKind.TESSERACT in kinds
-        assert OCREngineKind.GOT_OCR2 in kinds
-
-    def test_list_engines_marks_unavailable(self) -> None:
-        listing = list_engines()
-        got_entry = next(item for item in listing if item[0] is OCREngineKind.GOT_OCR2)
-        # GOT-OCR2 engine module isn't shipped yet → must be marked
-        # unavailable with a non-empty hint message.
-        _, _name, available, msg = got_entry
-        assert available is False
-        assert len(msg) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -196,21 +176,23 @@ class TestTesseractEngine:
         assert events[0] == (0, 1, "ocr")
         assert events[-1] == (1, 1, "ocr")
 
-    def test_failing_page_is_retried_with_simpler_settings(
+    def test_failing_page_is_retried_with_aggressive_preprocessing(
         self, tmp_path: Path
     ) -> None:
         """When a page crashes on primary settings, the engine MUST
-        retry that page with simpler settings before giving up.
+        first retry with aggressive preprocessing at the original DPI
+        (Sauvola + CLAHE 3.0 + background removal + NLM) before
+        dropping to the simpler-settings tier.
 
         User requirement: every page must end up with a text layer —
         no silent "kept as raster" for pages the user expects to
-        search. The retry uses a lower DPI, grayscale raster, and
-        PSM=SINGLE_BLOCK; those settings rescue the layout-crash
-        cases that the primary run can't handle.
+        search. The aggressive retry targets faded / noisy scans
+        where the user's profile preprocessing wasn't aggressive
+        enough; the subsequent simpler-settings retry targets
+        layout-crash cases where the problem is too MUCH pixel
+        density.
         """
         import fitz
-
-        from src.shared.types import PSM
 
         engine = TesseractEngine()
 
@@ -224,6 +206,7 @@ class TestTesseractEngine:
 
         out = tmp_path / "out.pdf"
         call_log: list[tuple[str, int]] = []
+        aggressive_called = [0]
 
         def _write_text_pdf(path):
             """Write a tiny PDF with a real text layer."""
@@ -236,17 +219,43 @@ class TestTesseractEngine:
                 d.close()
 
         def _fake_run(opts):
-            """Fail on page 2 primary attempt; succeed everywhere else."""
+            """Fail on page 2 primary attempt; succeed everywhere else.
+            The aggressive retry no longer goes through run_ocrmypdf —
+            it uses pytesseract.image_to_pdf_or_hocr directly — so
+            run_ocrmypdf is NEVER called on the ``*_aggressive.pdf``
+            name and the fake's job is just to fail once on the
+            failing page."""
             name = opts.input_file.name
             call_log.append((name, opts.psm))
-            # page_0002.pdf is the original split for page 2 — crash it.
-            # page_0002_simpler.pdf is the retry; let it succeed.
             if name == "page_0002.pdf":
                 raise RuntimeError("simulated Tesseract layout crash")
             _write_text_pdf(opts.output_file)
 
+        def _fake_image_to_pdf(*args, **kwargs):
+            """Aggressive retry's direct pytesseract call. Return a
+            minimal 1-page PDF with a text layer so the retry is
+            recorded as a successful recovery."""
+            aggressive_called[0] += 1
+            d = fitz.open()
+            try:
+                page = d.new_page(width=200, height=200)
+                page.insert_text(
+                    (10, 50), "aggressive recovery", fontsize=12,
+                )
+                buf = d.tobytes()
+            finally:
+                d.close()
+            return buf
+
         with patch.object(engine, "is_available", return_value=(True, "")), \
-             patch("src.application.engines.tesseract_engine.run_ocrmypdf", side_effect=_fake_run):
+             patch(
+                 "src.application.engines.tesseract_engine.run_ocrmypdf",
+                 side_effect=_fake_run,
+             ), \
+             patch(
+                 "pytesseract.image_to_pdf_or_hocr",
+                 side_effect=_fake_image_to_pdf,
+             ):
             results = engine.run(
                 preprocessed_pdf=in_pdf,
                 output_pdf=out,
@@ -257,17 +266,14 @@ class TestTesseractEngine:
         assert len(results) == 3
         assert out.exists()
 
-        # A simplified-settings retry must have been issued for the
-        # failing page (the entry we created collides only on name).
-        retry_entries = [entry for entry in call_log if "simpler" in entry[0]]
-        assert retry_entries, (
-            "Expected a simplified-settings retry for the failing "
-            f"page, but call log was {call_log!r}"
-        )
-        # Retry must use PSM=SINGLE_BLOCK (the simpler layout).
-        retry_entry = retry_entries[0]
-        assert retry_entry[1] == int(PSM.SINGLE_BLOCK), (
-            f"Retry should use PSM=SINGLE_BLOCK, got psm={retry_entry[1]}"
+        # The aggressive-preprocessing retry must have been issued —
+        # pytesseract.image_to_pdf_or_hocr is called once per retry
+        # attempt, which should be exactly once (on the failing page 2).
+        assert aggressive_called[0] >= 1, (
+            "Expected the aggressive-preprocessing retry to invoke "
+            f"pytesseract.image_to_pdf_or_hocr at least once, but "
+            f"got {aggressive_called[0]} calls; run_ocrmypdf log was "
+            f"{call_log!r}"
         )
 
     def test_failing_page_retry_escalates_to_last_resort_tier(
@@ -315,8 +321,21 @@ class TestTesseractEngine:
                 return
             raise RuntimeError("simulated layout crash")
 
+        def _fake_image_to_pdf(*args, **kwargs):
+            """Aggressive retry goes through pytesseract directly.
+            Fail it by returning a minimal PDF without any text layer
+            so the engine escalates to the simpler-settings tier."""
+            d = fitz.open()
+            try:
+                d.new_page(width=200, height=200)
+                buf = d.tobytes()
+            finally:
+                d.close()
+            return buf
+
         with patch.object(engine, "is_available", return_value=(True, "")), \
-             patch("src.application.engines.tesseract_engine.run_ocrmypdf", side_effect=_fake_run):
+             patch("src.application.engines.tesseract_engine.run_ocrmypdf", side_effect=_fake_run), \
+             patch("pytesseract.image_to_pdf_or_hocr", side_effect=_fake_image_to_pdf):
             engine.run(
                 preprocessed_pdf=in_pdf,
                 output_pdf=out,

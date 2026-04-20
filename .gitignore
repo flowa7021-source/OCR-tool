@@ -56,6 +56,14 @@ resources/tessdata/*.bin
 resources/tesseract/*
 !resources/tesseract/.gitkeep
 
+# GOT-OCR 2.0 model weights + trust_remote_code scripts. Downloaded
+# to ``resources/models/got_ocr2/`` by ``.github/scripts/download_got_ocr2.py``
+# in the CI installer workflow and by the in-app "Download GOT-OCR 2.0"
+# action at runtime. Too big for git (~1.4 GB for model.safetensors
+# alone). The manifest + download script is the single source of truth;
+# regeneration is a one-command operation.
+resources/models/
+
 # Generated Windows icon
 resources/icons/app.ico
 
@@ -65,6 +73,13 @@ tests/test_data/output/
 
 # Local OCR input samples — per-developer test docs, not shipped
 inputs/
+
+# Benchmark outputs — ``scripts/benchmark_universal.py`` writes its
+# searchable PDF next to the input by default (``<pdf>.ocr.pdf``).
+# These are throwaway artefacts of a measurement run, not fixtures,
+# so keep them out of git regardless of which folder the input sits in.
+*.ocr.pdf
+inputs/*.ocr.pdf
 
 # Generated test fixtures — produced by tests/fixtures/generate_fixtures.py
 # and tests/fixtures/accuracy_corpus/generate.py on first test run, not

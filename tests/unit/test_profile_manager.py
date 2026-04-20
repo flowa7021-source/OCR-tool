@@ -20,12 +20,11 @@ def test_initialize_builtins_creates_all(manager: ProfileManager) -> None:
     names = {p.name for p in manager.list_profiles()}
     for expected in BUILTIN_NAMES:
         assert expected in names
-    # Bumped from 6 → 7 when ``quick_reliable`` was added as the
-    # low-risk fallback profile. Each bump requires care: a profile
-    # that doesn't work everywhere (e.g. GOT-OCR 2.0 based) should NOT
-    # live in BUILTIN_NAMES because then initialize_builtins writes it
-    # to disk on every fresh install.
-    assert len(BUILTIN_NAMES) == 7
+    # 6 built-in profiles after the GOT-OCR 2.0 removal (Apr 2026)
+    # pulled ``handwritten_mixed`` out. Adding a new profile means
+    # bumping this count so the "initialize_builtins wrote what we
+    # expected" contract stays pinned.
+    assert len(BUILTIN_NAMES) == 6
 
 
 def test_builtins_marked_builtin(manager: ProfileManager) -> None:

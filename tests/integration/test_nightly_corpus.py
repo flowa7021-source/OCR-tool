@@ -147,7 +147,12 @@ class TestNightlyCorpusMatrix:
             if empty_pages:
                 empty_page_failures.append((doc_path.name, empty_pages))
 
-        # Aggregate report — show ALL failures at once rather than first
+        # Aggregate report — show ALL failures at once rather than first.
+        # After the aggressive-preprocessing retry now uses
+        # pytesseract directly on the grayscale Sauvola output (bypassing
+        # OCRmyPDF's re-thresholding which destroyed the text on faded
+        # fixtures), every nightly fixture including faded_noisy_02/03/04
+        # recovers a non-empty text layer.
         assert not failures, (
             f"profile={profile_name} crashed on {len(failures)} corpus "
             f"docs:\n"

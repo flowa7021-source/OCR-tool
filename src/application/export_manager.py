@@ -13,14 +13,74 @@ re-run OCR.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from pathlib import Path
 
-from src.core.models import JobResult
+from src.core.models import JobResult, PageResult
 from src.shared.constants import UI_PAGE_NUM_FORMAT
 from src.shared.types import ExportFormat
 
 logger = logging.getLogger(__name__)
+
+
+def _mark_low_conf_words_txt(
+    page: PageResult, *, marker_open: str = "[?", marker_close: str = "?]",
+) -> str:
+    """Return ``page.text`` with every token from ``page.low_confidence_words``
+    wrapped in ``marker_open`` / ``marker_close``.
+
+    Uses word-boundary regex matching so only whole-word occurrences
+    are marked — ``с``-in-``с`` won't turn ``высокий`` into
+    ``вы[?с?]окий``. Falls back to ``page.text`` unchanged when the
+    low-conf list is empty (no-op fast path).
+
+    The default markers are plain ASCII so the annotated output is
+    still greppable / copy-pastable; callers that need alternative
+    delimiters can override both strings.
+    """
+    if not page.low_confidence_words or not page.text:
+        return page.text or ""
+    # Deduplicate + sort longest-first so a word that is a prefix of
+    # another doesn't win the match race (re.finditer is greedy but
+    # alternation order still matters for equal-length candidates).
+    unique = sorted(set(page.low_confidence_words), key=len, reverse=True)
+    alternation = "|".join(re.escape(w) for w in unique if w)
+    if not alternation:
+        return page.text
+    pattern = re.compile(rf"\b(?:{alternation})\b", re.UNICODE)
+    return pattern.sub(
+        lambda m: f"{marker_open}{m.group(0)}{marker_close}", page.text,
+    )
+
+
+def _split_for_docx_annotation(
+    page: PageResult,
+) -> list[tuple[str, bool]]:
+    """Return ``page.text`` as a list of ``(span, is_low_conf)`` tuples.
+
+    Used by :meth:`ExportManager.export_docx` to attach red font-colour
+    to the low-conf spans without reimplementing word-boundary
+    matching. Non-low-conf runs come through with ``is_low_conf=False``
+    and render in default document colour.
+    """
+    if not page.low_confidence_words or not page.text:
+        return [(page.text or "", False)]
+    unique = sorted(set(page.low_confidence_words), key=len, reverse=True)
+    alternation = "|".join(re.escape(w) for w in unique if w)
+    if not alternation:
+        return [(page.text, False)]
+    pattern = re.compile(rf"\b(?:{alternation})\b", re.UNICODE)
+    spans: list[tuple[str, bool]] = []
+    last = 0
+    for m in pattern.finditer(page.text):
+        if m.start() > last:
+            spans.append((page.text[last:m.start()], False))
+        spans.append((m.group(0), True))
+        last = m.end()
+    if last < len(page.text):
+        spans.append((page.text[last:], False))
+    return spans
 
 
 class ExportError(RuntimeError):
@@ -78,6 +138,8 @@ class ExportManager:
         job_result: JobResult,
         output_path: Path,
         encoding: str = "utf-8",
+        *,
+        annotate_low_conf: bool = False,
     ) -> Path:
         """Write the OCR text to a ``.txt`` file.
 
@@ -88,6 +150,12 @@ class ExportManager:
             job_result: Finished job with per-page text.
             output_path: Destination path.
             encoding: Text encoding; use ``"utf-8-sig"`` for a BOM.
+            annotate_low_conf: When True, wrap every word in
+                :attr:`PageResult.low_confidence_words` with ``[?...?]``
+                markers so the reader can spot uncertain tokens.
+                No-op on pages with no low-conf list (including the
+                default case where ``drop_low_conf_words`` already
+                filtered them out upstream).
 
         Returns:
             The path that was written.
@@ -101,7 +169,12 @@ class ExportManager:
             if page.error:
                 lines.append(f"[ERROR: {page.error}]")
             else:
-                lines.append(page.text or "")
+                body = (
+                    _mark_low_conf_words_txt(page)
+                    if annotate_low_conf
+                    else (page.text or "")
+                )
+                lines.append(body)
             lines.append("")
 
         text = "\n".join(lines).rstrip() + "\n"
@@ -173,7 +246,13 @@ class ExportManager:
         logger.info("Exported PDF: %s -> %s (%d bytes)", source, target, target.stat().st_size)
         return target
 
-    def export_docx(self, job_result: JobResult, output_path: Path) -> Path:
+    def export_docx(
+        self,
+        job_result: JobResult,
+        output_path: Path,
+        *,
+        annotate_low_conf: bool = False,
+    ) -> Path:
         """Write the OCR text to a ``.docx`` file.
 
         Each OCR page becomes a group of paragraphs followed by a page break.
@@ -181,6 +260,11 @@ class ExportManager:
         Args:
             job_result: Finished job.
             output_path: Destination ``.docx`` path.
+            annotate_low_conf: When True, words from
+                :attr:`PageResult.low_confidence_words` are rendered in
+                red so the reader can spot uncertain tokens without
+                scanning every character. No-op on pages with no
+                low-conf list.
 
         Returns:
             The path that was written.
@@ -190,12 +274,18 @@ class ExportManager:
         """
         try:
             from docx import Document  # type: ignore[import-not-found]
+            from docx.shared import RGBColor  # type: ignore[import-not-found]
         except ImportError as exc:
             raise ExportError(
                 "Экспорт в DOCX требует пакет python-docx"
             ) from exc
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        # Pure red for low-conf runs. Chosen for maximum contrast
+        # against the default black body text on every built-in Word
+        # theme; users who prefer a subtler highlight can adjust the
+        # paragraph style after export.
+        low_conf_rgb = RGBColor(0xCC, 0x00, 0x00)
 
         document = Document()
         pages = job_result.pages
@@ -204,6 +294,28 @@ class ExportManager:
             document.add_heading(heading, level=2)
             if page.error:
                 document.add_paragraph(f"[ERROR: {page.error}]")
+            elif annotate_low_conf and page.low_confidence_words:
+                # Split every paragraph into (span, is_low_conf)
+                # tuples and emit one run per tuple so only the
+                # uncertain tokens get the red colour.
+                for para in (page.text or "").split("\n\n"):
+                    text = para.strip("\n")
+                    if not text:
+                        continue
+                    paragraph = document.add_paragraph()
+                    # Build a proxy PageResult whose text is JUST this
+                    # paragraph so the helper only marks this scope.
+                    slice_page = PageResult(
+                        page_number=page.page_number,
+                        text=text,
+                        low_confidence_words=page.low_confidence_words,
+                    )
+                    for span, is_low in _split_for_docx_annotation(slice_page):
+                        if not span:
+                            continue
+                        run = paragraph.add_run(span)
+                        if is_low:
+                            run.font.color.rgb = low_conf_rgb
             else:
                 for para in (page.text or "").split("\n\n"):
                     text = para.strip("\n")

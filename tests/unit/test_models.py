@@ -71,10 +71,10 @@ def test_unknown_enum_value_in_profile_falls_back_to_default() -> None:
     when coercing enum members. ``target_type(value)`` actually raises
     ``ValueError`` when the value is hashable but not a member of the
     enum — the natural failure mode for a downgraded binary or a
-    hand-edited JSON (``"engine": "got_ocr3"``). The exception
-    propagated uncaught and the whole profile failed to load, which
-    in turn broke ``ProfileManager.get_current()`` and left the UI's
-    profile dropdown empty.
+    hand-edited JSON (``"engine": "some_unknown_engine"``). The
+    exception propagated uncaught and the whole profile failed to
+    load, which in turn broke ``ProfileManager.get_current()`` and
+    left the UI's profile dropdown empty.
 
     The new behaviour: unknown enum values are logged and dropped
     from the kwargs, so the dataclass falls back to its own default

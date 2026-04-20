@@ -185,3 +185,54 @@ class TestPreviewStep:
 
         with pytest.raises(ValidationError):
             preview_step(img, "no_such_stage", PreprocessConfig())
+
+
+class TestReturnPreBinarization:
+    """``process(return_pre_binarization=True)`` yields the grayscale
+    snapshot taken AFTER denoise / CLAHE / background-removal but
+    BEFORE binarisation — used by the per-word script disambiguator
+    to recover Latin-brand tokens lost at the binary layer."""
+
+    def test_returns_three_tuple(self) -> None:
+        from src.core.models import BinarizationConfig
+
+        img = _make_text_image()
+        cfg = PreprocessConfig(
+            binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
+        )
+        result = ImagePreprocessor().process(
+            img, cfg, return_pre_binarization=True,
+        )
+        assert len(result) == 3
+        binary, gray, angle = result
+        assert binary.ndim == 2
+        assert gray.ndim == 2
+        assert binary.dtype == np.uint8
+        assert gray.dtype == np.uint8
+        assert isinstance(angle, float)
+        # Dimensions must match — bboxes from image_to_data on the
+        # binary version must be reusable on the grayscale version.
+        assert binary.shape == gray.shape
+
+    def test_grayscale_has_more_unique_values_than_binary(self) -> None:
+        from src.core.models import BinarizationConfig
+
+        img = _make_text_image()
+        cfg = PreprocessConfig(
+            binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
+        )
+        binary, gray, _ = ImagePreprocessor().process(
+            img, cfg, return_pre_binarization=True,
+        )
+        # Binary image has ≤ 2 unique values (0, 255). Grayscale has
+        # many more — confirming we grabbed the snapshot BEFORE the
+        # thresholding step destroyed the tonal range.
+        assert len(np.unique(binary)) <= 2
+        assert len(np.unique(gray)) > 10
+
+    def test_default_return_preserves_two_tuple(self) -> None:
+        """Backwards compatibility — callers that don't pass the flag
+        still get the original (binary, angle) tuple."""
+        img = _make_text_image()
+        result = ImagePreprocessor().process(img, PreprocessConfig())
+        assert len(result) == 2

@@ -1,7 +1,7 @@
 """End-to-end tests: real preprocessing + mocked OCR engine + real export.
 
 These tests exercise the full vertical slice of the application short
-of the actual Tesseract / GOT-OCR2 inference call. We use a real PDF
+of the actual Tesseract inference call. We use a real PDF
 input (built on the fly with PyMuPDF), real OpenCV preprocessing, real
 PyMuPDF rasterisation, real text postprocessing, and the actual
 ExportManager — only the OCR-engine ``run()`` is replaced with a
@@ -77,9 +77,9 @@ def _build_test_pdf(path: Path, page_count: int = 3) -> Path:
 class _StubEngine(OCREngine):
     """OCR engine stub that returns deterministic text per page.
 
-    Mimics GOT-OCR2's behavior: pre-fills PageOCRResult with text and
-    confidence, lets the pipeline copy the source PDF as the "searchable"
-    output (since we don't actually OCR).
+    Pre-fills PageOCRResult with text + confidence and lets the
+    pipeline copy the source PDF as the "searchable" output (since
+    we don't actually OCR).
     """
 
     kind = OCREngineKind.TESSERACT
@@ -394,16 +394,18 @@ class TestE2EQueue:
 
 class TestE2EEngineDispatch:
     def test_pipeline_uses_selected_engine(self, tmp_path: Path) -> None:
-        """OCRConfig.engine actually drives which engine.run() the pipeline calls."""
+        """OCRConfig.engine actually drives which engine.run() the pipeline calls.
+
+        With only Tesseract as a registered engine there's no alternative
+        to dispatch TO, but this test still pins the dispatch contract —
+        ``get_engine`` is called with the enum from the profile, and its
+        return value's ``run`` produces the text we see in the result.
+        Any future second engine can piggy-back on this assertion.
+        """
         input_pdf = _build_test_pdf(tmp_path / "doc.pdf", page_count=1)
         out_pdf = tmp_path / "doc_ocr.pdf"
 
-        # Two distinguishable stubs
         tess_stub = _StubEngine(page_texts=["TESSERACT_PATH"])
-        got_stub = _StubEngine(page_texts=["GOT_PATH"])
-
-        def pick(kind):
-            return got_stub if kind is OCREngineKind.GOT_OCR2 else tess_stub
 
         pipeline = OCRPipeline(
             preprocessor=ImagePreprocessor(),
@@ -413,8 +415,7 @@ class TestE2EEngineDispatch:
             ).TesseractWrapper(),
         )
 
-        with patch("src.application.engines.get_engine", side_effect=pick):
-            # Run with Tesseract first
+        with patch("src.application.engines.get_engine", return_value=tess_stub):
             profile_t = _profile()
             profile_t.ocr.engine = OCREngineKind.TESSERACT
             r1 = pipeline.run(
@@ -427,22 +428,6 @@ class TestE2EEngineDispatch:
             assert r1.status is JobStatus.COMPLETED
             assert "TESSERACT_PATH" in r1.pages[0].text
             assert tess_stub.run_called == 1
-            assert got_stub.run_called == 0
-
-            # Now run with GOT-OCR2
-            profile_g = _profile()
-            profile_g.ocr.engine = OCREngineKind.GOT_OCR2
-            out2 = tmp_path / "doc2_ocr.pdf"
-            r2 = pipeline.run(
-                OCRJobConfig(
-                    input_path=str(input_pdf),
-                    output_path=str(out2),
-                    profile=profile_g,
-                )
-            )
-            assert r2.status is JobStatus.COMPLETED
-            assert "GOT_PATH" in r2.pages[0].text
-            assert got_stub.run_called == 1
 
 
 # ---------------------------------------------------------------------------
@@ -473,8 +458,8 @@ class TestE2ECLI:
             timeout=30,
         )
         assert result.returncode == 0, result.stderr
-        # All five built-in profiles should appear
-        for name in ("universal_accurate", "default", "low_quality_scan", "contracts_ru", "english_text", "handwritten_mixed"):
+        # All built-in profiles should appear
+        for name in ("universal_accurate", "default", "low_quality_scan", "contracts_ru", "english_text", "quick_reliable"):
             assert name in result.stdout, f"missing {name} in {result.stdout!r}"
 
     def test_list_profiles_survives_cp1252_stdio(self, tmp_path: Path) -> None:

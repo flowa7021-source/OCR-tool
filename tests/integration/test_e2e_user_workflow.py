@@ -174,10 +174,9 @@ class TestMultiPageRussianContract:
 class TestAllBundledProfilesRealOCR:
     """For each profile in ``profiles/*.json``, run real OCR on a
     Russian input and verify the profile genuinely produces
-    recognisable text. ``universal_accurate`` and ``handwritten_mixed``
-    are skipped: universal runs at 600 DPI and adds multi-minute wall
-    time; handwritten_mixed needs the GOT-OCR 2.0 model which isn't
-    bundled in test envs.
+    recognisable text. ``universal_accurate`` is skipped here —
+    it runs at 500+ DPI and adds multi-minute wall time; a
+    dedicated test below caps its DPI for CI affordability.
 
     This is how we'd have caught the ``_assemble_pdf`` DPI bug:
     every profile (except NONE-binarization ones) was producing
@@ -193,11 +192,8 @@ class TestAllBundledProfilesRealOCR:
             "low_quality_scan",
             # ``english_text`` uses eng-only — tested below in a
             # separate English-text parametrisation.
-            # ``universal_accurate`` uses 600 DPI — too slow for CI
+            # ``universal_accurate`` uses 500+ DPI — too slow for CI
             # as a parametrised test; dedicated test below caps DPI.
-            # ``handwritten_mixed`` uses GOT-OCR 2.0 — needs the
-            # ~580 MB model; covered by test_e2e_got_ocr2.py with
-            # a stubbed engine.
         ],
     )
     def test_profile_produces_russian_text(

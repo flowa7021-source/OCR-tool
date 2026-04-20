@@ -24,6 +24,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import sys
 import time
@@ -92,11 +93,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--check-engine",
         metavar="KIND",
         help=(
-            "Проверить доступность OCR-движка (``tesseract`` или "
-            "``got_ocr2``) и завершить работу. Exit 0 — движок готов, "
-            "exit 1 — недоступен (причина выводится в stderr). "
-            "Используется CI-smoke тестом, чтобы поймать сломанный "
-            "HTR-бандл до релиза."
+            "Проверить доступность OCR-движка (``tesseract``) и "
+            "завершить работу. Exit 0 — движок готов, exit 1 — "
+            "недоступен (причина выводится в stderr). Используется "
+            "CI-smoke тестом, чтобы поймать сломанный бандл до релиза."
         ),
     )
     p.add_argument(
@@ -212,9 +212,18 @@ def process_single(
     except Exception:  # noqa: BLE001
         autosave_interval = 0
 
+    # Load the ground-truth ИНН/ОГРН catalog used by the postprocess
+    # step. Silent no-op when the directory is absent.
+    try:
+        from src.core.doc_catalog import load_default_catalog
+
+        _catalog = load_default_catalog()
+    except Exception:  # noqa: BLE001
+        _catalog = None
+
     pipeline = OCRPipeline(
         preprocessor=ImagePreprocessor(),
-        postprocessor=TextPostprocessor(),
+        postprocessor=TextPostprocessor(catalog=_catalog),
         tesseract=tesseract,
         progress_callback=_progress,
         autosave_interval_pages=autosave_interval,
@@ -343,13 +352,22 @@ def process_batch(
 
 
 def check_engine(kind_name: str) -> int:
-    """Probe an OCR engine's availability and exit accordingly.
+    """Probe an OCR engine's availability — DEEP check — and exit.
 
-    Stage-gate hook for the build-installer smoke test: catches the
-    "bundle is missing a transitive dep" class of bugs (torchvision,
-    verovio, einops, accelerate) BEFORE the installer ships, rather
-    than at first user launch. Returns 0 on success, 1 on failure;
-    the reason is written to stderr so CI logs capture it.
+    Stage-gate hook for the build-installer smoke test: catches a
+    broken bundle before the installer ships rather than at first
+    user launch. Returns 0 on success, 1 on failure; the reason is
+    written to stderr so CI logs capture it.
+
+    Two layers of verification:
+
+      1. ``engine.is_available()`` — surface check: tesseract
+         binary discoverable on PATH, tessdata directory complete.
+      2. If the engine exposes a private ``_load_model()`` method,
+         call it — gives future engines a place to do any expensive
+         one-time init as part of the smoke probe. Tesseract doesn't
+         have one, so today this is a no-op and only the
+         ``is_available`` surface check runs.
     """
     from src.application.engines.registry import get_engine
     from src.shared.types import OCREngineKind
@@ -369,11 +387,33 @@ def check_engine(kind_name: str) -> int:
         print(f"Движок '{kind.value}' не зарегистрирован: {exc}", file=sys.stderr)
         return 1
     ok, msg = engine.is_available()
-    if ok:
+    if not ok:
+        print(f"FAIL: {engine.name} недоступен — {msg}", file=sys.stderr)
+        return 1
+
+    # Deep check: actually TRY to load the model. Catches bundle
+    # defects that pass the surface probe (see docstring above).
+    loader = getattr(engine, "_load_model", None)
+    if callable(loader):
+        try:
+            loader()
+        except Exception as exc:  # noqa: BLE001 — any failure = unusable
+            print(
+                f"FAIL: {engine.name} прошёл is_available, но "
+                f"загрузка модели упала: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+        # Release the weights so the probe doesn't leave ~580 MB
+        # of RAM held by the smoke-test shell.
+        with contextlib.suppress(Exception):
+            engine.unload()
+        print(
+            f"OK: {engine.name} готов (is_available + model load OK)"
+        )
+    else:
         print(f"OK: {engine.name} готов к использованию")
-        return 0
-    print(f"FAIL: {engine.name} недоступен — {msg}", file=sys.stderr)
-    return 1
+    return 0
 
 
 def list_profiles() -> int:

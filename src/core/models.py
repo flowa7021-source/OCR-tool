@@ -53,6 +53,33 @@ class DeskewConfig:
 
 
 @dataclass
+class AutoRotateConfig:
+    """Coarse page-orientation detection (90 / 180 / 270°).
+
+    Runs before :class:`DeskewConfig`. Where deskew fixes the ±5°
+    tilt of a scanned page, this fixes the "scanner ate the paper
+    sideways" class of errors in 90° increments — a common failure
+    mode on landscape documents fed through a portrait-oriented
+    sheet feeder, or phone-camera snaps that come out rotated.
+
+    Attributes:
+        enabled: Whether to call Tesseract's OSD and rotate. Cheap
+            (~50 ms per page) and safe — the orientation module
+            only rotates when OSD reports confidence above
+            :attr:`min_confidence`; below that it leaves the image
+            untouched.
+        min_confidence: Tesseract OSD ``Orientation confidence``
+            floor. Default ``1.0`` matches
+            :data:`src.core.orientation_detector.MIN_ORIENTATION_CONFIDENCE`
+            and empirically excludes the random-guess regime for
+            logo-only / stamp-only / blank pages.
+    """
+
+    enabled: bool = True
+    min_confidence: float = 1.0
+
+
+@dataclass
 class DewarpConfig:
     """Page dewarping (cubic sheet model via page-dewarp)."""
 
@@ -136,6 +163,7 @@ class BorderRemovalConfig:
 class PreprocessConfig:
     """Complete preprocessing pipeline configuration."""
 
+    auto_rotate: AutoRotateConfig = field(default_factory=AutoRotateConfig)
     deskew: DeskewConfig = field(default_factory=DeskewConfig)
     dewarp: DewarpConfig = field(default_factory=DewarpConfig)
     binarization: BinarizationConfig = field(default_factory=BinarizationConfig)
@@ -228,6 +256,124 @@ class OCRConfig:
     #: with its ``drop_low_conf_words=True``. No effect when
     #: ``drop_low_conf_words=False``.
     soft_rescue_dropped_words: bool = False
+    #: When ``drop_low_conf_words`` is on, additionally redact the
+    #: ENTIRE layout block (as identified by Tesseract's ``block_num``
+    #: column) whenever the block is majority-noise. Catches stamp /
+    #: signature / fine-print-template regions where even the individual
+    #: above-threshold words are unreliable because the whole zone was
+    #: mis-analysed by Tesseract's layout stage. Off by default to
+    #: keep behaviour byte-exact for profiles that haven't opted in;
+    #: ``quick_reliable`` turns it on.
+    redact_noisy_blocks: bool = False
+    #: When True, :class:`confidence_threshold` becomes a *nominal*
+    #: value that is adapted per page based on that page's mean
+    #: confidence:
+    #:
+    #:   * page mean_conf ≥ 90 % → effective threshold lowered to
+    #:     ``min(nominal, 40)`` — the page is clean, keep borderline
+    #:     words that the user clearly wants surfaced.
+    #:   * page mean_conf < 70 % → effective threshold raised to
+    #:     ``max(nominal, 70)`` — the page is noisy, filter harder so
+    #:     the user-facing text doesn't drown in low-conf guesses.
+    #:   * otherwise → nominal threshold.
+    #:
+    #: Fixes the "I have to re-tune ``confidence_threshold`` in the
+    #: profile for every different document" workflow: the number now
+    #: auto-shifts with the page's actual OCR quality. Off by default
+    #: for backwards-compatibility; profiles that want the behaviour
+    #: opt in explicitly.
+    adaptive_confidence_threshold: bool = False
+    #: Per-word script disambiguation for mixed-script tokens.
+    #:
+    #: After the main OCR pass, every word classified as "mixed"
+    #: script (contains both a Cyrillic-exclusive letter AND a
+    #: Latin-exclusive letter — Tesseract picked the wrong script
+    #: for at least one glyph) is re-OCR'd on its own bounding box
+    #: with ``-l rus`` and ``-l eng`` separately. The version with
+    #: higher mean confidence wins and replaces the original word.
+    #:
+    #: Solves the "ИНV-12345" class of errors where the line-level
+    #: LSTM mixed scripts and neither the paragraph majority nor
+    #: the numeric-context heuristic in the postprocessor can
+    #: untangle it (both run AFTER we've lost the image).
+    #:
+    #: Off by default — the re-OCR path spawns one extra Tesseract
+    #: call per mixed word (typically <3 % of words on Russian
+    #: documents) and adds ~10-20 % to per-page latency. Profiles
+    #: that explicitly prioritise accuracy (``universal_accurate``)
+    #: opt in.
+    per_word_script_disambiguation: bool = False
+    #: Per-word CLAHE + unsharp-mask rescue. For each line-level
+    #: word with ``30 ≤ conf ≤ 70`` (the "faded ink, uncertain but
+    #: not pure noise" band), crop the bbox from the pre-
+    #: binarisation grayscale snapshot, apply aggressive CLAHE
+    #: (clip=8) + Gaussian unsharp-mask (σ=1.2), re-OCR with
+    #: ``--psm 8``, and swap in the result when it clears a 10-point
+    #: confidence lift. Cheap (~5 ms per candidate) and targeted at
+    #: the failure mode where Tesseract's single-pass preprocessing
+    #: was too conservative for a specific word. Off by default;
+    #: ``universal_accurate`` opts in.
+    per_word_clahe_rescue: bool = False
+    #: Per-word 2× bicubic upscale rescue. Same gate (30-70 conf
+    #: band) as the CLAHE rescue, applied independently. Targets
+    #: tiny-glyph text (stamp body lines, printed ticker-tape at
+    #: 10-15 px height) where the LSTM scores poorly because the
+    #: trained regime is 20-40 px per glyph. Costs one extra
+    #: Tesseract call on a 4× pixel crop, typically ~50 ms per
+    #: candidate. Stacks with ``per_word_clahe_rescue`` — CLAHE
+    #: runs first (cheap), upscale runs only on words the CLAHE
+    #: pass didn't lift.
+    per_word_upscale_rescue: bool = False
+    #: Fuzzy-match rescue against ``user-words.rus``. For each
+    #: line-level word in the 30-75 confidence band, find the
+    #: closest dictionary entry within Levenshtein distance 1
+    #: (short words) or 2 (≥ 6 char words) and swap in the
+    #: canonical spelling. No extra Tesseract call — pure
+    #: dict + edit-distance lookup, ~100× cheaper than re-OCR.
+    #: Catches the class of errors where the CROP was readable
+    #: but the LSTM's vocabulary wasn't biased strongly enough
+    #: at primary OCR time (``ИНЦ`` → ``ИНН``, ``Скаnia`` →
+    #: ``Scania``). Depends on ``use_user_dictionaries`` being
+    #: True so the same catalog file the DAWG loaded is
+    #: available at rescue time. Off by default;
+    #: ``universal_accurate`` opts in.
+    user_words_fuzzy_rescue: bool = False
+    #: Per-block PSM retry for low-confidence layout regions. After
+    #: the primary ``image_to_data`` pass, groups TSV rows by
+    #: ``block_num``, and for each block whose mean per-word
+    #: confidence sits below 60 % (and contains ≥ 3 words), re-OCRs
+    #: the block crop with ``--psm 6`` (SINGLE_BLOCK). Targets
+    #: invoice / transport-document tables where the default PSM=3
+    #: layout analyser fragments cells into multiple blocks and
+    #: collapses the per-word confidence. On successful recovery
+    #: (≥ 5-point mean-conf lift) the block's TSV entries are
+    #: replaced in-place so the downstream filter / rescue chain
+    #: sees the cleaner readings. Off by default;
+    #: ``universal_accurate`` opts in.
+    per_block_psm_retry: bool = False
+    #: Freeform ``-c key=value`` Tesseract parameters passed through
+    #: OCRmyPDF's ``tesseract_config`` kwarg. Profile authors use this
+    #: to toggle internal Tesseract behaviour that isn't exposed as a
+    #: first-class OCRConfig field. The recommended defaults for this
+    #: app (set by the builtin profile builders) are:
+    #:
+    #:   * ``preserve_interword_spaces=1`` — keeps the spaces between
+    #:     columns in tables and forms; without this Tesseract collapses
+    #:     variable-width gaps, destroying column alignment.
+    #:   * ``tessedit_do_invert=0`` — disables the built-in
+    #:     "maybe the page is white-on-black" detector. It triggers
+    #:     false positives on dark photos / scanner edge shadows and
+    #:     produces garbled output; our preprocessing already hands
+    #:     Tesseract a correctly-polarised binary image.
+    #:
+    #: Profile-specific keys (e.g. ``load_freq_dawg=0`` for contracts
+    #: with lots of ИНН / ОГРН digits, where the frequency dictionary
+    #: mis-corrects them) are set by the relevant builder method.
+    #:
+    #: Stored as ``dict[str, str]`` so every value round-trips through
+    #: JSON unchanged — Tesseract's CLI accepts all values as strings
+    #: anyway ("1" / "0", not ``True`` / ``False``).
+    extra_tesseract_params: dict[str, str] = field(default_factory=dict)
 
     @property
     def tesseract_language_string(self) -> str:
@@ -317,6 +463,38 @@ class PostprocessConfig:
     #: without a custom encoder. Accepted values: ``"disabled"``,
     #: ``"lenient"`` (default), ``"strict"``.
     garbage_filter_strictness: str = "lenient"
+    #: When True, replace Tesseract blocks whose mean per-word
+    #: confidence is below 40 % (and contain ≥ 3 words) with the
+    #: marker ``⟨рукописный текст⟩`` in the user-facing text.
+    #: Tesseract's Russian LSTM was trained on printed text and
+    #: returns long runs of low-confidence noise on handwritten
+    #: regions — the word-conf filter correctly drops that noise
+    #: but leaves a silent gap the user can't distinguish from
+    #: "nothing was there". The marker makes the gap explicit so
+    #: the user knows WHERE to type the handwritten content
+    #: manually. Off by default for backwards-compatibility;
+    #: ``universal_accurate`` opts in.
+    mark_suspect_handwritten_blocks: bool = False
+    #: When True, scan the OCR output for digit-only tokens that look
+    #: like Russian business identifiers (ИНН 10/12-digit, ОГРН 13/15-
+    #: digit) and replace a 1-edit-distance typo with the canonical
+    #: value from the known-good catalog. Only fires when the
+    #: ``TextPostprocessor`` was constructed with a non-empty
+    #: :class:`src.core.doc_catalog.DocCatalog` — otherwise it's a
+    #: silent no-op. Off by default so JSON-profile migrations from
+    #: pre-v3 schemas stay byte-exact; ``quick_reliable`` opts in.
+    validate_identifiers: bool = False
+    #: When True, normalise dates / amounts / phone numbers in the
+    #: OCR output to their canonical Russian business-document
+    #: forms: ``DD.MM.YYYY``, ``1 234,56`` (thousand-separated),
+    #: and ``+7 (XXX) XXX-XX-XX``. Also repairs single letter-digit
+    #: OCR errors on those entities (``12.O1.2O23`` → ``12.01.2023``,
+    #: ``+7 (495) 725-8O-62`` → ``+7 (495) 725-80-62``,
+    #: ``1 2З4,56`` → ``1 234,56``). Off by default for backwards-
+    #: compatibility; ``universal_accurate`` and ``quick_reliable``
+    #: opt in. Implemented in :mod:`src.core.entity_validators`;
+    #: skips tokens that aren't entity-shaped so prose isn't affected.
+    validate_entities: bool = False
     custom_rules: list[RegexRule] = field(default_factory=list)
 
 
@@ -329,7 +507,7 @@ class PostprocessConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 3
+PROFILE_SCHEMA_VERSION: int = 10
 
 
 @dataclass
@@ -407,17 +585,96 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         data["schema_version"] = 2
         version = 2
 
-    # v2 → v3: introduce ``soft_rescue_dropped_words``. Default is False
-    # on every existing profile so the filter behaviour is unchanged —
-    # ``universal_accurate`` flips it to True via its builder, not via
-    # a migration rewrite, to keep the migration minimal and reversible.
+    # v2 → v3: add the ``extra_tesseract_params`` dict. Old profiles
+    # without it get the empty default (no -c flags), which preserves
+    # their exact prior behaviour; the builtin profile builders seed
+    # the recommended defaults on freshly-installed machines.
     if version < 3:
         ocr = data.setdefault("ocr", {})
-        ocr.setdefault("soft_rescue_dropped_words", False)
+        ocr.setdefault("extra_tesseract_params", {})
         data["schema_version"] = 3
         version = 3
 
-    # Future migrations go here: `if version < 4: ...`
+    # v3 → v4: add ``auto_rotate`` to preprocessing AND the
+    # ``adaptive_confidence_threshold`` flag to OCR. Old profiles
+    # get ``auto_rotate.enabled=True`` (opt-in by default — cheap
+    # OSD call, fixes sideways pages) and
+    # ``adaptive_confidence_threshold=False`` (opt-OUT by default,
+    # preserving the exact filter behaviour pre-v4 profiles saw).
+    # Builtin profile builders still set ``True`` on the opinionated
+    # presets (``universal_accurate``, ``quick_reliable``).
+    if version < 4:
+        pre = data.setdefault("preprocess", {})
+        pre.setdefault(
+            "auto_rotate", {"enabled": True, "min_confidence": 1.0}
+        )
+        ocr = data.setdefault("ocr", {})
+        ocr.setdefault("adaptive_confidence_threshold", False)
+        ocr.setdefault("per_word_script_disambiguation", False)
+        data["schema_version"] = 4
+        version = 4
+
+    # v4 → v5: add ``mark_suspect_handwritten_blocks`` to post-
+    # processing. Old profiles get ``False`` (opt-out by default —
+    # preserves byte-identical output for pre-v5 profiles); the
+    # builtin builders turn it on for the opinionated presets
+    # (``universal_accurate``, ``quick_reliable``).
+    if version < 5:
+        post = data.setdefault("postprocess", {})
+        post.setdefault("mark_suspect_handwritten_blocks", False)
+        data["schema_version"] = 5
+        version = 5
+
+    # v5 → v6: add the per-word image-enhancement rescue flags.
+    # Old profiles default both to False to preserve byte-identical
+    # behaviour; builtin builders turn them on in
+    # ``universal_accurate``.
+    if version < 6:
+        ocr = data.setdefault("ocr", {})
+        ocr.setdefault("per_word_clahe_rescue", False)
+        ocr.setdefault("per_word_upscale_rescue", False)
+        data["schema_version"] = 6
+        version = 6
+
+    # v6 → v7: add ``user_words_fuzzy_rescue`` flag. Default False
+    # on migration — rescue is opt-in and universal_accurate's
+    # builder turns it on explicitly.
+    if version < 7:
+        ocr = data.setdefault("ocr", {})
+        ocr.setdefault("user_words_fuzzy_rescue", False)
+        data["schema_version"] = 7
+        version = 7
+
+    # v7 → v8: add ``validate_entities`` flag to postprocess.
+    # Default False — preserves byte-identical output for old
+    # profiles. Builtin builders turn it on for ``universal_accurate``
+    # and ``quick_reliable``.
+    if version < 8:
+        post = data.setdefault("postprocess", {})
+        post.setdefault("validate_entities", False)
+        data["schema_version"] = 8
+        version = 8
+
+    # v8 → v9: add ``per_block_psm_retry`` flag. Default False on
+    # migration; ``universal_accurate`` opts in.
+    if version < 9:
+        ocr = data.setdefault("ocr", {})
+        ocr.setdefault("per_block_psm_retry", False)
+        data["schema_version"] = 9
+        version = 9
+
+    # v9 → v10: add ``soft_rescue_dropped_words`` flag. Default False
+    # on every existing profile so the filter behaviour is unchanged —
+    # ``universal_accurate`` and ``quick_reliable`` flip it to True
+    # via their builders, not via a migration rewrite, to keep the
+    # migration minimal and reversible.
+    if version < 10:
+        ocr = data.setdefault("ocr", {})
+        ocr.setdefault("soft_rescue_dropped_words", False)
+        data["schema_version"] = 10
+        version = 10
+
+    # Future migrations go here: `if version < 11: ...`
 
     return data
 
@@ -603,9 +860,9 @@ def _convert_value(value: Any, target_type: Any) -> Any:
     # (value is hashable but not a member of the enum). A stored profile
     # that references an enum member the current build no longer knows —
     # for example, a downgraded binary or a hand-edited JSON with
-    # ``"engine": "got_ocr3"`` — would otherwise raise and leave the
-    # entire profile unloadable, dragging every user-saved config with
-    # it. Falling back to ``None`` lets the surrounding
+    # ``"engine": "some_unknown_engine"`` — would otherwise raise and
+    # leave the entire profile unloadable, dragging every user-saved
+    # config with it. Falling back to ``None`` lets the surrounding
     # :class:`dataclasses` default kick in (e.g. ``OCRConfig.engine``
     # reverts to ``OCREngineKind.TESSERACT``), which is the behaviour a
     # user expects from "my one odd field got reset" rather than "my

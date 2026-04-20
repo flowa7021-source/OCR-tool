@@ -297,3 +297,71 @@ class TestCyrillicLatinFixupMonoLookalikeWords:
         cfg = _noop_config(fix_cyrillic_latin_confusion=True)
         result = processor.process(text, cfg)
         assert result == text
+
+
+class TestCyrillicLatinFixupNumericContext:
+    """Numeric-context heuristic — product codes / invoice numbers
+    stay Latin even when the surrounding paragraph is Russian.
+
+    The paragraph-majority fallback on its own would wrongly flip
+    ``INV-12345`` to Cyrillic inside a Russian contract body. The
+    numeric-context check runs first: a word adjacent to digits
+    (via ``-``, ``_``, ``/``, ``.`` or at position-adjacent offset)
+    is treated as likely-Latin and the Cyrillic look-alike letters
+    are reverse-mapped to their Latin twins.
+    """
+
+    def test_hyphen_digit_suffix_keeps_latin(
+        self, processor: TextPostprocessor,
+    ) -> None:
+        # Russian-majority paragraph would normally swing "OCP"
+        # toward Cyrillic. With the adjacent "-12345" the numeric-
+        # context heuristic pins it to Latin.
+        text = (
+            "В нашем письме номер ОСР-12345 содержатся важные детали "
+            "и дополнительная информация"
+        )
+        cfg = _noop_config(fix_cyrillic_latin_confusion=True)
+        result = processor.process(text, cfg)
+        # The token before the digits was all Cyrillic look-alikes;
+        # post-heuristic it should be Latin "OCP".
+        assert "OCP-12345" in result, (
+            f"Numeric-context heuristic should keep the code Latin: {result!r}"
+        )
+
+    def test_dot_digit_prefix_keeps_latin(
+        self, processor: TextPostprocessor,
+    ) -> None:
+        text = "Подробнее смотри в пункте 5.INV данного документа здесь"
+        cfg = _noop_config(fix_cyrillic_latin_confusion=True)
+        result = processor.process(text, cfg)
+        # "INV" has Latin-exclusive V — stays Latin without the
+        # heuristic too. This exercises the "digit before" path.
+        assert "5.INV" in result
+
+    def test_space_separated_number_does_not_apply(
+        self, processor: TextPostprocessor,
+    ) -> None:
+        # Whitespace between the word and the number means the word
+        # is NOT inside a numeric code — paragraph majority wins.
+        # "ОСР" here has no Latin-exclusive evidence, paragraph is
+        # Russian → stays Cyrillic.
+        text = (
+            "Просто слово ОСР 12345 стоит отдельно от числа "
+            "в этом предложении на русском языке"
+        )
+        cfg = _noop_config(fix_cyrillic_latin_confusion=True)
+        result = processor.process(text, cfg)
+        assert "ОСР" in result, (
+            f"Isolated token with whitespace separator should follow "
+            f"paragraph majority: {result!r}"
+        )
+
+    def test_numeric_context_before_and_after(
+        self, processor: TextPostprocessor,
+    ) -> None:
+        # Digit on BOTH sides — unambiguous numeric context.
+        text = "Значение 77INV99 используется в продуктовом каталоге компании"
+        cfg = _noop_config(fix_cyrillic_latin_confusion=True)
+        result = processor.process(text, cfg)
+        assert "77INV99" in result

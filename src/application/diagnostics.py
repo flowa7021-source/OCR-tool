@@ -7,7 +7,7 @@ state:
     * rotating log file and any existing backups
     * ``settings.json`` (personal preferences, no credentials)
     * Python / OS / Qt version strings
-    * engine availability (tesseract install, got_ocr2 model presence)
+    * engine availability (Tesseract binary + language packs)
     * installed package versions for our declared dependencies
 
 User profiles live one directory over; since they may contain user
@@ -123,21 +123,6 @@ def _collect_tesseract_details() -> dict[str, object]:
         return {"error": str(exc)}
 
 
-def _collect_model_status() -> dict[str, object]:
-    try:
-        from src.infrastructure.model_manager import GOT_OCR2_SPEC, ModelManager
-
-        mgr = ModelManager()
-        return {
-            GOT_OCR2_SPEC.model_id: {
-                "available": mgr.is_available(GOT_OCR2_SPEC.model_id),
-                "path": str(mgr.model_dir(GOT_OCR2_SPEC.model_id)),
-            }
-        }
-    except Exception as exc:  # noqa: BLE001
-        return {"error": str(exc)}
-
-
 def build_diagnostics_zip(
     target: Path,
     *,
@@ -171,7 +156,6 @@ def build_diagnostics_zip(
                 "environment": _collect_environment(),
                 "engines": _collect_engine_status(),
                 "tesseract": _collect_tesseract_details(),
-                "models": _collect_model_status(),
             },
             ensure_ascii=False,
             indent=2,
@@ -209,7 +193,7 @@ def build_diagnostics_zip(
                 f"Generated: {datetime.now(UTC).isoformat()}\n\n"
                 "Contents:\n"
                 "  environment.json   — Python / OS / package versions,\n"
-                "                        Tesseract + GOT-OCR 2.0 availability\n"
+                "                        Tesseract binary + language-pack availability\n"
                 "  settings.json      — application preferences\n"
                 "  logs/*.log*        — rotating application log + backups\n"
                 "  logs/worker-*.log  — per-worker pipeline trace (PID-keyed)\n"

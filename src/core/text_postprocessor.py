@@ -16,7 +16,7 @@ import logging
 import re
 import unicodedata
 from re import Pattern
-from typing import Final
+from typing import Any, Final
 
 from src.core.garbage_filter import GarbageStrictness, filter_garbage_lines
 from src.core.models import PostprocessConfig, RegexRule
@@ -185,6 +185,10 @@ DEFAULT_ENGLISH_RULES: Final[list[tuple[str, str, str]]] = [
 #: Uppercase/lowercase Latin letters that have a visually identical
 #: Cyrillic counterpart. Keeps the mapping small and explicit — adding
 #: marginal look-alikes here (e.g. ``Q``→``Ԛ``) would over-correct.
+#: The mirror pair ``I``↔``І`` is intentionally omitted — Russian
+#: documents don't use ``І`` (pre-1918 orthography), so a Tesseract
+#: confusion there is vanishingly rare and the asymmetric digit/I
+#: collision is handled by the separate regex rule set.
 _LATIN_TO_CYRILLIC: Final[dict[str, str]] = {
     "A": "А", "B": "В", "C": "С", "E": "Е", "H": "Н",
     "K": "К", "M": "М", "O": "О", "P": "Р", "T": "Т",
@@ -209,6 +213,17 @@ _CYRILLIC_EXCLUSIVE: Final[frozenset[str]] = frozenset(
 _LATIN_EXCLUSIVE: Final[frozenset[str]] = frozenset(
     "DFGIJLNQRSUVWZ"
     "bdfghijklmnqrstuvwz"
+)
+
+#: Look-alike chars that carry NO script-exclusive evidence on their
+#: own. A word made entirely of these is a "pure look-alike" token —
+#: the word-level classifier would return ``mixed`` with no bias.
+#: This frozenset isn't used by the classifier directly but documents
+#: which characters the paragraph-majority / numeric-context tie-
+#: breakers are expected to handle.
+_LOOKALIKE_CHARS: Final[frozenset[str]] = frozenset(
+    "".join(_LATIN_TO_CYRILLIC)
+    + "".join(_LATIN_TO_CYRILLIC.values())
 )
 
 #: Tokens that must NOT be touched even if they look Cyrillic-majority.
@@ -246,7 +261,10 @@ def _classify_word_script(word: str) -> str:
 
 
 def _normalize_cyrillic_latin_word(
-    word: str, *, paragraph_majority: str | None = None,
+    word: str,
+    *,
+    paragraph_majority: str | None = None,
+    prefer_latin: bool = False,
 ) -> str:
     """Replace Latin ↔ Cyrillic look-alikes inside a single word.
 
@@ -256,16 +274,28 @@ def _normalize_cyrillic_latin_word(
 
       * ``cyr`` — swap every Latin look-alike → its Cyrillic twin
       * ``lat`` — swap every Cyrillic look-alike → its Latin twin
-      * ``mixed`` — when ``paragraph_majority`` is provided, the
-        paragraph-wide script wins (fixes short all-look-alike
-        tokens like ``Со`` in a Russian document). Without a
-        paragraph hint, leaves as-is.
+      * ``mixed`` — three resolution strategies, tried in order:
+          1. ``prefer_latin`` — set by the caller when the word sits
+             in a numeric context (adjacent to digits via
+             ``-``/``_``/``/`` or at position-adjacent offsets).
+             Product codes, invoice numbers and account IDs are
+             overwhelmingly Latin even in Russian documents; a
+             Russian-dominant paragraph majority would otherwise
+             wrongly flip e.g. ``INV-12345`` to Cyrillic.
+          2. ``paragraph_majority`` — the document's script
+             skew (fixes short all-look-alike tokens like ``Со``
+             in a Russian page that Tesseract split with a Latin
+             letter in the middle).
+          3. Leave untouched.
     """
     if _SKIP_TOKEN_RE.search(word):
         return word
     kind = _classify_word_script(word)
-    if kind == "mixed" and paragraph_majority is not None:
-        kind = paragraph_majority
+    if kind == "mixed":
+        if prefer_latin:
+            kind = "lat"
+        elif paragraph_majority is not None:
+            kind = paragraph_majority
     if kind == "cyr":
         return "".join(_LATIN_TO_CYRILLIC.get(ch, ch) for ch in word)
     if kind == "lat":
@@ -295,6 +325,16 @@ def _paragraph_script_majority(text: str) -> str | None:
     return None
 
 
+#: Numeric-context detector. Matches a digit optionally preceded by
+#: ``-``, ``_``, ``/`` or ``.`` — separators common in product codes,
+#: invoice numbers and account IDs. When a word chunk is immediately
+#: followed OR preceded by such a pattern, the chunk is treated as
+#: likely-Latin (``prefer_latin=True``) so e.g. ``INV-12345`` stays
+#: Latin even inside a Russian-majority document.
+_NUMERIC_AFTER_RE: Final[Pattern[str]] = re.compile(r"^[-_/.]?\d")
+_NUMERIC_BEFORE_RE: Final[Pattern[str]] = re.compile(r"\d[-_/.]?$")
+
+
 def normalize_cyrillic_latin_confusion(text: str) -> str:
     """Tokenise ``text``, normalise Latin/Cyrillic look-alikes per-word.
 
@@ -302,22 +342,50 @@ def normalize_cyrillic_latin_confusion(text: str) -> str:
     through unchanged. See :func:`_normalize_cyrillic_latin_word` for
     the per-word logic.
 
-    Stage F enhancement: short all-look-alike tokens (which the
-    per-word classifier refuses to touch because they carry no
-    script-exclusive evidence) inherit the paragraph-wide script
-    majority if one exists. This recovers words like ``Со`` and
-    ``Оно`` in predominantly-Russian pages that Tesseract split
-    with a Latin letter in the middle.
+    Two resolution strategies for ``mixed``-script tokens:
+      * Numeric-context heuristic — a word sitting next to digits
+        (``INV-12345``, ``7USD``, ``INN 7701234567``) is tilted
+        Latin-ward regardless of paragraph majority. Product codes,
+        invoice numbers and account IDs are overwhelmingly Latin in
+        Russian documents too, and the old paragraph-majority
+        strategy would wrongly flip them to Cyrillic.
+      * Paragraph majority — short all-look-alike tokens inherit
+        the document's script skew (fixes ``Со``, ``Оно`` etc. on
+        predominantly-Russian pages that Tesseract split with a
+        Latin letter in the middle).
+
+    The numeric-context check runs first so product codes win over
+    prose majority; falls back to paragraph majority for everything
+    else.
     """
     if not text:
         return text
     paragraph_majority = _paragraph_script_majority(text)
-    return _WORD_CHUNK_RE.sub(
-        lambda m: _normalize_cyrillic_latin_word(
-            m.group(0), paragraph_majority=paragraph_majority,
-        ),
-        text,
-    )
+    out: list[str] = []
+    last = 0
+    for m in _WORD_CHUNK_RE.finditer(text):
+        out.append(text[last:m.start()])
+        word = m.group(0)
+        # Look up to five chars in each direction for a digit /
+        # separator-digit pattern. Five is empirically enough for the
+        # "space + digit", "hyphen + number" and "dot + digit" shapes
+        # seen in real invoices without being expensive.
+        after = text[m.end():m.end() + 5]
+        before = text[max(0, m.start() - 5):m.start()]
+        numeric_context = bool(
+            _NUMERIC_AFTER_RE.match(after)
+            or _NUMERIC_BEFORE_RE.search(before)
+        )
+        out.append(
+            _normalize_cyrillic_latin_word(
+                word,
+                paragraph_majority=paragraph_majority,
+                prefer_latin=numeric_context,
+            )
+        )
+        last = m.end()
+    out.append(text[last:])
+    return "".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -337,8 +405,26 @@ class TextPostprocessor:
         :meth:`process` so dynamic reconfiguration is allowed.
     """
 
-    def __init__(self) -> None:
-        """Pre-compile the built-in rule sets for efficiency."""
+    def __init__(
+        self,
+        *,
+        catalog: Any = None,
+    ) -> None:
+        """Pre-compile the built-in rule sets for efficiency.
+
+        Args:
+            catalog: Optional :class:`src.core.doc_catalog.DocCatalog`
+                used by the identifier-validation step when
+                :attr:`PostprocessConfig.validate_identifiers` is on.
+                Stored by reference — pass the same instance to every
+                worker to share its frozen sets.
+
+                The parameter is typed as ``Any`` (rather than
+                ``DocCatalog | None``) to avoid importing the doc
+                module at class-definition time: every ``pipeline.py``
+                unit test that patches out OCR shouldn't need to
+                import the catalog layer too.
+        """
         self._russian_rules: list[tuple[Pattern[str], str]] = _compile_rules(
             DEFAULT_RUSSIAN_RULES
         )
@@ -350,6 +436,7 @@ class TextPostprocessor:
         # `re.compile` calls. Cache by `(pattern, flags)` so the cost
         # is paid exactly once per unique rule per Postprocessor instance.
         self._user_regex_cache: dict[tuple[str, int], Pattern[str]] = {}
+        self._catalog = catalog
 
     # ------------------------------------------------------------------
     # Internal: compiled regex cache
@@ -465,6 +552,27 @@ class TextPostprocessor:
                 "Postprocess: %d custom rules evaluated", len(config.custom_rules)
             )
 
+        # Business-identifier validation runs LAST — after every other
+        # step has settled on its final tokenisation. A digit-run that
+        # was corrupted by hyphen-merge or unicode-NFC would get
+        # spuriously fixed-up; running at the tail means the number
+        # we validate is the number the user will see.
+        if (
+            getattr(config, "validate_identifiers", False)
+            and self._catalog is not None
+            and not self._catalog.is_empty
+        ):
+            current = self._validate_identifiers(current)
+            logger.debug("Postprocess: identifiers validated against catalog")
+
+        # Entity validation — dates / amounts / phones. Independent
+        # of ``validate_identifiers`` so profiles can pick and choose
+        # (an invoice profile might want date + amount normalisation
+        # but no catalog-backed identifier rewrite).
+        if getattr(config, "validate_entities", False):
+            current = self._validate_entities(current)
+            logger.debug("Postprocess: dates / amounts / phones normalised")
+
         return current
 
     # ------------------------------------------------------------------
@@ -539,6 +647,171 @@ class TextPostprocessor:
             else:
                 logger.debug("Postprocess: отброшена артефакт-строка: %r", stripped)
         return "\n".join(kept)
+
+    # Digit-only tokens 10-15 chars long — the union of ИНН (10 / 12)
+    # and ОГРН (13 / 15). ``\b`` anchors keep us from matching
+    # sub-sequences of longer numbers (e.g. part of a 20-digit SWIFT).
+    _IDENTIFIER_RE: Final[Pattern[str]] = re.compile(r"\b\d{10,15}\b")
+
+    def _validate_identifiers(self, text: str) -> str:
+        """Replace catalog-1-edit-matched digit tokens with canonical.
+
+        Scans for digit-runs of length 10/12 (ИНН) and 13/15 (ОГРН).
+        For each token:
+
+          1. If the token is already a valid identifier AND appears in
+             the catalog → keep as-is (canonical).
+          2. If invalid OR valid-but-absent-from-catalog: search the
+             catalog for a unique 1-edit neighbour. Replace when
+             exactly one match is found.
+          3. Otherwise leave the token alone — ambiguous and bare-
+             checksum corrections are unsafe to pick without the
+             catalog narrowing the space.
+
+        The replacements are logged at INFO so the user can audit
+        each fixup.
+        """
+        from src.core.doc_validators import (
+            catalog_assisted_fix,
+            validate_inn,
+            validate_ogrn,
+        )
+
+        catalog = self._catalog
+        if catalog is None or catalog.is_empty:
+            return text
+
+        def _pick_catalog(token: str) -> frozenset[str]:
+            # Route ИНН-shaped tokens to the INN set, ОГРН-shaped to
+            # the OGRN set. ``12``-digit tokens could be ИНН-for-
+            # individual; ``13``/``15`` are ОГРН — no overlap.
+            if len(token) in (10, 12):
+                return catalog.inns
+            if len(token) in (13, 15):
+                return catalog.ogrns
+            # 11 / 14 are only valid as one-edit-deletion inputs;
+            # route them to both catalogs so the fix can go either
+            # way (deletion of a spurious digit typically restores
+            # a 10-digit ИНН or 13-digit ОГРН).
+            if len(token) == 11:
+                return catalog.inns
+            if len(token) == 14:
+                return catalog.ogrns
+            return frozenset()
+
+        def _replace(match) -> str:
+            token = match.group(0)
+            pool = _pick_catalog(token)
+            if not pool:
+                return token
+            # A token that's already in the catalog is canonical —
+            # do not rewrite. A token that VALIDATES but isn't in
+            # the catalog is probably a novel counterparty we've
+            # never seen before; also leave it alone.
+            if token in pool:
+                return token
+            already_valid = (
+                (len(token) in (10, 12) and validate_inn(token))
+                or (len(token) in (13, 15) and validate_ogrn(token))
+            )
+            if already_valid:
+                return token
+            fixed = catalog_assisted_fix(token, known_valid=pool)
+            if fixed is None:
+                return token
+            logger.info(
+                "validate_identifiers: %r → %r (catalog match)",
+                token, fixed,
+            )
+            return fixed
+
+        return self._IDENTIFIER_RE.sub(_replace, text)
+
+    # Regex used by ``_validate_entities`` to FIND entity-shaped
+    # tokens. Deliberately lenient on separators (dots, commas,
+    # spaces, hyphens) so OCR errors on punctuation don't prevent
+    # detection. Each match is passed to the entity-specific
+    # validator, which decides whether to keep or replace it.
+    _DATE_CANDIDATE_RE: Pattern[str] = re.compile(
+        r"\b[0-9OoОо|lIZzBSsGT]{1,2}"
+        r"[.,\s\-/]"
+        r"[0-9OoОо|lIZzBSsGT]{1,2}"
+        r"[.,\s\-/]"
+        r"[0-9OoОо|lIZzBSsGT]{2,4}\b",
+    )
+    #: Amounts — integer + optional fractional with currency hint.
+    #: ``\b`` on both ends keeps us off digit runs that are part of
+    #: longer identifiers (ИНН / phone / account numbers).
+    _AMOUNT_CANDIDATE_RE: Pattern[str] = re.compile(
+        r"\b\d{1,3}(?:[\s\xa0]\d{3})+(?:[,.]\d{1,2})?"
+        r"(?:\s*(?:руб\.?|₽))?\b"
+        r"|\b\d+[,.]\d{2}\s*(?:руб\.?|₽)\b",
+    )
+    _PHONE_CANDIDATE_RE: Pattern[str] = re.compile(
+        r"(?:\+7|\b8)[\s\-().]*"
+        r"[0-9OoОоlIZzBSsG]{3,4}"
+        r"[\s\-().]*"
+        r"[0-9OoОоlIZzBSsG][\s\-().0-9OoОоlIZzBSsG]{5,15}",
+    )
+
+    def _validate_entities(self, text: str) -> str:
+        """Normalise dates / amounts / phones via
+        :mod:`src.core.entity_validators`.
+
+        Each category runs as a regex-scoped substitution: we
+        FIND entity-shaped candidates (loose patterns that accept
+        OCR letter-digit confusion), pass each match to the
+        corresponding ``try_fix_*`` validator, and swap in the
+        canonical form when the validator returns one. The
+        validator returns ``None`` for shapes it can't confidently
+        fix, which leaves the OCR text unchanged — preferring a
+        missed correction over a false-positive rewrite.
+
+        The three categories run in order: dates → amounts →
+        phones. Dates are cheapest to disambiguate (calendar
+        constraint is tight) and may consume digit sequences the
+        amount / phone matchers would otherwise chase; running
+        them first reduces cross-category false positives.
+        """
+        from src.core.entity_validators import (
+            try_fix_amount,
+            try_fix_date,
+            try_fix_phone,
+        )
+
+        def _date_sub(match) -> str:
+            fixed = try_fix_date(match.group(0))
+            if fixed is None or fixed == match.group(0):
+                return match.group(0)
+            logger.debug(
+                "validate_entities: date %r → %r", match.group(0), fixed,
+            )
+            return fixed
+
+        def _amount_sub(match) -> str:
+            fixed = try_fix_amount(match.group(0))
+            if fixed is None or fixed == match.group(0):
+                return match.group(0)
+            logger.debug(
+                "validate_entities: amount %r → %r",
+                match.group(0), fixed,
+            )
+            return fixed
+
+        def _phone_sub(match) -> str:
+            fixed = try_fix_phone(match.group(0))
+            if fixed is None or fixed == match.group(0):
+                return match.group(0)
+            logger.debug(
+                "validate_entities: phone %r → %r",
+                match.group(0), fixed,
+            )
+            return fixed
+
+        text = self._DATE_CANDIDATE_RE.sub(_date_sub, text)
+        text = self._AMOUNT_CANDIDATE_RE.sub(_amount_sub, text)
+        text = self._PHONE_CANDIDATE_RE.sub(_phone_sub, text)
+        return text
 
     def _apply_custom_rules(self, text: str, rules: list[RegexRule]) -> str:
         """Apply user-defined rules one by one, in order.

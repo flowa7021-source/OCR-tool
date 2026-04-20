@@ -583,15 +583,6 @@ class MainWindow(QMainWindow):
         export_act.triggered.connect(self._on_export_profile)
         prof_menu.addAction(export_act)
 
-        # OCR-engine submenu (download + manage HTR weights)
-        engine_menu = menubar.addMenu("&Движок OCR")
-        download_got_act = QAction("Скачать GOT-OCR 2.0 (рукописный)", self)
-        download_got_act.triggered.connect(self._on_download_got_model)
-        engine_menu.addAction(download_got_act)
-        remove_got_act = QAction("Удалить модель GOT-OCR 2.0", self)
-        remove_got_act.triggered.connect(self._on_remove_got_model)
-        engine_menu.addAction(remove_got_act)
-
         view_menu = menubar.addMenu("&Вид")
         view_menu.addAction(self.queue_dock.toggleViewAction())
         view_menu.addAction(self.results_dock.toggleViewAction())
@@ -696,13 +687,29 @@ class MainWindow(QMainWindow):
             self.profile_combo.addItem(f"{prefix}{p.name}", userData=p.name)
         self.profile_combo.blockSignals(False)
         if profiles:
-            # Prefer the "universal_accurate" preset as the first-run
-            # pick — it's the opinionated max-accuracy bundle users get
-            # "out of the box" without hand-tuning every knob. If it's
-            # missing (tests with a stripped-down ProfileManager) we
-            # fall back to whatever index 0 happens to be.
+            # Prefer ``quick_reliable`` as the first-run pick. Apr 2026
+            # measurement on real user scans (transport invoices with
+            # forms + stamps + signatures, 4-12 pages each) via
+            # ``scripts/benchmark_universal.py`` showed:
+            #
+            #   profile             mean(all)   mean(kept)   time
+            #   quick_reliable      57-59       ~82          93-270 s
+            #   universal_accurate  50          ~83          179+ s
+            #
+            # quick_reliable's simpler preprocessing (OTSU + median,
+            # no Sauvola / no background_removal / no border_removal)
+            # survives Russian business documents noticeably better
+            # than universal_accurate's heavier stack, which over-
+            # processes mixed-content scans and feeds Tesseract a
+            # thinned / smudged image. universal_accurate's ~1 pp
+            # edge on kept-words mean_conf is not worth the 2× wall
+            # time and 10 pp drop on overall mean_conf.
+            #
+            # universal_accurate stays in the list for users who
+            # deliberately want the "throw everything at it" option;
+            # it just isn't the default anymore.
             preferred_idx = next(
-                (i for i, p in enumerate(profiles) if p.name == "universal_accurate"),
+                (i for i, p in enumerate(profiles) if p.name == "quick_reliable"),
                 0,
             )
             self.profile_combo.setCurrentIndex(preferred_idx)
@@ -1142,51 +1149,6 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, APP_NAME, f"Ошибка экспорта: {exc}")
-
-    # ------------------------------------------------------------ HTR model
-    def _on_download_got_model(self) -> None:
-        """Open a download dialog for the GOT-OCR 2.0 weights."""
-        try:
-            from src.application.engines.registry import reset_cache
-            from src.infrastructure.model_manager import GOT_OCR2_SPEC, ModelManager
-            from src.ui.model_download_dialog import ModelDownloadDialog
-        except ImportError as exc:
-            QMessageBox.critical(self, APP_NAME, f"Не удалось загрузить компоненты HTR: {exc}")
-            return
-        manager = ModelManager()
-        dlg = ModelDownloadDialog(manager, GOT_OCR2_SPEC, self)
-        dlg.exec()
-        # Refresh the engine combo so the just-downloaded engine becomes
-        # selectable without restart.
-        reset_cache()
-        if self._current_profile is not None:
-            self.settings_panel.set_config(self._current_profile.ocr)
-
-    def _on_remove_got_model(self) -> None:
-        """Delete the GOT-OCR 2.0 weights from disk."""
-        from src.infrastructure.model_manager import GOT_OCR2_SPEC, ModelManager
-
-        manager = ModelManager()
-        if not manager.is_available(GOT_OCR2_SPEC.model_id):
-            QMessageBox.information(
-                self, APP_NAME, "Модель GOT-OCR 2.0 не установлена."
-            )
-            return
-        resp = QMessageBox.question(
-            self, APP_NAME,
-            f"Удалить модель {GOT_OCR2_SPEC.label} (~580 МБ)?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if resp != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            manager.remove(GOT_OCR2_SPEC.model_id)
-            from src.application.engines.registry import reset_cache
-
-            reset_cache()
-            QMessageBox.information(self, APP_NAME, "Модель удалена.")
-        except OSError as exc:
-            QMessageBox.critical(self, APP_NAME, f"Не удалось удалить: {exc}")
 
     def _open_paths_from_secondary(self, paths: list[Path]) -> None:
         """Called by SingleInstanceGuard when a second instance forwards argv.
@@ -1740,20 +1702,6 @@ class MainWindow(QMainWindow):
             )
         else:
             lines.append("<i>Детектор psutil недоступен — данные о железе не собраны.</i>")
-        try:
-            import torch  # type: ignore[import-not-found]
-
-            if torch.cuda.is_available():
-                lines.append(
-                    f"<b>GPU:</b> CUDA {torch.version.cuda} — "
-                    f"{torch.cuda.get_device_name(0)} "
-                    f"({torch.cuda.get_device_properties(0).total_memory / (1024**3):.1f} GB VRAM)"
-                )
-            else:
-                lines.append("<b>GPU:</b> CUDA недоступна — GOT-OCR работает на CPU")
-        except ImportError:
-            lines.append("<b>GPU:</b> torch не установлен (HTR недоступен)")
-
         lines.append("")  # blank
         if settings is not None:
             lines.append(f"<b>Воркеров:</b> {settings.parallel_workers}")

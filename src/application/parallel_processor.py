@@ -322,21 +322,6 @@ def _worker_run_job(
             getattr(job.profile.ocr, "tesseract_language_string", "?"),
         )
 
-        current_stage = "configure_hf_runtime"
-        try:
-            from src.infrastructure.hf_runtime import configure_huggingface_runtime
-
-            configure_huggingface_runtime()
-            worker_logger.info(
-                "[3/6] HF runtime configured: HF_HOME=%s offline=%s",
-                os.environ.get("HF_HOME", "<default>"),
-                os.environ.get("HF_HUB_OFFLINE", "0"),
-            )
-        except Exception as exc:  # noqa: BLE001
-            worker_logger.warning(
-                "configure_huggingface_runtime failed (continuing): %s", exc
-            )
-
         current_stage = "register_external_tools"
         worker_logger.info(
             "[3a/6] Registering bundled external binaries on PATH…"
@@ -384,7 +369,28 @@ def _worker_run_job(
         current_stage = "build_pipeline"
         worker_logger.info("[4/6] Building pipeline (preprocess + postprocess)…")
         preprocessor = ImagePreprocessor()
-        postprocessor = TextPostprocessor()
+        # Load the ground-truth ИНН/ОГРН catalog ONCE per worker and hand
+        # it to every TextPostprocessor constructed in this process. An
+        # empty catalog (no ``expected/`` directory present) makes
+        # ``PostprocessConfig.validate_identifiers`` a silent no-op — the
+        # flag stays safe to enable on profiles that ship to users who
+        # haven't populated a catalog.
+        try:
+            from src.core.doc_catalog import load_default_catalog
+
+            catalog = load_default_catalog()
+            worker_logger.info(
+                "[4/6] DocCatalog: %d inn, %d ogrn, %d kpp, %d name(s)",
+                len(catalog.inns), len(catalog.ogrns),
+                len(catalog.kpps), len(catalog.names),
+            )
+        except Exception as exc:  # noqa: BLE001
+            worker_logger.warning(
+                "[4/6] DocCatalog load failed (continuing without): %s",
+                exc,
+            )
+            catalog = None
+        postprocessor = TextPostprocessor(catalog=catalog)
 
         def _progress(current: int, total: int, stage: str) -> None:
             # Fan out to the host bridge AND log locally so we have a

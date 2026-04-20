@@ -1,0 +1,537 @@
+{
+  "source_file": "TN_k_UPD_48_ot_09.01.2023.pdf",
+  "page_count": 10,
+  "notes": "5 транспортных накладных от 18.10.2022 (по 2 страницы каждая). Обратите внимание: в ТН № 11766/Б перевозчик указан как 'Самовывоз' (тип владения ТС — 0), водитель Зуев А.И.; у прочих перевозчик — ИП Арзамаскин В.И. У ТН № 11770/Б фактическое убытие зафиксировано рукописно '19.10.22' (на следующий день после подачи).",
+  "documents": [
+    {
+      "type": "TN",
+      "pages": [
+        1,
+        2
+      ],
+      "number": "11778/Б",
+      "date": "2022-10-18",
+      "form_ref": "Приложение № 4 к Правилам перевозок грузов автомобильным транспортом (в ред. Постановления Правительства РФ от 30.11.2021 № 2116)",
+      "parties": [
+        {
+          "role": "shipper",
+          "name": "Беком",
+          "legal_form": "ООО",
+          "inn": "7743553262",
+          "kpp": "504445001",
+          "address": "125212, г. Москва, ул. Адмирала Макарова, д. 6, стр. 13, пом. этаж 1, часть помещения 6",
+          "phone": "+7 (495) 725-80-62",
+          "is_forwarder": false
+        },
+        {
+          "role": "consignee",
+          "name": "Моспроект-3",
+          "legal_form": "АО",
+          "inn": "7707820890",
+          "kpp": "770701001",
+          "address": "Российская Федерация, 107031, г. Москва, ул. Кузнецкий мост, д. 3, стр. 1, каб. 1305"
+        },
+        {
+          "role": "recipient_of_cargo",
+          "address": "обл. Нижегородская, мкр. Щедровка"
+        },
+        {
+          "role": "carrier",
+          "name": "Арзамаскин Виталий Иванович",
+          "legal_form": "ИП",
+          "inn": "524606438004",
+          "address": "обл. Нижегородская, г. Бор, мкр. 2, д. 6",
+          "phone": "+7 (893) 067-96-587",
+          "driver": {
+            "full_name": "Шаров А.В.",
+            "short_name": "Шаров А.В.",
+            "signature_present": true
+          }
+        }
+      ],
+      "cargo_header": {
+        "description": "Блок облицовочный Tensar, гладкий (400×150×220), Серый B30F300, с/ц, п/п, 720 шт",
+        "places_count": 15,
+        "net_weight_t": 20.52,
+        "gross_weight_t": 20.835,
+        "volume_m3": 8.73
+      },
+      "contract_basis": {
+        "number": "2239",
+        "date": "2022-10-18",
+        "raw": "Заказ (заявка) № 2239 от 18.10.2022"
+      },
+      "transport": {
+        "vehicle_type": "Тягач с бортовым полуприцепом",
+        "vehicle_make": "VOLVO",
+        "vehicle_reg_plate": "С 348 НО 152",
+        "ownership_type": 3,
+        "carrier_driver_full_name": "Шаров А.В.",
+        "accepted_by_dispatcher": "Накладную принял диспетчер"
+      },
+      "loading": {
+        "address": "141411, обл. Московская, с/п Кутузовское, р-н Солнечногорский, д. Подолино",
+        "declared_dt": "2022-10-18",
+        "actual_arrival_dt": "2022-10-18",
+        "actual_departure_dt": "2022-10-18",
+        "storekeeper_full_name": "Родионова Л.А.",
+        "driver_full_name": "Шаров А.В."
+      },
+      "unloading": {
+        "address": "обл. Нижегородская, мкр. Щедровка",
+        "declared_dt": "2022-10-18",
+        "actual_arrival_dt": "2022-10-18",
+        "actual_departure_dt": "2022-10-18",
+        "places_count": 15,
+        "net_weight_t": 20.52,
+        "gross_weight_t": 20.835,
+        "volume_m3": 8.73,
+        "driver_full_name": "Шаров А.В."
+      },
+      "signatures": [
+        {
+          "role": "Кладовщик",
+          "full_name": "Родионова Л.А.",
+          "has_signature": true,
+          "has_stamp": true,
+          "stamp_text": "ООО \"БЕКАМ\" СКЛАД тел. 8(495) 609-60-44"
+        },
+        {
+          "role": "Водитель",
+          "full_name": "Шаров А.В.",
+          "has_signature": true,
+          "has_stamp": false
+        },
+        {
+          "role": "АО \"Моспроект-3\", Управление по строительству ИССО",
+          "has_signature": true,
+          "has_stamp": true,
+          "stamp_text": "печать Управления по строительству ИССО"
+        }
+      ],
+      "raw_notes": "На обороте штамп 'На этот экземпляр поставить штамп, подписать и вернуть в адрес ООО \"БЕКАМ\" тел.: 8 (495) 609-60-44'. В левом верхнем углу рукописная пометка '6462' — не реквизит документа."
+    },
+    {
+      "type": "TN",
+      "pages": [
+        3,
+        4
+      ],
+      "number": "11777/Б",
+      "date": "2022-10-18",
+      "form_ref": "Приложение № 4 к Правилам перевозок грузов автомобильным транспортом (в ред. Постановления Правительства РФ от 30.11.2021 № 2116)",
+      "parties": [
+        {
+          "role": "shipper",
+          "name": "Беком",
+          "legal_form": "ООО",
+          "inn": "7743553262",
+          "kpp": "504445001",
+          "address": "125212, г. Москва, ул. Адмирала Макарова, д. 6, стр. 13, пом. этаж 1, часть помещения 6",
+          "phone": "+7 (495) 725-80-62",
+          "is_forwarder": false
+        },
+        {
+          "role": "consignee",
+          "name": "Моспроект-3",
+          "legal_form": "АО",
+          "inn": "7707820890",
+          "kpp": "770701001",
+          "address": "Российская Федерация, 107031, г. Москва, ул. Кузнецкий мост, д. 3, стр. 1, каб. 1305"
+        },
+        {
+          "role": "recipient_of_cargo",
+          "address": "обл. Нижегородская, мкр. Щедровка"
+        },
+        {
+          "role": "carrier",
+          "name": "Арзамаскин Виталий Иванович",
+          "legal_form": "ИП",
+          "inn": "524606438004",
+          "address": "обл. Нижегородская, г. Бор, мкр. 2, д. 6",
+          "phone": "+7 (893) 067-96-587",
+          "driver": {
+            "full_name": "Шаров А.В.",
+            "short_name": "Шаров А.В.",
+            "signature_present": true
+          }
+        }
+      ],
+      "cargo_header": {
+        "description": "Блок облицовочный Tensar, гладкий (400×150×220), Серый B30F300, с/ц, п/п, 384 шт",
+        "places_count": 8,
+        "net_weight_t": 10.944,
+        "gross_weight_t": 11.112,
+        "volume_m3": 4.65
+      },
+      "contract_basis": {
+        "number": "2239",
+        "date": "2022-10-18",
+        "raw": "Заказ (заявка) № 2239 от 18.10.2022"
+      },
+      "transport": {
+        "vehicle_type": "Тягач с бортовым полуприцепом",
+        "vehicle_make": "VOLVO",
+        "vehicle_reg_plate": "С 348 НО 152",
+        "ownership_type": 3,
+        "carrier_driver_full_name": "Шаров А.В.",
+        "accepted_by_dispatcher": "Накладную принял диспетчер"
+      },
+      "loading": {
+        "address": "141411, обл. Московская, с/п Кутузовское, р-н Солнечногорский, д. Подолино",
+        "declared_dt": "2022-10-18",
+        "actual_arrival_dt": "2022-10-18",
+        "actual_departure_dt": "2022-10-18",
+        "storekeeper_full_name": "Родионова Л.А.",
+        "driver_full_name": "Шаров А.В."
+      },
+      "unloading": {
+        "address": "обл. Нижегородская, мкр. Щедровка",
+        "declared_dt": "2022-10-18",
+        "actual_arrival_dt": "2022-10-18",
+        "actual_departure_dt": "2022-10-18",
+        "places_count": 8,
+        "net_weight_t": 10.944,
+        "gross_weight_t": 11.112,
+        "volume_m3": 4.65,
+        "driver_full_name": "Шаров А.В."
+      },
+      "signatures": [
+        {
+          "role": "Кладовщик",
+          "full_name": "Родионова Л.А.",
+          "has_signature": true,
+          "has_stamp": true,
+          "stamp_text": "ООО \"БЕКАМ\" СКЛАД"
+        },
+        {
+          "role": "Водитель",
+          "full_name": "Шаров А.В.",
+          "has_signature": true,
+          "has_stamp": false
+        },
+        {
+          "role": "АО \"Моспроект-3\", Управление по строительству ИССО",
+          "has_signature": true,
+          "has_stamp": true
+        }
+      ]
+    },
+    {
+      "type": "TN",
+      "pages": [
+        5,
+        6
+      ],
+      "number": "11770/Б",
+      "date": "2022-10-18",
+      "form_ref": "Приложение № 4 к Правилам перевозок грузов автомобильным транспортом (в ред. Постановления Правительства РФ от 30.11.2021 № 2116)",
+      "parties": [
+        {
+          "role": "shipper",
+          "name": "Беком",
+          "legal_form": "ООО",
+          "inn": "7743553262",
+          "kpp": "504445001",
+          "address": "125212, г. Москва, ул. Адмирала Макарова, д. 6, стр. 13, пом. этаж 1, часть помещения 6",
+          "phone": "+7 (495) 725-80-62",
+          "is_forwarder": false
+        },
+        {
+          "role": "consignee",
+          "name": "Моспроект-3",
+          "legal_form": "АО",
+          "inn": "7707820890",
+          "kpp": "770701001",
+          "address": "Российская Федерация, 107031, г. Москва, ул. Кузнецкий мост, д. 3, стр. 1, каб. 1305"
+        },
+        {
+          "role": "recipient_of_cargo",
+          "address": "обл. Нижегородская, мкр. Щедровка"
+        },
+        {
+          "role": "carrier",
+          "name": "Арзамаскин Виталий Иванович",
+          "legal_form": "ИП",
+          "inn": "524606438004",
+          "address": "обл. Нижегородская, г. Бор, мкр. 2, д. 6",
+          "phone": "+7 (893) 067-96-587",
+          "driver": {
+            "full_name": "Богаткин И.А.",
+            "short_name": "Богаткин И.А.",
+            "signature_present": true
+          }
+        }
+      ],
+      "cargo_header": {
+        "description": "Блок облицовочный Tensar, гладкий (400×150×220), Серый B30F300, с/ц, п/п, 720 шт",
+        "places_count": 15,
+        "net_weight_t": 20.52,
+        "gross_weight_t": 20.835,
+        "volume_m3": 8.73
+      },
+      "contract_basis": {
+        "number": "2239",
+        "date": "2022-10-18",
+        "raw": "Заказ (заявка) № 2239 от 18.10.2022"
+      },
+      "transport": {
+        "vehicle_type": "Тягач с бортовым полуприцепом",
+        "vehicle_make": "DAF",
+        "vehicle_reg_plate": "Х 582 СС 152",
+        "ownership_type": 4,
+        "carrier_driver_full_name": "Богаткин И.А.",
+        "accepted_by_dispatcher": "Накладную принял диспетчер"
+      },
+      "loading": {
+        "address": "141411, обл. Московская, с/п Кутузовское, р-н Солнечногорский, д. Подолино",
+        "declared_dt": "2022-10-18",
+        "actual_arrival_dt": "2022-10-18",
+        "actual_departure_dt": "2022-10-18",
+        "storekeeper_full_name": "Родионова Л.А.",
+        "driver_full_name": "Богаткин И.А."
+      },
+      "unloading": {
+        "address": "обл. Нижегородская, мкр. Щедровка",
+        "declared_dt": "2022-10-18",
+        "actual_arrival_dt": "2022-10-18",
+        "actual_departure_dt": "2022-10-19",
+        "places_count": 15,
+        "net_weight_t": 20.52,
+        "gross_weight_t": 20.835,
+        "volume_m3": 8.73,
+        "driver_full_name": "Богаткин И.А.",
+        "remarks": "Фактические дата и время прибытия — 19.10.22 (рукописная отметка). Фактические дата и время убытия — 19.10.22 (рукописная отметка)."
+      },
+      "signatures": [
+        {
+          "role": "Кладовщик",
+          "full_name": "Родионова Л.А.",
+          "has_signature": true,
+          "has_stamp": true,
+          "stamp_text": "ООО \"БЕКАМ\" СКЛАД"
+        },
+        {
+          "role": "Водитель",
+          "full_name": "Богаткин И.А.",
+          "has_signature": true,
+          "has_stamp": false
+        },
+        {
+          "role": "АО \"Моспроект-3\", Управление по строительству ИССО",
+          "has_signature": true,
+          "has_stamp": true
+        }
+      ]
+    },
+    {
+      "type": "TN",
+      "pages": [
+        7,
+        8
+      ],
+      "number": "11766/Б",
+      "date": "2022-10-18",
+      "form_ref": "Приложение № 4 к Правилам перевозок грузов автомобильным транспортом (в ред. Постановления Правительства РФ от 30.11.2021 № 2116)",
+      "parties": [
+        {
+          "role": "shipper",
+          "name": "Беком",
+          "legal_form": "ООО",
+          "inn": "7743553262",
+          "kpp": "504445001",
+          "address": "125212, г. Москва, ул. Адмирала Макарова, д. 6, стр. 13, пом. этаж 1, часть помещения 6",
+          "phone": "+7 (495) 725-80-62",
+          "is_forwarder": false
+        },
+        {
+          "role": "consignee",
+          "name": "Моспроект-3",
+          "legal_form": "АО",
+          "inn": "7707820890",
+          "kpp": "770701001",
+          "address": "Российская Федерация, 107031, г. Москва, ул. Кузнецкий мост, д. 3, стр. 1, каб. 1305"
+        },
+        {
+          "role": "recipient_of_cargo",
+          "address": "обл. Нижегородская, мкр. Щедровка"
+        },
+        {
+          "role": "carrier",
+          "name": "Самовывоз",
+          "driver": {
+            "full_name": "Зуев А.И.",
+            "short_name": "Зуев А.И.",
+            "signature_present": true
+          },
+          "note": "В разделе 6 'Перевозчик' указано 'Самовывоз' — грузополучатель самостоятельно забирает груз; поле ИНН/КПП/адрес перевозчика не заполнено."
+        }
+      ],
+      "cargo_header": {
+        "description": "Блок облицовочный Tensar, гладкий (400×150×220), Серый B30F300, с/ц, п/п, 720 шт",
+        "places_count": 15,
+        "net_weight_t": 20.52,
+        "gross_weight_t": 20.835,
+        "volume_m3": 8.73
+      },
+      "contract_basis": {
+        "number": "2239",
+        "date": "2022-10-18",
+        "raw": "Заказ (заявка) № 2239 от 18.10.2022"
+      },
+      "transport": {
+        "vehicle_type": "Бортовые автомобили",
+        "vehicle_make": "MAN",
+        "vehicle_reg_plate": "Х 385 ТЕ 69",
+        "carrier_driver_full_name": "Зуев А.И.",
+        "accepted_by_dispatcher": "Накладную принял диспетчер"
+      },
+      "loading": {
+        "address": "141411, обл. Московская, с/п Кутузовское, р-н Солнечногорский, д. Подолино",
+        "declared_dt": "2022-10-18",
+        "actual_arrival_dt": "2022-10-18",
+        "actual_departure_dt": "2022-10-18",
+        "storekeeper_full_name": "Артюхина И.Е.",
+        "driver_full_name": "Зуев А.И."
+      },
+      "unloading": {
+        "address": "обл. Нижегородская, мкр. Щедровка",
+        "declared_dt": "2022-10-18",
+        "actual_arrival_dt": "2022-10-18",
+        "actual_departure_dt": "2022-10-18",
+        "places_count": 15,
+        "net_weight_t": 20.52,
+        "gross_weight_t": 20.835,
+        "volume_m3": 8.73,
+        "driver_full_name": "Зуев А.И."
+      },
+      "signatures": [
+        {
+          "role": "Кладовщик",
+          "full_name": "Артюхина И.Е.",
+          "has_signature": true,
+          "has_stamp": false
+        },
+        {
+          "role": "Водитель",
+          "full_name": "Зуев А.И.",
+          "has_signature": true,
+          "has_stamp": false
+        },
+        {
+          "role": "АО \"Моспроект-3\", Управление по строительству ИССО",
+          "has_signature": true,
+          "has_stamp": true
+        }
+      ],
+      "raw_notes": "В поле 'Тип владения' проставлено '0' — нестандартное значение (валидные коды 1–5), которое, вероятно, означает отсутствие перевозчика (самовывоз грузополучателем)."
+    },
+    {
+      "type": "TN",
+      "pages": [
+        9,
+        10
+      ],
+      "number": "11767/Б",
+      "date": "2022-10-18",
+      "form_ref": "Приложение № 4 к Правилам перевозок грузов автомобильным транспортом (в ред. Постановления Правительства РФ от 30.11.2021 № 2116)",
+      "parties": [
+        {
+          "role": "shipper",
+          "name": "Беком",
+          "legal_form": "ООО",
+          "inn": "7743553262",
+          "kpp": "504445001",
+          "address": "125212, г. Москва, ул. Адмирала Макарова, д. 6, стр. 13, пом. этаж 1, часть помещения 6",
+          "phone": "+7 (495) 725-80-62",
+          "is_forwarder": false
+        },
+        {
+          "role": "consignee",
+          "name": "Моспроект-3",
+          "legal_form": "АО",
+          "inn": "7707820890",
+          "kpp": "770701001",
+          "address": "Российская Федерация, 107031, г. Москва, ул. Кузнецкий мост, д. 3, стр. 1, каб. 1305"
+        },
+        {
+          "role": "recipient_of_cargo",
+          "address": "обл. Нижегородская, мкр. Щедровка"
+        },
+        {
+          "role": "carrier",
+          "name": "Арзамаскин Виталий Иванович",
+          "legal_form": "ИП",
+          "inn": "524606438004",
+          "address": "обл. Нижегородская, г. Бор, мкр. 2, д. 6",
+          "phone": "+7 (893) 067-96-587",
+          "driver": {
+            "full_name": "Богаткин И.А.",
+            "short_name": "Богаткин И.А.",
+            "signature_present": true
+          }
+        }
+      ],
+      "cargo_header": {
+        "description": "Блок облицовочный Tensar, гладкий (400×150×220), Серый B30F300, с/ц, п/п, 384 шт",
+        "places_count": 8,
+        "net_weight_t": 10.944,
+        "gross_weight_t": 11.112,
+        "volume_m3": 4.65
+      },
+      "contract_basis": {
+        "number": "2239",
+        "date": "2022-10-18",
+        "raw": "Заказ (заявка) № 2239 от 18.10.2022"
+      },
+      "transport": {
+        "vehicle_type": "Тягач с бортовым полуприцепом",
+        "vehicle_make": "DAF",
+        "vehicle_reg_plate": "Х 582 СС 152",
+        "ownership_type": 4,
+        "carrier_driver_full_name": "Богаткин И.А.",
+        "accepted_by_dispatcher": "Накладную принял диспетчер"
+      },
+      "loading": {
+        "address": "141411, обл. Московская, с/п Кутузовское, р-н Солнечногорский, д. Подолино",
+        "declared_dt": "2022-10-18",
+        "actual_arrival_dt": "2022-10-18",
+        "actual_departure_dt": "2022-10-18",
+        "storekeeper_full_name": "Родионова Л.А.",
+        "driver_full_name": "Богаткин И.А."
+      },
+      "unloading": {
+        "address": "обл. Нижегородская, мкр. Щедровка",
+        "declared_dt": "2022-10-18",
+        "actual_arrival_dt": "2022-10-18",
+        "actual_departure_dt": "2022-10-19",
+        "places_count": 8,
+        "net_weight_t": 10.944,
+        "gross_weight_t": 11.112,
+        "volume_m3": 4.65,
+        "driver_full_name": "Богаткин И.А.",
+        "remarks": "Фактические дата и время прибытия — 19.10.22 (рукописная отметка). Фактические дата и время убытия — 19.10.22 (рукописная отметка)."
+      },
+      "signatures": [
+        {
+          "role": "Кладовщик",
+          "full_name": "Родионова Л.А.",
+          "has_signature": true,
+          "has_stamp": true,
+          "stamp_text": "ООО \"БЕКАМ\" СКЛАД"
+        },
+        {
+          "role": "Водитель",
+          "full_name": "Богаткин И.А.",
+          "has_signature": true,
+          "has_stamp": false
+        },
+        {
+          "role": "АО \"Моспроект-3\", Управление по строительству ИССО",
+          "has_signature": true,
+          "has_stamp": true
+        }
+      ]
+    }
+  ]
+}

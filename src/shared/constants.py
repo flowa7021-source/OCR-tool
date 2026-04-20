@@ -8,7 +8,14 @@ from pathlib import Path
 
 # --- Application identity ---
 APP_NAME: str = "OCR Studio"
-APP_VERSION: str = "1.1.0"
+#: Bumped to invalidate stale OCR cache entries. The cache key is
+#: ``sha256(input) + sha256(profile) + APP_VERSION``; bumping this
+#: forces every cached result to miss on the next run, which is the
+#: right thing to do when accuracy-affecting code changes that don't
+#: appear in the profile JSON — e.g. Tesseract retry-ladder logic,
+#: ``resources/tessdata/user-words.rus`` contents, confidence-filter
+#: heuristics. 1.2.0 → post-Apr-2026 accuracy sprint.
+APP_VERSION: str = "1.2.0"
 APP_ORGANIZATION: str = "OCRStudio"
 APP_ID: str = "com.ocrstudio.app"
 
@@ -76,12 +83,23 @@ GHOSTSCRIPT_BIN_DIR: Path = RESOURCES_DIR / "ghostscript"
 ICONS_DIR: Path = RESOURCES_DIR / "icons"
 STYLES_DIR: Path = RESOURCES_DIR / "styles"
 BUNDLED_PROFILES_DIR: Path = APP_ROOT / "profiles"
-# Optional bundled HTR model weights. Populated by the CI installer
-# pipeline (Download GOT-OCR 2.0 weights step) so end-users don't need
-# to fetch ~580 MB from HuggingFace on first launch. Empty in source
-# checkouts — ModelManager treats it as an alternate read-only lookup
-# root if the user-writable copy doesn't have everything yet.
-BUNDLED_MODELS_DIR: Path = RESOURCES_DIR / "models"
+
+# Ground-truth catalog of Russian business identifiers (ИНН / ОГРН /
+# КПП / counterparty names). When present, the text postprocessor
+# uses it to rewrite a single-digit OCR error into the canonical
+# value for known entities — see :mod:`src.core.doc_catalog`. Search
+# order at worker startup:
+#
+#   1. ``USER_DATA_DIR / expected`` — lets the user drop their own
+#      per-install JSON fixtures without having to rebuild the
+#      installer. Takes precedence so updates are hot-reload-able.
+#   2. ``APP_ROOT / expected`` — bundled by the installer (via
+#      PyInstaller ``--add-data=expected``) so a fresh install has
+#      a usable catalog out of the box.
+#   3. Repo-root fallback (dev checkouts) — ``get_app_root`` points
+#      there anyway, so case 2 covers this automatically.
+USER_CATALOG_DIR: Path = USER_DATA_DIR / "expected"
+BUNDLED_CATALOG_DIR: Path = APP_ROOT / "expected"
 
 # --- Tesseract ---
 # Accept any Tesseract 5.x — the app works with 5.3, 5.4, and 5.5.
