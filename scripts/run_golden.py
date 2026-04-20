@@ -342,6 +342,16 @@ def check_field(name: str, expected: Any, got: str
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="ocr-cli parser golden")
     p.add_argument("--verbose", action="store_true")
+    p.add_argument(
+        "--min-accuracy",
+        type=float,
+        default=0.0,
+        help=(
+            "Минимальный суммарный accuracy (0..1). При значении ниже "
+            "порога скрипт возвращает exit 2 — для использования как "
+            "CI-гейт на ветке parser-работ (CLAUDE.md §планка: ≥ 70 %)."
+        ),
+    )
     args = p.parse_args(argv)
 
     if not INPUTS.exists() or not EXPECTED.exists():
@@ -397,9 +407,18 @@ def main(argv: list[str] | None = None) -> int:
         acc = f"{int(ok / denom * 100)}%" if denom else "—"
         print(f"  {fld:10s}  ok={ok}  fail={fail}  skip={skip}  acc={acc}")
     denom = overall_ok + overall_fail
+    total_acc = (overall_ok / denom) if denom else 0.0
     print("-" * 60)
     print(f"  {'TOTAL':10s}  ok={overall_ok}  fail={overall_fail}  "
-          f"acc={int(overall_ok / denom * 100) if denom else '—'}%")
+          f"acc={int(total_acc * 100) if denom else '—'}%")
+
+    if args.min_accuracy > 0 and total_acc < args.min_accuracy:
+        print(
+            f"\n❌ TOTAL accuracy {total_acc * 100:.0f}% ниже "
+            f"--min-accuracy {args.min_accuracy * 100:.0f}%",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 

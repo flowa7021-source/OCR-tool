@@ -1,0 +1,303 @@
+name: E2E TN pipeline (OCR + parser + confidence)
+
+# Комплексный тест симбиоза OCR и парсера на реальных
+# транспортных накладных из inputs/. Воссоздаёт Windows-среду
+# пользователя:
+#   * Tesseract 5.5.0 + rus/eng/osd tessdata_best
+#   * Ghostscript (Artifex Windows distribution)
+#   * Cyrillic-capable шрифты
+#   * Полный Python-стек продакшена (PySide6 offscreen, ocrmypdf,
+#     pymupdf, pytesseract, tn_parser deps)
+#
+# Не skip'аемо: если чего-то нет в среде — тест падает с exit 4.
+# Silent skip = green CI при отказе → противоречит "среда не должна
+# блокать и мешать тестам".
+#
+# Запуск:
+#   * Push на любую ветку claude/** — быстрый feedback для парсер-работ.
+#   * Ручной workflow_dispatch — для локальной проверки на ветке.
+#   * Push в main — перед релизом.
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+    paths:
+      # Сужаем триггеры, чтобы не запускать 10-минутный windows-runner
+      # на каждый коммит в документацию. Но всё, что касается
+      # OCR-пайплайна, парсера, expected-разметки или сам workflow —
+      # обязательно ре-экзерсайзим.
+      - "src/tn_parser/**"
+      - "src/application/pipeline.py"
+      - "src/application/parsers/**"
+      - "src/application/engines/**"
+      - "src/core/text_postprocessor.py"
+      - "src/core/image_preprocessor.py"
+      - "scripts/e2e_tn_pipeline.py"
+      - "scripts/run_golden.py"
+      - "profiles/tn_upd.json"
+      - "profiles/universal_accurate.json"
+      - "inputs/**"
+      - "expected/**"
+      - ".github/workflows/e2e-tn-pipeline.yml"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dpi:
+        description: "OCR DPI для растеризации (300 = default, 600 = max accuracy)"
+        required: false
+        default: "300"
+      min_accuracy:
+        description: "Минимум field-accuracy на документ (0..1)"
+        required: false
+        # 0.40 соответствует raw-Tesseract на скан-корпусе inputs/*.pdf:
+        # часть полей OCR не достаёт вовсе (грязный текст). Поднимать
+        # планку имеет смысл только после интеграции universal_accurate
+        # профиля с Sauvola + CLAHE + deskew в этот pipeline.
+        default: "0.40"
+      min_conf:
+        description: "Минимум combined (OCR × parser) confidence (0..1)"
+        required: false
+        # Combined = geo_mean(OCR_conf, parser_conf). На raw-Tesseract
+        # типичное значение на наших ТН: 40-60 %. 0.30 ловит
+        # регрессии «OCR сломался / парсер перестал находить поля».
+        default: "0.30"
+
+concurrency:
+  group: e2e-tn-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: E2E OCR + parser (Windows)
+    # Windows — единственный shipping target (см. CLAUDE.md
+    # §«пользователь на Windows»). Тестируем именно там, где
+    # приложение реально запускается, а не на удобной Linux.
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    env:
+      # --dpi из workflow_dispatch ИЛИ дефолт 300. Переменная
+      # окружения пробрасывается в финальный step, где её читает
+      # сам e2e_tn_pipeline.py через CLI-аргумент.
+      OCR_DPI: ${{ github.event.inputs.dpi || '300' }}
+      OCR_MIN_ACCURACY: ${{ github.event.inputs.min_accuracy || '0.40' }}
+      OCR_MIN_CONF: ${{ github.event.inputs.min_conf || '0.30' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # ----- Шаг A: Tesseract 5.5 + Ghostscript через Chocolatey
+      # Те же ретраи, что в nightly-real-ocr.yml — Chocolatey feed
+      # периодически выдаёт 504 Gateway Timeout на metadata. Если
+      # все 4 попытки упали — это реальная проблема CI, не наша.
+      - name: Install Tesseract + Ghostscript (Chocolatey with retries)
+        shell: pwsh
+        run: |
+          function Install-ChocoPackage {
+            param([string]$Name)
+            $max = 4
+            for ($i = 1; $i -le $max; $i++) {
+              Write-Host "choco install $Name (attempt $i/$max)"
+              choco install $Name --no-progress -y
+              if ($LASTEXITCODE -eq 0) { return }
+              if ($i -lt $max) {
+                $w = [math]::Pow(2, $i) * 5
+                Write-Host "$Name failed (exit $LASTEXITCODE); retry in ${w}s"
+                Start-Sleep -Seconds $w
+              }
+            }
+            throw "choco install $Name failed after $max attempts"
+          }
+
+          Install-ChocoPackage -Name "tesseract"
+          Install-ChocoPackage -Name "ghostscript"
+
+          # Tesseract канонически ставится в C:\Program Files\Tesseract-OCR.
+          $tess = "C:\Program Files\Tesseract-OCR"
+          if (-not (Test-Path (Join-Path $tess "tesseract.exe"))) {
+            throw "Tesseract binary not found at $tess after choco install"
+          }
+          echo "$tess" >> $env:GITHUB_PATH
+
+          $tessdata = Join-Path $tess "tessdata"
+          if (Test-Path $tessdata) {
+            echo "TESSDATA_PREFIX=$tessdata" >> $env:GITHUB_ENV
+          }
+
+          # Ghostscript ставится в C:\Program Files\gs\gs<VERSION>\bin.
+          # Версия меняется от релиза к релизу — сканируем директорию.
+          $gsRoot = "C:\Program Files\gs"
+          if (Test-Path $gsRoot) {
+            $gsBin = Get-ChildItem $gsRoot -Directory |
+                     ForEach-Object { Join-Path $_.FullName "bin" } |
+                     Where-Object {
+                       Test-Path (Join-Path $_ "gswin64c.exe")
+                     } |
+                     Select-Object -First 1
+            if ($gsBin) {
+              echo "$gsBin" >> $env:GITHUB_PATH
+            } else {
+              throw "gswin64c.exe not found under $gsRoot"
+            }
+          } else {
+            throw "Ghostscript install root $gsRoot not found"
+          }
+
+      # ----- Шаг B: rus + eng + osd tessdata_best
+      # Chocolatey пакет tesseract ставит только eng.traineddata.
+      # Без rus.traineddata OCR-пайплайн валится с «Отсутствуют
+      # языки: rus» при preflight-проверке профиля tn_upd.
+      - name: Download rus + eng + osd traineddata
+        shell: pwsh
+        run: |
+          $tessdata = "C:\Program Files\Tesseract-OCR\tessdata"
+          if (-not (Test-Path $tessdata)) {
+            New-Item -ItemType Directory -Force -Path $tessdata | Out-Null
+          }
+          $base = "https://github.com/tesseract-ocr/tessdata_best/raw/main"
+          foreach ($lang in @("rus", "eng", "osd")) {
+            $out = Join-Path $tessdata "$lang.traineddata"
+            if (Test-Path $out) {
+              Write-Host "Already present: $lang.traineddata"
+              continue
+            }
+            $tries = 0
+            while ($tries -lt 3) {
+              try {
+                Invoke-WebRequest -Uri "$base/$lang.traineddata" `
+                    -OutFile $out -UseBasicParsing
+                break
+              } catch {
+                $tries++
+                if ($tries -ge 3) { throw }
+                Start-Sleep -Seconds (2 * $tries)
+              }
+            }
+          }
+
+          Get-ChildItem $tessdata -Filter "*.traineddata" |
+              Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}}
+
+      # ----- Шаг C: Python-стек продакшена
+      # Всё, что реально импортирует pipeline + парсер + CLI.
+      # Без этого пакета тест «silently-skip»'нулся бы на import-
+      # error — мы хотим exit 4 с внятной диагностикой.
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          # OCR + image stack.
+          pip install pymupdf Pillow pytesseract ocrmypdf
+          # Preprocess + core.
+          pip install numpy opencv-python-headless scikit-image deskew cffi
+          # Qt (offscreen) — UI-тесты не гоняем, но импортеры app.py
+          # цепляют PySide6 через __init__.py.
+          pip install "PySide6>=6.6"
+          # Парсер зависимости: pymupdf уже стоит, openpyxl для Excel,
+          # rapidfuzz для fuzzy-match секционера.
+          pip install openpyxl rapidfuzz
+          # Validate-чек для этого workflow'а.
+          pip install PyYAML psutil python-docx
+
+      # ----- Шаг D: санитарная проверка YAML + компиляция всего
+      # кода. Ловит синтаксические ошибки парсера до того, как мы
+      # потратим 5 минут на Tesseract и обнаружим опечатку в
+      # fields.py.
+      - name: Compile-all + YAML validate
+        shell: pwsh
+        run: |
+          python -m compileall -q src scripts
+          python -c "import yaml; yaml.safe_load(open('.github/workflows/e2e-tn-pipeline.yml'))"
+
+      # ----- Шаг D2: parser-only golden (быстрый, не требует OCR)
+      # Прогоняем парсер на sidecar .txt (inputs/TN_k_UPD_*.txt,
+      # экспертно-чистый OCR-результат) — это sanity-gate по самому
+      # парсеру. Если он провалится, дальше запускать OCR не имеет
+      # смысла: деградация заведомо парсерного слоя. Порог 70 %
+      # закодирован в CLAUDE.md §планка (был 35 % → стал ≥ 70 %).
+      - name: Parser-only golden (sidecar text → parser)
+        shell: pwsh
+        run: |
+          # Гейтим парсерный слой отдельно: 70 % — нижняя планка
+          # из CLAUDE.md §планка. Упасть здесь = парсер деградировал
+          # вне зависимости от OCR-качества; OCR-путь дальше не нужен.
+          python scripts/run_golden.py --min-accuracy 0.70
+
+      # ----- Шаг E: сам OCR + парсер pipeline
+      # Запускаем на 4 реальных ТН из inputs/, сравниваем с
+      # expected/*.json, проверяем пороги accuracy + combined
+      # confidence. Если один PDF ниже порога — step падает.
+      - name: Run E2E OCR + parser pipeline
+        shell: pwsh
+        env:
+          # Qt offscreen — если кто-то из импортов тянет widget,
+          # чтобы не пытался открыть дисплей на headless-runner'е.
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python scripts/e2e_tn_pipeline.py `
+              --dpi ${env:OCR_DPI} `
+              --min-accuracy ${env:OCR_MIN_ACCURACY} `
+              --min-conf ${env:OCR_MIN_CONF} `
+              --verbose `
+              --json-out artifacts/e2e_tn_report.json
+
+      # ----- Шаг F: артефакт с JSON-отчётом
+      # Даже на зелёных прогонах удобно посмотреть тренд
+      # accuracy/confidence по времени. На красных — видеть
+      # конкретный per-field fail без пересборки CI-лога.
+      - name: Upload E2E report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-tn-report-${{ github.run_id }}
+          path: artifacts/e2e_tn_report.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ----- Шаг G: summary в GitHub Actions UI
+      # Markdown-таблица в summary виднa в run-overview без
+      # раскрытия лог-стримов. Экономит клик каждому, кто будет
+      # смотреть результат прогона (а это все: автор PR, ревьюер,
+      # release-инженер).
+      - name: Post summary table
+        if: always()
+        shell: pwsh
+        run: |
+          $report = "artifacts/e2e_tn_report.json"
+          if (-not (Test-Path $report)) {
+            "## E2E pipeline status`n`n_No report produced — pipeline failed before summary generation._" `
+                | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+            exit 0
+          }
+          $data = Get-Content $report -Raw | ConvertFrom-Json
+          $rows = $data.results
+          $lines = @()
+          $lines += "## E2E OCR + parser pipeline"
+          $lines += ""
+          $lines += "DPI: ``$($data.meta.dpi)`` · Tesseract: ``$($data.meta.tesseract_version)``"
+          $lines += ""
+          $lines += "| PDF | OCR conf | Parser conf | Combined | Accuracy | Time |"
+          $lines += "|---|---:|---:|---:|---:|---:|"
+          foreach ($r in $rows) {
+            $acc = if ([double]::IsNaN($r.accuracy)) { "—" }
+                   else { ("{0:N0}%" -f ($r.accuracy * 100)) }
+            $lines += ("| ``{0}`` | {1:N1}% | {2:N1}% | {3:N1}% | {4} | {5:N1}s |" -f `
+                $r.pdf,
+                ($r.ocr_confidence * 100),
+                ($r.parser_confidence * 100),
+                ($r.combined_confidence * 100),
+                $acc,
+                $r.elapsed_s)
+          }
+          ($lines -join "`n") | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
