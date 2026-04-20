@@ -29,10 +29,50 @@ Scope:
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+#: Absolute floor for the CAPS-Cyrillic-preservation heuristic. A
+#: word classified as a likely-company-name (all-caps Cyrillic, 3-7
+#: chars) is still dropped below this floor — Tesseract reports
+#: 10-20 % confidence on pure-noise regions where even a caps-only
+#: pattern match would be false positive. 25 % is tight enough to
+#: filter noise while keeping legitimate faded-ink company names
+#: the ``drop_low_conf_words`` filter would otherwise lose.
+_CAPS_COMPANY_MIN_CONFIDENCE: float = 25.0
+
+#: Pattern for "almost certainly a company / brand / agency name".
+#: 3-7 upper-case Cyrillic letters (with optional ``Ё``), no digits,
+#: no lowercase, no punctuation. On Russian transport / invoice /
+#: contract scans these tokens are almost always real — ``БЕКАМ``,
+#: ``ДСК``, ``АВТОРЕСУРС``, ``ОАО``, ``ООО`` etc. — and the
+#: surrounding-word confidence filter tends to drop them because
+#: the layout analyser put them on stamp-overlay lines where the
+#: per-word confidence comes back low. Preserving this shape of
+#: token lifts Russian-business recall without re-introducing the
+#: stamp noise the filter is there to kill.
+_CAPS_COMPANY_RE: re.Pattern[str] = re.compile(
+    r"^[А-ЯЁ]{3,7}$",
+)
+
+
+def _should_keep_despite_low_conf(word: str, conf: float) -> bool:
+    """Return True if this (word, conf) pair should be preserved even
+    though ``conf`` is below the caller's ``min_confidence``.
+
+    Currently the only preservation heuristic is the all-caps Cyrillic
+    3-7 character company-name pattern; any other word at low
+    confidence falls through to the default "drop" branch. Exposed as
+    a module-private helper so the tests can exercise the rule in
+    isolation.
+    """
+    if conf < _CAPS_COMPANY_MIN_CONFIDENCE:
+        return False
+    return bool(_CAPS_COMPANY_RE.match(word))
 
 
 def reconstruct_text_from_tsv(
@@ -91,7 +131,11 @@ def reconstruct_text_from_tsv(
             conf = float(confs[i]) if i < len(confs) else -1.0
         except (TypeError, ValueError):
             continue
-        if conf < 0 or conf < min_confidence:
+        if conf < 0:
+            continue
+        if conf < min_confidence and not _should_keep_despite_low_conf(
+            word, conf,
+        ):
             continue
 
         def _safe_int(seq: list[Any], idx: int) -> int:
