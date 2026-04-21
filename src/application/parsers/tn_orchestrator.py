@@ -38,10 +38,33 @@ logger = logging.getLogger(__name__)
 _KIND_TN_UPD = "tn_upd"
 
 
+def _collect_page_layout_info(pages: list[PageResult]) -> list[dict]:
+    """Собрать per-page info для layout-aware parser'а.
+
+    Returns list of dicts (aligned с pages indexing):
+        {"tsv": dict | None, "page_width": int, "raster_path": str | None}
+
+    Используется парсером для disambiguation соседних ячеек формы
+    (idea #1), OCR-conf propagation (#5) и per-field rescue (#6).
+    Пустые / errored pages дают placeholder-dict без данных — парсер
+    пропускает такие страницы для layout-aware path.
+    """
+    out: list[dict] = []
+    for p in pages:
+        out.append({
+            "tsv": getattr(p, "tsv_data", None),
+            "page_width": int(getattr(p, "page_width_px", 0) or 0),
+            "raster_path": getattr(p, "raster_path", None),
+        })
+    return out
+
+
 def extract_from_pages(
     pages: list[PageResult],
     config: ExtractConfig,
     source_path: Path,
+    *,
+    batch_ctx=None,  # BatchContext | None — soft type для избежания import cycle
 ) -> ParsedDocument | None:
     """Run the post-OCR parser on a job's per-page text.
 
@@ -127,7 +150,17 @@ def extract_from_pages(
 
     try:
         normalized = normalize_for_sections(raw_text)
-        rows = parse_text(normalized, str(source_path))
+        # Layout-aware + token-confidence + field-rescue integration
+        # (ideas #1/#5/#6 top-10): собираем per-page tsv / width /
+        # raster_path в tuples и передаём в parse_text для
+        # propagation через split_sections и _build_row.
+        page_tsv_info = _collect_page_layout_info(pages)
+        rows = parse_text(
+            normalized,
+            str(source_path),
+            page_tsv_info=page_tsv_info,
+            batch_ctx=batch_ctx,
+        )
     except Exception as exc:  # noqa: BLE001 — parser bugs must not sink the job
         logger.exception(
             "Post-OCR parser raised on %s: %s",

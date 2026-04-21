@@ -28,8 +28,11 @@ def test_initialize_builtins_creates_all(manager: ProfileManager) -> None:
     names = {p.name for p in manager.list_profiles()}
     for expected in BUILTIN_NAMES:
         assert expected in names
-    assert len(BUILTIN_NAMES) == 1
-    assert BUILTIN_NAMES == ("universal_accurate",)
+    # Апрель 2026: 2 builtin'а — universal_accurate (aggressive
+    # preprocessing) + universal_clean (minimal preprocessing для
+    # чистых сканов / digital-экспортов).
+    assert len(BUILTIN_NAMES) == 2
+    assert BUILTIN_NAMES == ("universal_accurate", "universal_clean")
 
 
 def test_builtins_marked_builtin(manager: ProfileManager) -> None:

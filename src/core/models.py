@@ -579,7 +579,7 @@ class ExtractConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 11
+PROFILE_SCHEMA_VERSION: int = 12
 
 
 @dataclass
@@ -773,7 +773,16 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         data["schema_version"] = 11
         version = 11
 
-    # Future migrations go here: `if version < 12: ...`
+    # v11 → v12 (апрель 2026): add ``postprocess.fuzzy_correction_ru``
+    # default False (preserves exact behaviour for старых профилей,
+    # builtin'ы перестраивают себя с каждым initialize_builtins).
+    if version < 12:
+        post = data.setdefault("postprocess", {})
+        post.setdefault("fuzzy_correction_ru", False)
+        data["schema_version"] = 12
+        version = 12
+
+    # Future migrations go here: `if version < 13: ...`
 
     return data
 
@@ -813,6 +822,21 @@ class PageResult:
     processing_time_sec: float = 0.0
     error: str | None = None
     skew_angle: float = 0.0
+    #: Raw ``pytesseract.image_to_data(output_type=DICT)`` на preprocessed
+    #: PNG. Используется парсером для layout-aware section detection
+    #: (src.tn_parser.layout_anchor) и token-level confidence propagation
+    #: (src.tn_parser.token_confidence). Опциональное поле — только если
+    #: pipeline.compute_confidence=True. None не означает «OCR failed»,
+    #: просто means «TSV не был вычислен» (например cache-hit).
+    tsv_data: dict | None = None
+    #: Ширина preprocessed страницы в px (того же raster'а что tsv_data).
+    #: Нужна для layout_anchor.find_tokens_by_column. 0 = unknown.
+    page_width_px: int = 0
+    #: Абсолютный путь к preprocessed PNG этой страницы. Pipeline
+    #: сохраняет если ``preserve_page_rasters=True`` в профиле (off by
+    #: default — большие PNG'и). Используется field_rescue для
+    #: targeted re-OCR конкретных bbox'ов. None если raster уже удалён.
+    raster_path: str | None = None
 
 
 @dataclass

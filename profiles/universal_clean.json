@@ -1,6 +1,6 @@
 {
-  "name": "universal_accurate",
-  "description": "Универсальный builtin (апрель 2026): менее агрессивная предобработка для сохранения мелкого шрифта. 300 DPI (баланс speed vs quality — 400 DPI давал blur при up-sample с 200-DPI embeds), Sauvola window=51 k=0.34 (мягкая бинаризация, мелкий шрифт не выжигается), CLAHE clip=1.5, deskew, border-removal только длинных линий (≥ 150 px), denoise выключен (убивал тонкие штрихи). Полный postprocessing + validate_identifiers + fuzzy_correction_ru + lexicon_corrector + pymorphy3-validated dictionary. extract.kind=tn_upd — встроенный парсер ТН/УПД с multi-document + layout-aware + batch-learning.",
+  "name": "universal_clean",
+  "description": "Минимальная предобработка для чистых сканов / digital-экспортов / уже OCR'нутых PDF. Только deskew + OTSU. Без Sauvola / CLAHE / denoise / border removal — сохраняет мелкий шрифт в ячейках таблиц и слабые штрихи подписей. Выгоднее universal_accurate когда на входе high-contrast скан: предобработка экономит ~10 sec и не портит исходный raster. Текстовый слой + парсер полностью те же.",
   "schema_version": 12,
   "preprocess": {
     "auto_rotate": {
@@ -21,19 +21,19 @@
       "focal_length": 1.2
     },
     "binarization": {
-      "method": "sauvola",
+      "method": "otsu",
       "adaptive_block_size": 31,
       "adaptive_c": 10,
-      "sauvola_window": 51,
-      "sauvola_k": 0.34
+      "sauvola_window": 25,
+      "sauvola_k": 0.2
     },
     "denoise": {
       "enabled": false,
       "steps": []
     },
     "contrast": {
-      "clahe_enabled": true,
-      "clahe_clip": 1.5,
+      "clahe_enabled": false,
+      "clahe_clip": 2.0,
       "clahe_tile": 8,
       "manual_enabled": false,
       "alpha": 1.0,
@@ -44,8 +44,8 @@
       "blur_kernel": 55
     },
     "border_removal": {
-      "enabled": true,
-      "min_line_length": 150
+      "enabled": false,
+      "min_line_length": 75
     }
   },
   "ocr": {
@@ -61,12 +61,12 @@
     "char_whitelist": "",
     "char_blacklist": "",
     "confidence_threshold": 60.0,
-    "tesseract_timeout": 360,
+    "tesseract_timeout": 180,
     "optimize_level": 1,
     "skip_text": true,
     "max_pages": 0,
     "use_user_dictionaries": true,
-    "drop_low_conf_words": true,
+    "drop_low_conf_words": false,
     "soft_rescue_dropped_words": true,
     "redact_noisy_blocks": false,
     "adaptive_confidence_threshold": true,
@@ -111,5 +111,5 @@
     }
   },
   "builtin": true,
-  "created_at": "2026-04-21T05:57:02.275527+00:00"
+  "created_at": "2026-04-21T20:00:00+00:00"
 }

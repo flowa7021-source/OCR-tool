@@ -258,8 +258,117 @@ def extract_raw_text(pdf_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_row(text: str, source: str, global_fallback: str = "") -> ParsedRow:
-    sections = split_sections(text)
+def _try_field_rescue(
+    row: ParsedRow,
+    raster_path: str,
+    tsv: dict,
+    page_width: int,
+) -> None:
+    """Попытка field-rescue для MISSING/GARBAGE полей (idea #6).
+
+    Для driver/vehicle: если поле потеряно, ищем в tsv anchor'ы
+    «6. Водитель» / «7. Транспортное средство», достаём bbox
+    следующей строки (value под label'ом) и re-OCR'им её с
+    targeted PSM. Это best-effort — tolerate failure silently.
+    """
+    # Локальные импорты — чтобы failure одного модуля не сломал
+    # общий парсинг.
+    try:
+        import cv2
+        import numpy as np
+
+        from .field_rescue import rescue_field
+        from .layout_anchor import find_section_region
+    except ImportError:
+        return
+
+    if not raster_path or page_width <= 0:
+        return
+
+    try:
+        raw = np.fromfile(raster_path, dtype=np.uint8)
+        raster = cv2.imdecode(raw, cv2.IMREAD_UNCHANGED)
+        if raster is None:
+            return
+    except Exception:  # noqa: BLE001
+        return
+
+    rescue_plan = [
+        ("driver", r"водител", 7, None),
+        ("vehicle", r"транспортн\w+\s+средств", 7, None),
+    ]
+    for field_name, anchor, psm, whitelist in rescue_plan:
+        current = getattr(row, field_name, "")
+        if current and current not in (MISSING, GARBAGE):
+            continue
+        region = find_section_region(
+            tsv, anchor_pattern=anchor,
+            prefer_column="left", page_width=page_width,
+        )
+        if region is None:
+            continue
+        _top, bottom = region
+        # Берём ~200 px вниз от якоря (typical value-row высота).
+        value_top = bottom + 5
+        height, width = raster.shape[:2]
+        if value_top >= height:
+            continue
+        bbox_h = min(200, height - value_top)
+        bbox = (0, value_top, width, bbox_h)
+        try:
+            text, conf = rescue_field(
+                raster, bbox=bbox, psm=psm, whitelist=whitelist,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        if text and conf >= 0.3:
+            setattr(row, field_name, text)
+
+
+def _build_token_conf_map(tsv: dict):
+    """Из pytesseract TSV в ``TokenConfMap``: char-ranges в
+    восстановленной flat-text + OCR-conf каждого токена.
+
+    Восстановленный text — space-separated token text'ы (тот формат
+    что потом matches parsed text после нормализаций). Не 100 %
+    accurate против normalized-text (он мог пройти lexicon/fuzzy-
+    correct'ы), но ``for_substring`` ищет подстроку в любом случае.
+    """
+    from .token_confidence import TokenConfMap
+    if not tsv or not tsv.get("text"):
+        return TokenConfMap.from_ranges([])
+    ranges: list[tuple[int, int, float]] = []
+    pos = 0
+    texts = tsv["text"]
+    confs = tsv.get("conf", [])
+    for i in range(len(texts)):
+        token = str(texts[i] or "").strip()
+        if not token:
+            continue
+        try:
+            conf = float(confs[i])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if conf < 0:
+            continue
+        ranges.append((pos, pos + len(token), conf))
+        pos += len(token) + 1  # +1 для space-separator
+    return TokenConfMap.from_ranges(ranges)
+
+
+def _build_row(
+    text: str,
+    source: str,
+    global_fallback: str = "",
+    *,
+    tsv: dict | None = None,
+    page_width: int = 0,
+    raster_path: str | None = None,
+) -> ParsedRow:
+    # Передаём tsv + page_width в split_sections для layout-aware
+    # disambig (idea #1 top-10). Sections.split_sections is backward-
+    # compat: без tsv работает как раньше.
+    sections = split_sections(text, tsv=tsv, page_width=page_width)
     fields = extract_all(sections, text)
 
     # Для сводных PDF (несколько ТН в одном файле) одна TN иногда
@@ -403,12 +512,32 @@ def _build_row(text: str, source: str, global_fallback: str = "") -> ParsedRow:
         catalog=None,
     )
 
+    # Token-level confidence (idea #5 top-10): строим TokenConfMap
+    # из tsv-dict если доступен, и применяем combine_confidences
+    # к структурной conf реквизитов. Без tsv → legacy behavior
+    # (reqs =1.0 когда present).
+    _tcmap = None
+    if tsv:
+        try:
+            from .token_confidence import combine_confidences
+            _tcmap = _build_token_conf_map(tsv)
+        except Exception:  # noqa: BLE001
+            _tcmap = None
+
     def _req_conf(value: str, xcheck_delta: float) -> float:
-        """Confidence реквизита: 1.0 если извлечён + нет mismatch'а,
-        иначе max(0.5, 1.0 + delta)."""
+        """Confidence реквизита: structural 1.0/mismatch-delta, умноженная
+        на OCR-conf через combine_confidences (если tsv доступен).
+        Без value → 0.0."""
         if not value:
             return 0.0
-        return max(0.5, min(1.0, 1.0 + xcheck_delta))
+        structural = max(0.5, min(1.0, 1.0 + xcheck_delta))
+        if _tcmap is not None:
+            try:
+                ocr_conf = _tcmap.for_substring(text, value)
+                return combine_confidences(structural, ocr_conf)
+            except Exception:  # noqa: BLE001
+                pass
+        return structural
 
     row.confidence = FieldConfidence(
         date=fields["date"][1],
@@ -428,6 +557,17 @@ def _build_row(text: str, source: str, global_fallback: str = "") -> ParsedRow:
         vehicle=fields["vehicle"][1],
         reception=min(1.0, fields["reception"][1] + rc_delta),
     )
+
+    # Field-rescue (idea #6 top-10) — targeted re-OCR на bbox'е
+    # конкретного поля когда оно MISSING/GARBAGE. Включается только
+    # если raster_path + tsv доступны (значит мы знаем где каждое
+    # слово на странице). Per-field config:
+    #   driver    — PSM=7 single-line, Cyrillic-only whitelist
+    #   vehicle   — PSM=7 single-line, Cyrillic + digits whitelist
+    # Gate: ``ocr.per_field_rescue`` в профиле (default False — перf).
+    # Реализация noop если модули недоступны или conf rescue низкий.
+    if raster_path and tsv:
+        _try_field_rescue(row, raster_path, tsv, page_width)
 
     if row.number not in (MISSING, GARBAGE):
         row.waybill = f"Транспортная накладная № {row.number}"
@@ -607,8 +747,28 @@ def _apply_multi_row_voting(rows: list[ParsedRow]) -> None:
                 )
 
 
-def parse_text(text: str, source: str) -> list[ParsedRow]:
-    """Парсит нормализованный текст, возвращая одну или несколько строк."""
+def parse_text(
+    text: str,
+    source: str,
+    *,
+    page_tsv_info: list[dict] | None = None,
+    batch_ctx=None,  # BatchContext | None
+) -> list[ParsedRow]:
+    """Парсит нормализованный текст, возвращая одну или несколько строк.
+
+    Args:
+        text: Нормализованный OCR-text, страницы разделены ``\\f``.
+        source: Путь к source PDF для ``ParsedRow.source``.
+        page_tsv_info: Optional list of per-page layout-info dicts из
+            :func:`src.application.parsers.tn_orchestrator._collect_
+            page_layout_info`. Используется для layout-aware section
+            detection (idea #1), token-confidence propagation (#5),
+            field-rescue (#6). ``None`` → legacy text-only path.
+        batch_ctx: Optional BatchContext для cross-document learning
+            (idea #3). Orchestrator передаёт один shared context
+            на batch — первый doc high-conf записывается, следующие
+            могут подтягивать реквизиты по fuzzy name-match.
+    """
     if not text or not text.strip():
         return [ParsedRow.empty_missing(source, note="LOW_TEXT")]
 
@@ -616,10 +776,32 @@ def parse_text(text: str, source: str) -> list[ParsedRow]:
     # Для сводных PDF (несколько ТН) передаём полный текст как fallback
     # для cargo/volume — иначе груз, попавший в чужой doc, теряется.
     global_fallback = text if len(documents) > 1 else ""
+
+    # Aggregated tsv / page_width по всем страницам: для single-doc
+    # случая (самый частый) — просто первый page-info; для multi-doc
+    # тоже используем агрегат, т.к. pages мы уже склеили в documents
+    # по \f и не можем разложить обратно точно. Это acceptable —
+    # layout disambig работает best-effort, fallback regex всегда.
+    aggregated_tsv: dict | None = None
+    aggregated_width: int = 0
+    first_raster: str | None = None
+    if page_tsv_info:
+        for pinfo in page_tsv_info:
+            if pinfo.get("tsv"):
+                aggregated_tsv = pinfo["tsv"]
+                aggregated_width = int(pinfo.get("page_width", 0) or 0)
+                first_raster = pinfo.get("raster_path")
+                break
+
     rows: list[ParsedRow] = []
     for i, doc in enumerate(documents):
         row_source = source if len(documents) == 1 else f"{source}#{i + 1}"
-        row = _build_row(doc, row_source, global_fallback)
+        row = _build_row(
+            doc, row_source, global_fallback,
+            tsv=aggregated_tsv,
+            page_width=aggregated_width,
+            raster_path=first_raster,
+        )
         # Фильтр мусора для сводных PDF: UPD / REGISTRY / BLANK страницы
         # часто создают пустые row'ы с конф 0. Не загрязняем Excel.
         if len(documents) > 1 and _is_noise_row(row):
@@ -627,10 +809,34 @@ def parse_text(text: str, source: str) -> list[ParsedRow]:
         rows.append(row)
     # Если все отфильтрованы — вернём хотя бы первый (fallback-страховка).
     if not rows and documents:
-        rows.append(_build_row(documents[0], source, global_fallback))
+        rows.append(
+            _build_row(
+                documents[0], source, global_fallback,
+                tsv=aggregated_tsv, page_width=aggregated_width,
+                raster_path=first_raster,
+            )
+        )
     # Cross-row voting по ORG-полям (shipper/consignee/reception).
     # На sparse multi-TN PDF даёт консистентность + conf boost.
     _apply_multi_row_voting(rows)
+
+    # Batch learning (idea #3): apply before add, чтобы первый doc
+    # не само-learn'ил. Сначала каждая row пробует подтянуть из
+    # предыдущих docs batch'а (apply_learning), затем high-conf row
+    # сам попадает в seen (add_row) для следующих docs батча.
+    if batch_ctx is not None:
+        for row in rows:
+            try:
+                row_dict = row.to_json_dict()
+                batch_ctx.apply_learning(row_dict)
+                # Sync back learned values в dataclass.
+                for k, v in row_dict.items():
+                    if hasattr(row, k):
+                        setattr(row, k, v)
+                batch_ctx.add_row(row_dict)
+            except Exception:  # noqa: BLE001 — batch-context не критичен
+                pass
+
     return rows
 
 

@@ -1445,10 +1445,18 @@ class OCRPipeline:
             )
             return
         try:
+            # Batch context propagation (idea #3 top-10): pipeline
+            # может работать в batch-mode через ParallelProcessor
+            # или CLI folder-batch. Если caller подготовил общий
+            # BatchContext и передал его через job.batch_ctx,
+            # орchestrator использует его для cross-doc learning.
+            # Single-doc runs — batch_ctx=None, no-op.
+            batch_ctx = getattr(job, "batch_ctx", None)
             result.parsed = extract_from_pages(
                 pages=result.pages,
                 config=job.profile.extract,
                 source_path=Path(result.input_path),
+                batch_ctx=batch_ctx,
             )
         except Exception as exc:  # noqa: BLE001 — belt-and-braces
             logger.exception(
@@ -1863,6 +1871,20 @@ class OCRPipeline:
                 if confidences:
                     pr.mean_confidence = sum(confidences) / len(confidences)
                     pr.low_confidence_words = low_words
+
+                # Layout-aware parser (idea #1 top-10) + token-level
+                # confidence propagation (idea #5) нуждаются в raw
+                # TSV + размерах raster'а. Сохраняем на result — оно
+                # optional, ноль overhead для callers которые не
+                # используют парсер.
+                pr.tsv_data = data
+                try:
+                    pr.page_width_px = int(img.shape[1])
+                except Exception:  # noqa: BLE001
+                    pr.page_width_px = 0
+                # Сохраняем путь к preprocessed PNG — field_rescue
+                # (idea #6) его использует для targeted re-OCR.
+                pr.raster_path = str(png_path) if png_path.exists() else None
 
                 # Word-level drop: rebuild pr.text from the same TSV,
                 # dropping every word below ``confidence_threshold``. The

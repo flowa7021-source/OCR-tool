@@ -33,7 +33,7 @@ from src.infrastructure.config_storage import ProfileStorage
 
 def test_current_schema_version_is_11() -> None:
     """Gate against accidental bumps: PR #2 targets exactly v11."""
-    assert PROFILE_SCHEMA_VERSION == 11
+    assert PROFILE_SCHEMA_VERSION == 12
 
 
 def test_extract_defaults_are_offline_safe() -> None:
@@ -87,7 +87,7 @@ def test_migration_v10_adds_extract_disabled() -> None:
     d["schema_version"] = 10
     d["ocr"] = {"soft_rescue_dropped_words": True}  # v10-authored
     loaded = ProfileData.from_dict(d)
-    assert loaded.schema_version == 11
+    assert loaded.schema_version == 12
     assert loaded.ocr.soft_rescue_dropped_words is True
     assert loaded.extract.enabled is False
 
@@ -100,7 +100,7 @@ def test_migration_preserves_existing_extract_section() -> None:
     False.
     """
     d = _v9_profile_dict()
-    d["schema_version"] = 11
+    d["schema_version"] = 12
     d["extract"] = {
         "enabled": True,
         "kind": "tn_upd",

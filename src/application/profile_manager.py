@@ -17,7 +17,6 @@ from src.core.models import (
     BorderRemovalConfig,
     ContrastConfig,
     DenoiseConfig,
-    DenoiseStep,
     DeskewConfig,
     DewarpConfig,
     ExtractConfig,
@@ -32,7 +31,6 @@ from src.shared.types import (
     OEM,
     PSM,
     BinarizationMethod,
-    DenoiseMethod,
     OptimizeLevel,
 )
 
@@ -52,7 +50,7 @@ logger = logging.getLogger(__name__)
 # Пользовательские профили (``builtin=False``) продолжают работать
 # через ProfileStorage. Документ-специфичные настройки теперь
 # конфигурируются duplicate'ом + ручной правкой.
-BUILTIN_NAMES: tuple[str, ...] = ("universal_accurate",)
+BUILTIN_NAMES: tuple[str, ...] = ("universal_accurate", "universal_clean")
 
 
 # Tesseract ``-c`` parameters applied to every builtin profile.
@@ -186,7 +184,10 @@ class ProfileManager:
         но больше не пере-сидятся. При желании их можно удалить через
         ``ProfileManager.delete(name)``.
         """
-        builders = {"universal_accurate": self._build_universal_accurate}
+        builders = {
+            "universal_accurate": self._build_universal_accurate,
+            "universal_clean": self._build_universal_clean,
+        }
         for name, builder in builders.items():
             profile = builder()
             profile.builtin = True
@@ -272,27 +273,29 @@ class ProfileManager:
             # computes per-window mean + std so each image region
             # gets its own threshold. The synthetic regression
             # (clean-paper text) wasn't representative of the
-            # real workload. Keep Sauvola here; users who want
-            # the old behaviour can pick ``default`` (OTSU).
+            # real workload. Sauvola оставлен, но с большим window
+            # (51 вместо 25) и k=0.34 вместо 0.2 — апрель 2026 после
+            # жалоб пользователя что мелкий шрифт в ячейках таблиц
+            # ТН выжигается и превращается в кашу. Window=51 — это
+            # ~0.17 inch на 300 DPI, достаточно для контекста 10pt
+            # шрифта; k=0.34 — стандартное значение для document-
+            # imaging (исходный Sauvola paper, 1997).
             binarization=BinarizationConfig(
                 method=BinarizationMethod.SAUVOLA,
-                sauvola_window=25,
-                sauvola_k=0.2,
+                sauvola_window=51,
+                sauvola_k=0.34,
             ),
-            denoise=DenoiseConfig(
-                enabled=True,
-                steps=[
-                    DenoiseStep(method=DenoiseMethod.MEDIAN, ksize=3),
-                ],
-            ),
-            # CLAHE clip 2.0 (reverted from 3.0). The 3.0 bump pushed
-            # the same Apr 2026 benchmark into the diacritic-artifact
-            # regime: high clip + adaptive binarisation + background
-            # division amplified subpixel noise into fake glyphs.
-            # 2.0 is the conservative value that behaved correctly
-            # across every profile we benchmarked.
+            # Denoise OFF по default — median/gaussian убивают
+            # тонкие штрихи мелкого шрифта. Пользователь опрокинул
+            # наблюдение: с denoise conf=35-52%, без него =86%.
+            # Кто нужно — включает через duplicate + enabled=True.
+            denoise=DenoiseConfig(enabled=False, steps=[]),
+            # CLAHE clip 1.5 (снижено с 2.0) — тот же ответ на
+            # «preprocessing слишком агрессивна»: высокий clip
+            # амплифицирует noise до fake-glyphs, 1.5 — minimal
+            # enhancement для тёмных/светлых scan'ов.
             contrast=ContrastConfig(
-                clahe_enabled=True, clahe_clip=2.0, clahe_tile=8
+                clahe_enabled=True, clahe_clip=1.5, clahe_tile=8
             ),
             # Background removal OFF (reverted from on). Measurement
             # showed it added ~5 % CER on clean synthetic scans
@@ -310,8 +313,14 @@ class ProfileManager:
             # 75 px is the 300-DPI baseline; ImagePreprocessor scales
             # it to the runtime DPI, so it stays at ~0.25 inch at any
             # render resolution.
+            # min_line_length поднят 75 → 150 (апрель 2026) — 75px
+            # это всего ~0.25 inch, часто захватывало длинные слова
+            # мелким шрифтом в таблицах и стирало их. 150 px = 0.5
+            # inch — так морфология срабатывает только на longест
+            # табличных рамках и горизонтальных линейках, не на
+            # text baseline.
             border_removal=BorderRemovalConfig(
-                enabled=True, min_line_length=75,
+                enabled=True, min_line_length=150,
             ),
         )
         ocr = OCRConfig(
@@ -319,18 +328,15 @@ class ProfileManager:
             primary_language="rus",
             psm=PSM.AUTO,
             oem=OEM.LSTM_ONLY,
-            # 400 DPI is the LSTM sweet spot for printed Russian text.
-            # Tesseract's LSTM was trained on 150–300 DPI corpora; at
-            # 500–600 DPI the pixel features grow beyond what the net
-            # saw, softmax confidence drops, and the layout analyser
-            # crashes far more often (5000×7000 px A4 → retry tiers at
-            # 200 DPI, which are strictly worse than the originally
-            # requested DPI). 400 gives enough pixels-per-glyph for
-            # 10 pt body text without tripping either failure mode.
-            # Combined with DPI-adaptive preprocessing (kernel sizes
-            # auto-scale in ImagePreprocessor), this delivers the
-            # stable-95-%-confidence target the user asked for.
-            dpi=400,
+            # 300 DPI (снижено с 400, апрель 2026). Real scans в
+            # inputs/ embed'ятся 200 DPI; up-sample 200→400 давал
+            # blurring через интерполяцию, Sauvola-binarisation
+            # потом не могла восстановить strokes. Tesseract LSTM
+            # training corpora 150-300 DPI — 300 попадает в sweet
+            # spot без interpolation-artefacts. На digital PDF
+            # 300-400 DPI exports работает без потерь; на синтетике
+            # `render_clean_text_pdf` тоже не регрессирует.
+            dpi=300,
             optimize_level=OptimizeLevel.LOSSLESS,
             confidence_threshold=60.0,
             skip_text=True,
@@ -485,19 +491,122 @@ class ProfileManager:
         return ProfileData(
             name="universal_accurate",
             description=(
-                "Универсальный builtin максимальной точности (декабрь 2026): "
-                "собрал best-of-all из удалённых default / quick_reliable / "
-                "low_quality_scan / contracts_ru / english_text / tn_upd. "
-                "400 DPI (LSTM sweet spot), Sauvola + мягкий CLAHE + "
-                "deskew + удаление рамок таблиц, полный postprocessing с "
-                "validate_identifiers / validate_entities, "
-                "load_freq_dawg=0 для ИНН/КПП/ОГРН, skip_text для уже "
-                "OCR'нутых PDF, встроенный парсер ТН/УПД (extract.kind=tn_upd) "
-                "с multi-document support."
+                "Универсальный builtin (апрель 2026): менее агрессивная "
+                "предобработка для сохранения мелкого шрифта. 300 DPI, "
+                "Sauvola window=51 k=0.34, CLAHE clip=1.5, deskew, border "
+                "removal ≥ 150 px, denoise OFF. Полный postprocessing + "
+                "fuzzy_correction_ru + pymorphy3-validated dictionary. "
+                "extract.kind=tn_upd — встроенный парсер с multi-document "
+                "+ layout-aware + batch-learning."
             ),
             preprocess=preprocess,
             ocr=ocr,
             postprocess=postprocess,
             extract=extract,
         )
+
+    def _build_universal_clean(self) -> ProfileData:
+        """Minimal-preprocessing preset для чистых / digital сканов.
+
+        Use-case: пользователь загружает PDF с чистым белым фоном
+        (digital-экспорт, свежий high-DPI scan, уже OCR'нутый через
+        другой tool). У такого входа predecessing WRED:
+          * Sauvola стирает тонкие штрихи мелкого шрифта.
+          * CLAHE амплифицирует noise до fake-glyphs.
+          * Border removal цепляет длинные слова и удаляет их.
+          * Denoise median свёртывает лигатуры.
+
+        Решение — skip большинство preprocessing-шагов:
+          * OTSU binarisation (fast, лучше Sauvola на high-contrast).
+          * Нет CLAHE, нет denoise, нет border removal.
+          * Нет background removal.
+          * Deskew оставлен — дёшево и полезно даже на digital.
+
+        Весь postprocess + парсер (extract.kind=tn_upd) те же что
+        у universal_accurate. Различие только в image-pipeline.
+
+        Когда выбирать:
+          * Digital-экспорт (Word → Save as PDF) — `universal_clean`.
+          * Уже OCR'нутый PDF (text layer есть) — `universal_clean`
+            (pipeline всё равно делает text-layer bypass).
+          * Качественный scan (high contrast, no skew, sharp) —
+            `universal_clean`.
+          * Размытый / faded / shadowed / noisy scan — оставить
+            `universal_accurate`.
+        """
+        preprocess = PreprocessConfig(
+            auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
+            deskew=DeskewConfig(enabled=True, auto_detect=True),
+            dewarp=DewarpConfig(enabled=False),
+            binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
+            denoise=DenoiseConfig(enabled=False, steps=[]),
+            contrast=ContrastConfig(clahe_enabled=False),
+            background=BackgroundConfig(enabled=False),
+            border_removal=BorderRemovalConfig(enabled=False),
+        )
+        ocr = OCRConfig(
+            languages=["rus", "eng"],
+            primary_language="rus",
+            psm=PSM.AUTO,
+            oem=OEM.LSTM_ONLY,
+            dpi=300,
+            optimize_level=OptimizeLevel.LOSSLESS,
+            confidence_threshold=60.0,
+            tesseract_timeout=180,  # меньше чем у accurate — clean scans быстрее
+            skip_text=True,
+            max_pages=0,
+            use_user_dictionaries=True,
+            drop_low_conf_words=False,  # минимум вмешательства
+            soft_rescue_dropped_words=True,
+            redact_noisy_blocks=False,
+            adaptive_confidence_threshold=True,
+            per_word_script_disambiguation=True,
+            per_word_clahe_rescue=True,
+            per_word_upscale_rescue=True,
+            user_words_fuzzy_rescue=True,
+            per_block_psm_retry=True,
+            extra_tesseract_params={
+                **_COMMON_TESSERACT_PARAMS,
+                "load_freq_dawg": "0",
+            },
+        )
+        postprocess = PostprocessConfig(
+            autocorrect_russian=True,
+            autocorrect_english=True,
+            merge_hyphenated=True,
+            normalize_whitespace=True,
+            normalize_unicode=True,
+            remove_artifacts=True,
+            fix_cyrillic_latin_confusion=True,
+            garbage_filter_strictness="lenient",
+            mark_suspect_handwritten_blocks=True,
+            validate_identifiers=True,
+            validate_entities=True,
+            fuzzy_correction_ru=True,
+            custom_rules=[],
+        )
+        extract = ExtractConfig(
+            enabled=True,
+            kind="tn_upd",
+            multi_document=True,
+            low_text_threshold=200,
+            cache_enabled=True,
+            org_lookup=True,
+            llm_fallback=LlmFallbackConfig(enabled=False),
+        )
+        return ProfileData(
+            name="universal_clean",
+            description=(
+                "Минимальная предобработка для чистых сканов / digital-"
+                "экспортов / уже OCR'нутых PDF. Только deskew + OTSU. "
+                "Без Sauvola / CLAHE / denoise / border removal — "
+                "сохраняет мелкий шрифт и слабые штрихи. Выгоднее "
+                "universal_accurate когда на входе high-contrast скан."
+            ),
+            preprocess=preprocess,
+            ocr=ocr,
+            postprocess=postprocess,
+            extract=extract,
+        )
+
 
