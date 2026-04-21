@@ -185,9 +185,17 @@ class TestRussianUserPatternsContents:
         )
 
     def test_contains_date_ddmmyyyy_pattern(self) -> None:
-        """DD.MM.YYYY is the dominant Russian date format on documents."""
+        """DD.MM.YYYY is the dominant Russian date format on documents.
+
+        Апрель 2026: pattern записан как ``\\d\\d.\\d\\d.\\d\\d\\d\\d``
+        — точка НЕ экранируется. Tesseract user-patterns-parser
+        принимает escape только для класс-токенов (``\\d`` / ``\\A`` /
+        ``\\c`` / ``\\n`` / ``\\p`` / ``\\*``); попытка экранировать
+        обычный punctuation (``\\.`` / ``\\+`` / ``\\-``) приводит к
+        «[tesseract] Invalid user pattern …» на каждом OCR-вызове.
+        """
         patterns = _read_patterns("user-patterns.rus")
-        expected = r"\d\d\.\d\d\.\d\d\d\d"
+        expected = r"\d\d.\d\d.\d\d\d\d"
         assert expected in patterns, (
             f"Expected date pattern {expected!r} in user-patterns.rus"
         )
