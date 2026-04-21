@@ -297,6 +297,29 @@ def _build_row(text: str, source: str, global_fallback: str = "") -> ParsedRow:
                   "driver", "vehicle", "reception"):
         setattr(row, fname, normalise_handwritten(getattr(row, fname)))
 
+    # Fuzzy-нормализация имени организации против catalog.names
+    # (idea #9 top-10). OCR-typo вида «ГЕКСАФОРМ СГБ» → «ГЕКСАФОРМ
+    # СПБ» ловится rapidfuzz'ом ≥ 85 % даже когда ИНН в строке
+    # отсутствует / искажён. Работает до ``_catalog_crossvalidate``,
+    # чтобы nameFIO в последующей catalog-проверке уже был
+    # каноническим.
+    try:
+        from src.core.doc_catalog import load_default_catalog
+
+        from .org_normalizer import normalize_org_name
+
+        _catalog_obj = load_default_catalog()
+        _candidates = list(_catalog_obj.names) if _catalog_obj else []
+        for fname in ("shipper", "consignee", "reception"):
+            raw_val = getattr(row, fname)
+            if not raw_val or raw_val in (MISSING, GARBAGE):
+                continue
+            normalized = normalize_org_name(raw_val, _candidates)
+            if normalized != raw_val:
+                setattr(row, fname, normalized)
+    except Exception:  # pragma: no cover — fuzzy не критичен для pipeline
+        pass
+
     # Cross-validate ORG-поля через ИНН-каталог: если извлечённая
     # строка содержит валидный ИНН и он есть в каталоге, добавляем
     # canonical-name как аннотацию (для shipper/reception) и
