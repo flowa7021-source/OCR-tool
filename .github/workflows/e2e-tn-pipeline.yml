@@ -217,7 +217,9 @@ jobs:
         shell: pwsh
         run: |
           python -m compileall -q src scripts
-          python -c "import yaml; yaml.safe_load(open('.github/workflows/e2e-tn-pipeline.yml'))"
+          # encoding='utf-8' обязателен: на Windows default cp1252
+          # не декодирует UTF-8-байты (русские комментарии в YAML).
+          python -c "import yaml; yaml.safe_load(open('.github/workflows/e2e-tn-pipeline.yml', encoding='utf-8'))"
 
       # ----- Шаг D2: parser-only golden (быстрый, не требует OCR)
       # Прогоняем парсер на sidecar .txt (inputs/TN_k_UPD_*.txt,
