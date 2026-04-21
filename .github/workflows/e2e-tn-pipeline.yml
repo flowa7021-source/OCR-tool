@@ -234,15 +234,50 @@ jobs:
           # вне зависимости от OCR-качества; OCR-путь дальше не нужен.
           python scripts/run_golden.py --min-accuracy 0.70
 
-      # ----- Шаг E: сам OCR + парсер pipeline
-      # Запускаем на 4 реальных ТН из inputs/, сравниваем с
-      # expected/*.json, проверяем пороги accuracy + combined
-      # confidence. Если один PDF ниже порога — step падает.
-      - name: Run E2E OCR + parser pipeline
+      # ----- Шаг D3: parser ceiling на чистом входе
+      # Подтверждает что парсер сам по себе может достигать ≥ 90 %
+      # confidence на корпусе inputs/TN_k_UPD_*.txt (эталонный
+      # OCR-результат). Это «потолок симбиоза»: если OCR выдал
+      # clean-текст, парсер обязан выдать conf 90+%. Раскрывает
+      # регрессии парсер-слоя, которые run_golden может пропустить
+      # (run_golden проверяет значения полей, а не confidence).
+      - name: Parser ceiling on clean sidecar text (parser conf ≥ 0.90)
+        shell: pwsh
+        run: |
+          python -c @'
+          import sys; sys.path.insert(0, ".")
+          from pathlib import Path
+          from src.tn_parser.core import parse_text
+          from src.tn_parser.normalize import normalize_for_sections
+
+          failed = []
+          for p in sorted(Path("inputs").glob("TN_k_UPD_*.txt")):
+              rows = parse_text(
+                  normalize_for_sections(p.read_text(encoding="utf-8")),
+                  p.name,
+              )
+              if not rows:
+                  failed.append((p.name, "no rows"))
+                  continue
+              avg = sum(r.confidence.overall() for r in rows) / len(rows)
+              print(f"  {p.name}: {len(rows)} rows, avg parser conf = {avg*100:.1f}%")
+              if avg < 0.90:
+                  failed.append((p.name, f"parser conf {avg*100:.1f}% < 90%"))
+          if failed:
+              print("\nCeiling test FAILED:", file=sys.stderr)
+              for name, reason in failed:
+                  print(f"  - {name}: {reason}", file=sys.stderr)
+              sys.exit(2)
+          print("\nParser ceiling OK (все avg parser conf ≥ 90%).")
+          '@
+
+      # ----- Шаг E1: быстрый pytesseract-путь (baseline)
+      # Минимальный e2e без production pipeline: pytesseract +
+      # parse_text. Использует --dpi/--min-accuracy/--min-conf
+      # из workflow_dispatch (или дефолты 300/0.40/0.30).
+      - name: Run fast E2E (pytesseract + parser)
         shell: pwsh
         env:
-          # Qt offscreen — если кто-то из импортов тянет widget,
-          # чтобы не пытался открыть дисплей на headless-runner'е.
           QT_QPA_PLATFORM: offscreen
         run: |
           python scripts/e2e_tn_pipeline.py `
@@ -250,18 +285,43 @@ jobs:
               --min-accuracy ${env:OCR_MIN_ACCURACY} `
               --min-conf ${env:OCR_MIN_CONF} `
               --verbose `
-              --json-out artifacts/e2e_tn_report.json
+              --json-out artifacts/e2e_tn_report_fast.json
 
-      # ----- Шаг F: артефакт с JSON-отчётом
+      # ----- Шаг E2: полный production pipeline
+      # Это тот же путь, который работает у пользователя в GUI и
+      # в ``ocr-cli input.pdf --profile tn_upd --excel``:
+      # ImagePreprocessor (Sauvola/OTSU/adaptive, deskew, CLAHE,
+      # border_removal) + Tesseract + TextPostprocessor
+      # (autocorrect_russian, fix_cyrillic_latin_confusion,
+      # validate_entities) + tn_parser orchestrator. Именно этот
+      # путь достигает максимального combined confidence; в локальных
+      # замерах на inputs/TN_k_UPD_36: OCR 47% / parser 54% / comb 51%
+      # / acc 67%. На продакшен-чистых сканах (не наши inputs/) —
+      # выше, т.к. preprocessing там эффективнее.
+      - name: Run full E2E (production OCRPipeline + parser)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python scripts/e2e_tn_pipeline_full.py `
+              --profile tn_upd `
+              --min-accuracy 0.50 `
+              --min-conf 0.45 `
+              --verbose `
+              --json-out artifacts/e2e_tn_report_full.json
+
+      # ----- Шаг F: артефакт с JSON-отчётами (fast + full)
       # Даже на зелёных прогонах удобно посмотреть тренд
       # accuracy/confidence по времени. На красных — видеть
       # конкретный per-field fail без пересборки CI-лога.
-      - name: Upload E2E report
+      - name: Upload E2E reports (fast + full)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-tn-report-${{ github.run_id }}
-          path: artifacts/e2e_tn_report.json
+          name: e2e-tn-reports-${{ github.run_id }}
+          path: |
+            artifacts/e2e_tn_report_fast.json
+            artifacts/e2e_tn_report_full.json
           if-no-files-found: warn
           retention-days: 30
 
@@ -270,34 +330,45 @@ jobs:
       # раскрытия лог-стримов. Экономит клик каждому, кто будет
       # смотреть результат прогона (а это все: автор PR, ревьюер,
       # release-инженер).
-      - name: Post summary table
+      - name: Post summary table (fast + full)
         if: always()
         shell: pwsh
         run: |
-          $report = "artifacts/e2e_tn_report.json"
-          if (-not (Test-Path $report)) {
-            "## E2E pipeline status`n`n_No report produced — pipeline failed before summary generation._" `
-                | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
-            exit 0
+          function Format-Report {
+            param([string]$Path, [string]$Title)
+            if (-not (Test-Path $Path)) {
+              return "### $Title`n`n_No report produced — step failed before summary._`n"
+            }
+            $data = Get-Content $Path -Raw | ConvertFrom-Json
+            $rows = $data.results
+            $lines = @("### $Title")
+            $lines += ""
+            # Meta line adapts to what's in the JSON (fast has dpi,
+            # full has profile — оба полезны в отчёте).
+            if ($data.meta.PSObject.Properties.Name -contains "dpi") {
+              $lines += "DPI: ``$($data.meta.dpi)``"
+            }
+            if ($data.meta.PSObject.Properties.Name -contains "profile") {
+              $lines += "Profile: ``$($data.meta.profile)``"
+            }
+            $lines += ""
+            $lines += "| PDF | OCR | Parser | Combined | Accuracy | Time |"
+            $lines += "|---|---:|---:|---:|---:|---:|"
+            foreach ($r in $rows) {
+              $acc = if ([double]::IsNaN($r.accuracy)) { "—" }
+                     else { ("{0:N0}%" -f ($r.accuracy * 100)) }
+              $lines += ("| ``{0}`` | {1:N1}% | {2:N1}% | {3:N1}% | {4} | {5:N1}s |" -f `
+                  $r.pdf,
+                  ($r.ocr_confidence * 100),
+                  ($r.parser_confidence * 100),
+                  ($r.combined_confidence * 100),
+                  $acc,
+                  $r.elapsed_s)
+            }
+            return ($lines -join "`n") + "`n"
           }
-          $data = Get-Content $report -Raw | ConvertFrom-Json
-          $rows = $data.results
-          $lines = @()
-          $lines += "## E2E OCR + parser pipeline"
-          $lines += ""
-          $lines += "DPI: ``$($data.meta.dpi)`` · Tesseract: ``$($data.meta.tesseract_version)``"
-          $lines += ""
-          $lines += "| PDF | OCR conf | Parser conf | Combined | Accuracy | Time |"
-          $lines += "|---|---:|---:|---:|---:|---:|"
-          foreach ($r in $rows) {
-            $acc = if ([double]::IsNaN($r.accuracy)) { "—" }
-                   else { ("{0:N0}%" -f ($r.accuracy * 100)) }
-            $lines += ("| ``{0}`` | {1:N1}% | {2:N1}% | {3:N1}% | {4} | {5:N1}s |" -f `
-                $r.pdf,
-                ($r.ocr_confidence * 100),
-                ($r.parser_confidence * 100),
-                ($r.combined_confidence * 100),
-                $acc,
-                $r.elapsed_s)
-          }
-          ($lines -join "`n") | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+          $out = @("## E2E OCR + parser pipeline", "")
+          $out += Format-Report "artifacts/e2e_tn_report_fast.json" "Fast path (pytesseract + parser)"
+          $out += Format-Report "artifacts/e2e_tn_report_full.json" "Full production path (OCRPipeline + parser)"
+          ($out -join "`n") | Out-File $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
