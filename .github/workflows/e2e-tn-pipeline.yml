@@ -235,13 +235,15 @@ jobs:
           python scripts/run_golden.py --min-accuracy 0.70
 
       # ----- Шаг D3: parser ceiling на чистом входе
-      # Подтверждает что парсер сам по себе может достигать ≥ 90 %
+      # Подтверждает что парсер сам по себе достигает ≥ 95 %
       # confidence на корпусе inputs/TN_k_UPD_*.txt (эталонный
       # OCR-результат). Это «потолок симбиоза»: если OCR выдал
-      # clean-текст, парсер обязан выдать conf 90+%. Раскрывает
-      # регрессии парсер-слоя, которые run_golden может пропустить
-      # (run_golden проверяет значения полей, а не confidence).
-      - name: Parser ceiling on clean sidecar text (parser conf ≥ 0.90)
+      # clean-текст, парсер обязан выдать conf 95+%. С декабря 2026
+      # extractors используют валидацию (ИНН checksum, ORG-prefix,
+      # cargo-маркеры, FIO-форма) и возвращают 1.0 при её прохождении —
+      # за счёт этого реальный потолок ≈ 0.99 (измерено на 4 PDF
+      # из inputs/, средний conf 0.991 = 16 rows × 9 полей).
+      - name: Parser ceiling on clean sidecar text (parser conf ≥ 0.95)
         shell: pwsh
         run: |
           python -c @'
@@ -250,7 +252,10 @@ jobs:
           from src.tn_parser.core import parse_text
           from src.tn_parser.normalize import normalize_for_sections
 
+          THRESHOLD = 0.95
+
           failed = []
+          totals = []
           for p in sorted(Path("inputs").glob("TN_k_UPD_*.txt")):
               rows = parse_text(
                   normalize_for_sections(p.read_text(encoding="utf-8")),
@@ -260,15 +265,19 @@ jobs:
                   failed.append((p.name, "no rows"))
                   continue
               avg = sum(r.confidence.overall() for r in rows) / len(rows)
-              print(f"  {p.name}: {len(rows)} rows, avg parser conf = {avg*100:.1f}%")
-              if avg < 0.90:
-                  failed.append((p.name, f"parser conf {avg*100:.1f}% < 90%"))
+              totals.append(avg)
+              status = "OK" if avg >= THRESHOLD else "FAIL"
+              print(f"  [{status}] {p.name}: {len(rows)} rows, avg parser conf = {avg*100:.1f}%")
+              if avg < THRESHOLD:
+                  failed.append((p.name, f"parser conf {avg*100:.1f}% < {THRESHOLD*100:.0f}%"))
+          if totals:
+              corpus_avg = sum(totals) / len(totals)
+              print(f"\nCorpus-level avg parser conf: {corpus_avg*100:.1f}%")
           if failed:
               print("\nCeiling test FAILED:", file=sys.stderr)
               for name, reason in failed:
                   print(f"  - {name}: {reason}", file=sys.stderr)
               sys.exit(2)
-          print("\nParser ceiling OK (все avg parser conf ≥ 90%).")
           '@
 
       # ----- Шаг E1: быстрый pytesseract-путь (baseline)

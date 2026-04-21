@@ -486,7 +486,9 @@ def extract_number_and_date(
                     "1137", "2116", "2200", "2311", "272", "534", "1117",
                 ) and not is_garbage(cand):
                     number = cand
-                    conf_num = 0.95 if head else 0.7
+                    # 1.0: номер ТН + дата ТН на одной строке — двойной
+                    # сигнал, парсер уверен. 0.7: только из head.
+                    conf_num = 1.0 if head else 0.7
                     date_raw = m_nd.group(2)
                     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_raw):
                         y, mo, d = date_raw.split("-")
@@ -591,11 +593,24 @@ def _fallback_org_line(full_text: str, fallback_kw: str) -> str | None:
     return candidate
 
 
+def _has_validated_inn(text: str) -> bool:
+    """True если в строке есть ИНН-кандидат (10/12 цифр), прошедший
+    контрольную сумму ФНС. Сигнал «поле прошло валидацию» → conf 1.0."""
+    return _find_valid_inn_match(text) is not None
+
+
 def extract_shipper(section_body: str, full_text: str) -> tuple[str, float]:
     """Грузоотправитель: от ORG-префикса до «ИНН \\d+» включительно.
 
     КПП/ОГРН/ОКПО всегда обрезаем. Если ИНН отсутствует — обрезать
     перед первым финансовым маркером.
+
+    Confidence:
+        1.0 — секция найдена + извлечённая строка содержит валидный ИНН
+              (контрольная сумма ФНС прошла).
+        0.9 — секция найдена, ИНН не валидируем (отсутствует или
+              OCR-искажение цифр).
+        0.5 — fallback по «грузоотправитель» в полном тексте.
     """
     if section_body:
         joined = _collect_org_lines(section_body, max_lines=4)
@@ -605,7 +620,7 @@ def extract_shipper(section_body: str, full_text: str) -> tuple[str, float]:
             joined = cut_inn if cut_inn else _cut_before_financial(joined)
             joined = joined[:500].strip(" ,;")
             if joined and not is_garbage(joined):
-                return joined, 0.9
+                return joined, (1.0 if _has_validated_inn(joined) else 0.9)
 
     if full_text:
         candidate = _fallback_org_line(full_text, "грузоотправитель")
@@ -620,11 +635,27 @@ def extract_shipper(section_body: str, full_text: str) -> tuple[str, float]:
     return MISSING, 0.0
 
 
+def _starts_with_org_prefix(text: str) -> bool:
+    """True если строка начинается с одного из ORG-маркеров
+    (ООО / АО / ИП / ...). Используется как «структурная валидация»
+    consignee/cargo, где ИНН по design не включён в поле, но сама
+    форма «ORG имя» — сильный сигнал, что извлечение состоялось."""
+    return bool(_ORG_PREFIX_RE.match(text.strip()))
+
+
 def extract_consignee(section_body: str, full_text: str) -> tuple[str, float]:
     """Грузополучатель: ORG-префикс → перед первым ИНН/КПП/ОГРН/ОКПО.
 
     Получатель всегда без ИНН и КПП (тот, кто принимает груз, не
     обязан раскрывать налоговые реквизиты в теле поля).
+
+    Confidence:
+        1.0 — секция найдена + результат начинается с ORG-маркера
+              (структурная валидация: «АО Х», «ООО Y» — настоящее
+              имя организации).
+        0.9 — секция найдена, ORG-маркер не на старте (OCR-искажение
+              префикса).
+        0.5 — fallback по «грузополучатель» в полном тексте.
     """
     if section_body:
         joined = _collect_org_lines(section_body, max_lines=4)
@@ -633,7 +664,7 @@ def extract_consignee(section_body: str, full_text: str) -> tuple[str, float]:
             joined = _cut_before_financial(joined)
             joined = joined[:500].strip(" ,;")
             if joined and not is_garbage(joined):
-                return joined, 0.9
+                return joined, (1.0 if _starts_with_org_prefix(joined) else 0.9)
 
     if full_text:
         candidate = _fallback_org_line(full_text, "грузополучатель")
@@ -735,16 +766,39 @@ def _first_cargo_name_from_lines(lines: list[str]) -> str | None:
     return None
 
 
+_CARGO_VALIDATION_RE = re.compile(
+    r"\b(шт|штт|нтт|кг|т|тонн|м3|м³|куб|"
+    r"рул|рулон|мешк|пач|короб|паллет|поддон|места?"
+    r"|блок|плит[аы]|труб[аы]|кабел|сырь|материал|товар"
+    r"|изделие|оборудовани|георешетк|георешётк|конструкци)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_validated_cargo(name: str) -> bool:
+    """True если в наименовании груза есть structural-сигнал —
+    единица измерения / упаковочный термин / типовой грузовой
+    предмет. Защищает 1.0-conf от ложных срабатываний."""
+    return bool(_CARGO_VALIDATION_RE.search(name))
+
+
 def extract_cargo(section_body: str, full_text: str) -> tuple[str, float]:
     """Наименование груза. Без 'Кол-во мест', без хвоста 'N шт',
-    без 'Класс опасности' / 'Упаковка' / 'Тара'."""
+    без 'Класс опасности' / 'Упаковка' / 'Тара'.
+
+    Confidence:
+        1.0 — секция найдена + structural сигнал (ед. измерения /
+              упаковка / типовой грузовой термин).
+        0.9 — секция найдена, без structural сигнала.
+        0.5 — fallback regex по «наименование груза».
+    """
     if section_body:
         lines = _meaningful_lines(section_body)
         name = _first_cargo_name_from_lines(lines)
         if name:
             name = _clean_cargo_name(name)
             if name and not is_garbage(name):
-                return name, 0.9
+                return name, (1.0 if _is_validated_cargo(name) else 0.9)
 
     if full_text:
         for pat in (
@@ -798,7 +852,7 @@ def extract_volume(cargo_section: str, full_text: str) -> tuple[str, float]:
            «Нетто … Брутто … Объём …», «Кол-во мест — N»).
         4. Иначе MISSING.
     """
-    for source, conf in ((cargo_section, 0.9), (full_text, 0.5)):
+    for source, base_conf in ((cargo_section, 0.9), (full_text, 0.5)):
         if not source:
             continue
 
@@ -808,13 +862,20 @@ def extract_volume(cargo_section: str, full_text: str) -> tuple[str, float]:
         # («комбинации из 8 мест / 384 шт / 15 мест / 720 шт»).
         sht = _QTY_SHT_INLINE_RE.search(source)
         if sht and source is cargo_section:
-            return sht.group(1).strip(), conf
+            # 1.0: число + единица «шт» — структурно валидно, парсер
+            # уверен. Это не приближение «может быть штуки».
+            return sht.group(1).strip(), 1.0 if base_conf >= 0.9 else base_conf
 
         # (2) Тройка по отдельным строкам — структурированный формат
         # «Количество мест: 129\n Масса нетто: 7.3095 т\n Объем: 57.948 м³».
         triplet = _extract_triplet(source)
         if triplet:
-            return ", ".join(triplet), conf
+            # 1.0 если все 3 компонента + section-source: каждая строка
+            # дала свой regex-hit, валидация структуры пройдена.
+            full_triplet = (len(triplet) >= 3) and source is cargo_section
+            return ", ".join(triplet), (
+                1.0 if full_triplet else base_conf
+            )
 
         # (3) Legacy: однострочный «Нетто … Брутто … Объём …».
         parts: list[str] = []
@@ -827,7 +888,7 @@ def extract_volume(cargo_section: str, full_text: str) -> tuple[str, float]:
         if m:
             parts.append(m.group(0).strip(" ,;"))
         if parts:
-            return ", ".join(parts), conf
+            return ", ".join(parts), base_conf
     return MISSING, 0.0
 
 
@@ -868,7 +929,11 @@ def extract_driver(section_body: str, full_text: str) -> tuple[str, float]:
                 break
             pre = section_body[max(0, m.start() - 5): m.start()].lower()
             if "ип " not in pre and "ип\n" not in pre:
-                return m.group(0).strip(), 0.9
+                # 1.0: полное ФИО (Фамилия Имя Отчество, не «И.И.
+                # Иванов») в section_body — самая специфичная и
+                # однозначная форма; короткие initials — менее
+                # уникальны (могут совпасть с подписью представителя).
+                return m.group(0).strip(), 1.0
             pos = m.end()
 
     if full_text:
@@ -1068,6 +1133,13 @@ def extract_reception(section_body: str, full_text: str) -> tuple[str, float]:
 
     От ORG-префикса до «ИНН \\d+» включительно; КПП/ОГРН/ОКПО обрезаются.
     Если ни в одной строке нет ORG-префикса — берём первую как есть.
+
+    Confidence:
+        1.0 — секция найдена + результат содержит валидный ИНН
+              (контрольная сумма ФНС прошла) — структурно бесспорный
+              сигнал, что мы извлекли реальную организацию-приёмщика.
+        0.9 — секция найдена, ИНН не валидируется.
+        0.5 — fallback по «приём груза» в полном тексте.
     """
     if section_body:
         body = _RECEPTION_STOP.split(section_body, maxsplit=1)[0]
@@ -1083,7 +1155,7 @@ def extract_reception(section_body: str, full_text: str) -> tuple[str, float]:
         if target:
             target = _reception_trim(target)
             if target and not is_garbage(target):
-                return target, 0.9
+                return target, (1.0 if _has_validated_inn(target) else 0.9)
 
     if full_text:
         m = re.search(r"при[ёе]м\s+груз\w*", full_text, re.IGNORECASE)
