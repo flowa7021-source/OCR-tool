@@ -335,6 +335,68 @@ _NUMERIC_AFTER_RE: Final[Pattern[str]] = re.compile(r"^[-_/.]?\d")
 _NUMERIC_BEFORE_RE: Final[Pattern[str]] = re.compile(r"\d[-_/.]?$")
 
 
+# Экзотическая латинская диакритика — ВСЁ, что не основная ASCII-
+# латиница / кириллица / цифры / пунктуация. Tesseract LSTM при
+# низкой уверенности на кириллице fallback-ит на «похожие по
+# форме» глифы из других training-наборов: французские é/à/è/ç,
+# немецкие ü/ä/ö, польские ł/ż, испанский ñ, норвежский ø и т.п.
+# В русско-/англоязычных документах они НИКОГДА не нужны.
+# Убираем перед autocorrect_russian чтобы regex-правила видели
+# чистый текст.
+_EXOTIC_DIACRITIC_MAP: Final[dict[str, str]] = {
+    # Французский / общий латинский диакритический
+    "à": "a", "á": "a", "â": "a", "ã": "a", "ä": "a", "å": "a",
+    "À": "A", "Á": "A", "Â": "A", "Ã": "A", "Ä": "A", "Å": "A",
+    "è": "e", "é": "e", "ê": "e", "ë": "e",
+    "È": "E", "É": "E", "Ê": "E", "Ë": "E",
+    "ì": "i", "í": "i", "î": "i", "ï": "i",
+    "Ì": "I", "Í": "I", "Î": "I", "Ï": "I",
+    "ò": "o", "ó": "o", "ô": "o", "õ": "o", "ö": "o", "ø": "o",
+    "Ò": "O", "Ó": "O", "Ô": "O", "Õ": "O", "Ö": "O", "Ø": "O",
+    "ù": "u", "ú": "u", "û": "u", "ü": "u",
+    "Ù": "U", "Ú": "U", "Û": "U", "Ü": "U",
+    "ý": "y", "ÿ": "y",
+    "Ý": "Y", "Ÿ": "Y",
+    "ñ": "n", "Ñ": "N",
+    "ç": "c", "Ç": "C",
+    "œ": "oe", "Œ": "OE",
+    "æ": "ae", "Æ": "AE",
+    "ß": "ss",
+    # Польские специфичные
+    "ł": "l", "Ł": "L",
+    "ż": "z", "Ż": "Z",
+    "ź": "z", "Ź": "Z",
+    "ą": "a", "Ą": "A",
+    "ę": "e", "Ę": "E",
+    "ć": "c", "Ć": "C",
+    "ń": "n", "Ń": "N",
+    "ś": "s", "Ś": "S",
+    # Другие европейские
+    "č": "c", "Č": "C",
+    "š": "s", "Š": "S",
+    "ž": "z", "Ž": "Z",
+    "ř": "r", "Ř": "R",
+    "ů": "u", "Ů": "U",
+    "ě": "e", "Ě": "E",
+    "ā": "a", "ē": "e", "ī": "i", "ō": "o", "ū": "u",
+    "ı": "i", "İ": "I",
+}
+
+
+def _strip_exotic_diacritics(text: str) -> str:
+    """Заменяет экзотическую латинскую диакритику на ближайший ASCII-
+    эквивалент. Tesseract LSTM на плохих кириллических сканах часто
+    даёт é/ü/ł/ñ/ç — для русско-/англоязычных документов это OCR-
+    артефакт, засоряющий словарь. Возвращаем обратно к чистой
+    ASCII-латинице (à → a, é → e, ł → l, ñ → n, …).
+
+    Не трогает кириллицу (ё/й останутся), цифры и пунктуацию.
+    """
+    if not text:
+        return text
+    return "".join(_EXOTIC_DIACRITIC_MAP.get(ch, ch) for ch in text)
+
+
 def normalize_cyrillic_latin_confusion(text: str) -> str:
     """Tokenise ``text``, normalise Latin/Cyrillic look-alikes per-word.
 
@@ -539,8 +601,34 @@ class TextPostprocessor:
             logger.debug("Postprocess: Cyrillic/Latin look-alikes normalised")
 
         if config.autocorrect_russian:
+            # Strip exotic Latin diacritics (é, à, ñ, ç, ý, ł, ż…) —
+            # их выдаёт Tesseract LSTM когда distractor-fallback'ит
+            # на кириллицу и пытается впечатать «что-то похожее» из
+            # training-словаря. В наших ТН/УПД корпусах эти символы
+            # никогда не нужны: нам нужны ТОЛЬКО русский + английский
+            # (см. профиль universal_accurate languages=["rus", "eng"]).
+            # Удаляем их ДО autocorrect_russian, чтобы regex-правила
+            # видели чистый кириллический/ASCII-латинский поток.
+            current = _strip_exotic_diacritics(current)
+
             current = self._autocorrect_russian(current)
             logger.debug("Postprocess: Russian autocorrect applied")
+
+            # Lexicon-based коррекция критичных ТН/УПД терминов
+            # ПОСЛЕ autocorrect_russian: autocorrect чинит мелкие
+            # опечатки, lexicon_corrector закрывает специфические
+            # OCR-мангления типа «Грузаатправитель» →
+            # «Грузоотправитель», «Гручополучателя» →
+            # «Грузополучателя». Регексы парсера дальше уже видят
+            # canonical-headers и матчат секции стандартным путём.
+            #
+            # Связан с autocorrect_russian флагом: оба чинят
+            # русские слова, держим под одним переключателем.
+            from src.core.lexicon_corrector import correct as _lex_correct
+            current = _lex_correct(current)
+            logger.debug(
+                "Postprocess: lexicon-corrector applied (TN/УПД vocab)"
+            )
 
         if config.autocorrect_english:
             current = self._autocorrect_english(current)

@@ -87,7 +87,24 @@ def _fix_confusables(text: str) -> str:
 
 
 def normalize_for_sections(text: str) -> str:
-    """Мягкая нормализация с сохранением переводов строк."""
+    """Мягкая нормализация с сохранением переводов строк.
+
+    Шаги:
+        1. Strip невидимых символов (soft hyphen, zero-width, BOM).
+        2. CRLF/CR → LF.
+        3. Склеить переносы «сло-\\nво» → «слово».
+        4. Схлопнуть подряд идущие горизонтальные пробелы.
+        5. 2+ \\n → один \\n.
+        6. Confusables: латинские двойники → кириллица в кириллических
+           словах.
+        7. Lexicon correction (декабрь 2026): замена OCR-mangled
+           вариантов критичных ТН/УПД терминов на canonical-формы
+           («Грузаатправитель» → «Грузоотправитель», etc.). Это
+           даёт парсеру canonical-headers по которым matchятся
+           section-регексы; без lex-коррекции section detection
+           работал бы только через form-comment anchors (более
+           хрупкие).
+    """
     if not text:
         return ""
     text = _strip_invisible(text)
@@ -96,6 +113,14 @@ def normalize_for_sections(text: str) -> str:
     text = _HORIZ_WS.sub(" ", text)
     text = _MULTI_NL.sub("\n", text)
     text = _fix_confusables(text)
+    # Lex-коррекция — импортируем лениво, чтобы src.tn_parser остался
+    # независимым от src.core при отсутствии последнего (минимальные
+    # инсталляции парсерного CLI без OCR-стека).
+    try:
+        from src.core.lexicon_corrector import correct as _lex_correct
+        text = _lex_correct(text)
+    except ImportError:  # pragma: no cover — src.core отсутствует в parser-only билдах
+        pass
     return text.strip()
 
 
