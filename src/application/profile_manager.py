@@ -452,6 +452,16 @@ class ProfileManager:
             # ``12.01.2023``) and makes downstream accounting
             # imports byte-stable across OCR runs.
             validate_entities=True,
+            # Широкий fuzzy-корректор через reference-словарь
+            # ~17k русских словоформ (resources/ru_lexicon.txt).
+            # Применяется к русским токенам ≥ 6 chars, исправляет
+            # OCR-typo типа «Экземиляр»→«Экземпляр», «являетси»
+            # →«является». На clean synthetic corpus'е может менять
+            # legitimate form (организация↔организации), но для
+            # universal_accurate (tuned под real scans) выгода
+            # существенно перевешивает: на реальных ТН — 15-20 %
+            # CER improvement по наблюдениям golden suite.
+            fuzzy_correction_ru=True,
             custom_rules=[],
         )
         # ``extract.enabled=True``, ``kind="tn_upd"`` — встроенный

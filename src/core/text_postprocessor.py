@@ -303,6 +303,69 @@ def _normalize_cyrillic_latin_word(
     return word
 
 
+# Aggressive Latin→Cyrillic map для context-override (fix #B):
+# в Cyrillic-majority параграфе включает также пары визуально-
+# близкие но не идентичные (d↔д, g↔г, r↔р, f↔ф, n↔н, m↔м, l↔л,
+# b↔б, i↔и, j↔й, u↔и/у, s↔з, h↔н). Применяется только при
+# дополнительных gate'ах (см. _aggressive_cyrillify).
+_AGGRESSIVE_LAT_TO_CYR: Final[dict[str, str]] = {
+    **_LATIN_TO_CYRILLIC,  # наследуем strict look-alike pairs (A/E/O/...)
+    # Uppercase-дополнения:
+    "D": "Д", "G": "Г", "F": "Ф", "N": "Н", "L": "Л", "I": "И",
+    "J": "Й", "U": "У", "R": "Р", "S": "С", "B": "В", "V": "В",
+    # Lowercase-дополнения (в look-alikes только a/c/e/o/p/x/y):
+    "b": "в", "d": "д", "f": "ф", "g": "г", "h": "н",
+    "i": "и", "j": "й", "k": "к", "l": "л", "m": "м", "n": "н",
+    "r": "р", "s": "с", "t": "т", "u": "у", "v": "в",
+}
+
+# Buквы с которыми aggressive-conversion НЕ имеет смысла: Q/W/Z
+# не имеют разумного Cyrillic counterpart'а. Слово с ними — не
+# OCR-typo Cyrillic'а, а legitimately Latin (английское или бренд).
+_AGGRESSIVE_UNCONVERTIBLE: Final[frozenset[str]] = frozenset("QqWwZz")
+
+
+def _aggressive_cyrillify(word: str) -> str | None:
+    """Попытаться полностью конвертировать Latin-классифицированное
+    слово в Cyrillic через :data:`_AGGRESSIVE_LAT_TO_CYR`.
+
+    Returns:
+        Cyrillic-версия word'а, либо ``None`` если word не стоит
+        конвертировать:
+          * содержит буквы из :data:`_AGGRESSIVE_UNCONVERTIBLE`
+            (Q/W/Z — нет Cyrillic counterpart'а);
+          * ALL-UPPERCASE И длина ≥ 3 (brand: TENSAR / VOLVO) —
+            такие намеренно Latin;
+          * содержит хотя бы одну букву без mapping'а.
+    """
+    if not word:
+        return None
+    # Brand heuristic: ALL-UPPERCASE длиной ≥ 3 буквы → likely
+    # brand или abbreviation. Оставляем.
+    letters = [ch for ch in word if ch.isalpha()]
+    if (
+        len(letters) >= 3
+        and all(ch.isupper() for ch in letters)
+    ):
+        return None
+    # Unconvertible chars — явный signal «это не OCR-typo».
+    if any(ch in _AGGRESSIVE_UNCONVERTIBLE for ch in word):
+        return None
+    out_chars: list[str] = []
+    for ch in word:
+        if ch.isalpha():
+            mapped = _AGGRESSIVE_LAT_TO_CYR.get(ch)
+            if mapped is None:
+                # Буква без aggressive mapping (в _AGGRESSIVE_LAT_TO_
+                # CYR нет) — полностью не сконвертируем, лучше
+                # не трогать слово.
+                return None
+            out_chars.append(mapped)
+        else:
+            out_chars.append(ch)
+    return "".join(out_chars)
+
+
 def _paragraph_script_majority(text: str) -> str | None:
     """Return ``"cyr"``, ``"lat"`` or ``None`` for the whole document.
 
@@ -438,13 +501,26 @@ def normalize_cyrillic_latin_confusion(text: str) -> str:
             _NUMERIC_AFTER_RE.match(after)
             or _NUMERIC_BEFORE_RE.search(before)
         )
-        out.append(
-            _normalize_cyrillic_latin_word(
-                word,
-                paragraph_majority=paragraph_majority,
-                prefer_latin=numeric_context,
-            )
+        normalized = _normalize_cyrillic_latin_word(
+            word,
+            paragraph_majority=paragraph_majority,
+            prefer_latin=numeric_context,
         )
+        # Aggressive context override (idea top-10 дополнение):
+        # в Cyrillic-параграфе слово классифицированное как pure-
+        # ``lat`` — почти наверняка OCR-typo Cyrillic'а. Пробуем
+        # aggressive conversion через расширенный map. Gate'ы
+        # внутри _aggressive_cyrillify: brand ALL-UPPER / чары Q-W-Z
+        # / неконвертируемые буквы → None.
+        if (
+            paragraph_majority == "cyr"
+            and not numeric_context
+            and _classify_word_script(normalized) == "lat"
+        ):
+            aggressive = _aggressive_cyrillify(normalized)
+            if aggressive is not None:
+                normalized = aggressive
+        out.append(normalized)
         last = m.end()
     out.append(text[last:])
     return "".join(out)

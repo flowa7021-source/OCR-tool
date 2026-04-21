@@ -337,6 +337,19 @@ def correct(text: str) -> str:
                     return token
             except ImportError:
                 return token
+        # pymorphy3 morphology gate (fix #C): убеждаемся что
+        # candidate — реальное русское слово, а original — unknown
+        # (= OCR-typo). Это защищает от замены legitimate-form
+        # (организация ↔ организации) которые rapidfuzz может
+        # случайно выдать. Без pymorphy3 — no-op (возвращает True),
+        # поведение как раньше.
+        try:
+            from .morphology_validator import should_accept_correction
+
+            if not should_accept_correction(token_low, canonical):
+                return token
+        except Exception:  # noqa: BLE001 — validator не должен ронять pipeline
+            pass
         return _preserve_case(token, canonical)
 
     return _WORD_RE.sub(_replace, text)

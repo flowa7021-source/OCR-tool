@@ -102,6 +102,7 @@
     "mark_suspect_handwritten_blocks": true,
     "validate_identifiers": true,
     "validate_entities": true,
+    "fuzzy_correction_ru": true,
     "custom_rules": []
   },
   "extract": {
