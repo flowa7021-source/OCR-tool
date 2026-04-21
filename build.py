@@ -157,6 +157,12 @@ def build_pyinstaller(onefile: bool = False) -> int:
         f"--paths={PROJECT_ROOT}",
         # Bundled assets
         f"--add-data=resources/tessdata{sep}resources/tessdata",
+        # ru_lexicon.txt — расширенный 1.3M русских форм (5-10 chars)
+        # из pymorphy3 OpenCorpora, ~23 MB. Нужен для fuzzy_corrector'а
+        # в runtime без pymorphy3-dep. Bundle size bump приемлем
+        # (Tesseract rus.traineddata итак 40 MB); win в accuracy
+        # перевешивает.
+        f"--add-data=resources/ru_lexicon.txt{sep}resources",
         f"--add-data=resources/tesseract{sep}resources/tesseract",
         f"--add-data=resources/icons{sep}resources/icons",
         f"--add-data=resources/styles{sep}resources/styles",
