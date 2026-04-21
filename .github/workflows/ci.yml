@@ -169,6 +169,12 @@ jobs:
           # — without it those 6 tests silently ``pytest.importorskip``
           # and the "no skips" invariant breaks.
           pip install PyYAML
+          # openpyxl + rapidfuzz — parser-тесты (tests/parsers/,
+          # tests/unit/test_export_excel.py) загружают src.tn_parser
+          # который требует openpyxl для Excel-экспорта и rapidfuzz
+          # для fuzzy section-matching. Без них Windows-CI leg
+          # падает с 9 collection errors на ImportError.
+          pip install openpyxl rapidfuzz
 
       - name: Compile-check all sources
         run: python -m compileall -q src tests build.py dev_run.py
