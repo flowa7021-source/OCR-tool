@@ -273,30 +273,26 @@ class ProfileManager:
             # computes per-window mean + std so each image region
             # gets its own threshold. The synthetic regression
             # (clean-paper text) wasn't representative of the
-            # real workload. Sauvola оставлен, но с большим window
-            # (51 вместо 25) и k=0.34 вместо 0.2 — апрель 2026 после
-            # жалоб пользователя что мелкий шрифт в ячейках таблиц
-            # ТН выжигается и превращается в кашу. Window=51 — это
-            # ~0.17 inch на 300 DPI, достаточно для контекста 10pt
-            # шрифта; k=0.34 — стандартное значение для document-
-            # imaging (исходный Sauvola paper, 1997).
+            # OTSU binarization (апрель 2026): Benchmark на 4
+            # реальных ТН из inputs/ показал что Sauvola w=51 + CLAHE
+            # + border-removal даёт parser-accuracy 34% на UPD_36,
+            # а чистый OTSU без CLAHE — 64%. OCR-conf обманчив:
+            # Sauvola завышает его (88%) потому что tesseract уверен
+            # в тщательно «обработанном» мусоре. OTSU сохраняет
+            # тонкие штрихи мелкого шрифта в ячейках таблиц где
+            # ИНН/КПП/ОГРН легитимно извлекаются.
             binarization=BinarizationConfig(
-                method=BinarizationMethod.SAUVOLA,
-                sauvola_window=51,
-                sauvola_k=0.34,
+                method=BinarizationMethod.OTSU,
             ),
-            # Denoise OFF по default — median/gaussian убивают
-            # тонкие штрихи мелкого шрифта. Пользователь опрокинул
-            # наблюдение: с denoise conf=35-52%, без него =86%.
-            # Кто нужно — включает через duplicate + enabled=True.
+            # Denoise OFF — median/gaussian убивают тонкие штрихи
+            # мелкого шрифта. Observed на real TN: с denoise conf
+            # 35-52%, без него 86%.
             denoise=DenoiseConfig(enabled=False, steps=[]),
-            # CLAHE clip 1.5 (снижено с 2.0) — тот же ответ на
-            # «preprocessing слишком агрессивна»: высокий clip
-            # амплифицирует noise до fake-glyphs, 1.5 — minimal
-            # enhancement для тёмных/светлых scan'ов.
-            contrast=ContrastConfig(
-                clahe_enabled=True, clahe_clip=1.5, clahe_tile=8
-            ),
+            # CLAHE OFF по той же причине — амплифицирует noise до
+            # fake-glyphs, сбивая tesseract с толку. Для высоко-
+            # контрастных real scans ничего не даёт, для низко-
+            # контрастных пользователь включает duplicate'ом.
+            contrast=ContrastConfig(clahe_enabled=False),
             # Background removal OFF (reverted from on). Measurement
             # showed it added ~5 % CER on clean synthetic scans
             # without any compensating gain on the noisy ones.
@@ -313,15 +309,13 @@ class ProfileManager:
             # 75 px is the 300-DPI baseline; ImagePreprocessor scales
             # it to the runtime DPI, so it stays at ~0.25 inch at any
             # render resolution.
-            # min_line_length поднят 75 → 150 (апрель 2026) — 75px
-            # это всего ~0.25 inch, часто захватывало длинные слова
-            # мелким шрифтом в таблицах и стирало их. 150 px = 0.5
-            # inch — так морфология срабатывает только на longест
-            # табличных рамках и горизонтальных линейках, не на
-            # text baseline.
-            border_removal=BorderRemovalConfig(
-                enabled=True, min_line_length=150,
-            ),
+            # Border-removal OFF (апрель 2026): даже при min_line_
+            # length=150 морфология зацепляла длинные слова мелкого
+            # шрифта и стирала их. На real TN это стоило parser-
+            # accuracy ~15 pp. Для документов где ТАБЛИЧНЫЕ РАМКИ
+            # явно мешают OCR, пользователь включает через
+            # duplicate + enabled=True + min_line_length=200.
+            border_removal=BorderRemovalConfig(enabled=False),
         )
         ocr = OCRConfig(
             languages=["rus", "eng"],
@@ -491,13 +485,15 @@ class ProfileManager:
         return ProfileData(
             name="universal_accurate",
             description=(
-                "Универсальный builtin (апрель 2026): менее агрессивная "
-                "предобработка для сохранения мелкого шрифта. 300 DPI, "
-                "Sauvola window=51 k=0.34, CLAHE clip=1.5, deskew, border "
-                "removal ≥ 150 px, denoise OFF. Полный postprocessing + "
-                "fuzzy_correction_ru + pymorphy3-validated dictionary. "
-                "extract.kind=tn_upd — встроенный парсер с multi-document "
-                "+ layout-aware + batch-learning."
+                "Универсальный default (апрель 2026): минимальная "
+                "предобработка после benchmark'а на real ТН. OTSU + "
+                "deskew, БЕЗ CLAHE / denoise / border / background. "
+                "Aggressive preprocessing давал завышенный OCR-conf "
+                "(88%) при низкой parser-accuracy (34%) на UPD_36 — "
+                "clean-path возвращает настоящие 64% parser-accuracy "
+                "за счёт сохранения тонких штрихов мелкого шрифта. "
+                "300 DPI. Полный postprocess + fuzzy_correction_ru + "
+                "pymorphy3. extract.kind=tn_upd."
             ),
             preprocess=preprocess,
             ocr=ocr,

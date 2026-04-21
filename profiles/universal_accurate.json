@@ -1,6 +1,6 @@
 {
   "name": "universal_accurate",
-  "description": "Универсальный builtin (апрель 2026): менее агрессивная предобработка для сохранения мелкого шрифта. 300 DPI (баланс speed vs quality — 400 DPI давал blur при up-sample с 200-DPI embeds), Sauvola window=51 k=0.34 (мягкая бинаризация, мелкий шрифт не выжигается), CLAHE clip=1.5, deskew, border-removal только длинных линий (≥ 150 px), denoise выключен (убивал тонкие штрихи). Полный postprocessing + validate_identifiers + fuzzy_correction_ru + lexicon_corrector + pymorphy3-validated dictionary. extract.kind=tn_upd — встроенный парсер ТН/УПД с multi-document + layout-aware + batch-learning.",
+  "description": "Универсальный default (апрель 2026): минимальная предобработка после benchmark'а на реальных ТН. OTSU binarization + deskew, БЕЗ CLAHE / denoise / border-removal / background-removal — aggressive препроцессинг выжигал мелкий шрифт в ячейках таблиц и давал завышенный OCR-conf (88%) при низкой parser-accuracy (34%). Clean-path даёт чуть ниже OCR-conf (74%) но почти вдвое выше parser-accuracy (64%) за счёт сохранения тонких штрихов. 300 DPI (sweet-spot для LSTM). Полный postprocess + fuzzy_correction_ru + pymorphy3-validated dictionary. extract.kind=tn_upd — встроенный парсер с multi-document + layout-aware + batch-learning.",
   "schema_version": 12,
   "preprocess": {
     "auto_rotate": {
@@ -21,7 +21,7 @@
       "focal_length": 1.2
     },
     "binarization": {
-      "method": "sauvola",
+      "method": "otsu",
       "adaptive_block_size": 31,
       "adaptive_c": 10,
       "sauvola_window": 51,
@@ -32,7 +32,7 @@
       "steps": []
     },
     "contrast": {
-      "clahe_enabled": true,
+      "clahe_enabled": false,
       "clahe_clip": 1.5,
       "clahe_tile": 8,
       "manual_enabled": false,
@@ -44,7 +44,7 @@
       "blur_kernel": 55
     },
     "border_removal": {
-      "enabled": true,
+      "enabled": false,
       "min_line_length": 150
     }
   },
