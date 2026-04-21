@@ -191,7 +191,7 @@ class TestProfileImportExport:
         manager.initialize_builtins()
 
         # Customise a profile.
-        original = manager.load("quick_reliable")
+        original = manager.load("universal_accurate")
         original.name = "my_custom"
         original.description = "custom for test"
         original.builtin = False
@@ -255,7 +255,7 @@ class TestRecoveryRoundtrip:
             config=OCRJobConfig(
                 input_path="/tmp/test.pdf",
                 output_path="/tmp/test_ocr.pdf",
-                profile=ProfileData(name="quick_reliable"),
+                profile=ProfileData(name="universal_accurate"),
             ),
             status=JobStatus.RUNNING,
         )

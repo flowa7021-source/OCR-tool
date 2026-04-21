@@ -131,17 +131,17 @@ class TestGUIWorkflow:
         combo = main_window.profile_combo
         # Find the ``quick_reliable`` index and select it.
         for i in range(combo.count()):
-            if combo.itemData(i) == "quick_reliable":
+            if combo.itemData(i) == "universal_accurate":
                 combo.setCurrentIndex(i)
                 break
         else:
-            pytest.skip("quick_reliable not in dropdown (seeding failed)")
+            pytest.skip("universal_accurate not in dropdown (seeding failed)")
 
         # Let the dropdown's currentIndexChanged signal propagate.
         qtbot.wait(50)
 
         assert main_window._current_profile is not None
-        assert main_window._current_profile.name == "quick_reliable"
+        assert main_window._current_profile.name == "universal_accurate"
 
     def test_job_bridge_completed_signal_is_emitted_by_on_complete(
         self, main_window, qtbot

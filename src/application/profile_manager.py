@@ -222,26 +222,28 @@ class ProfileManager:
           * **deskew** — auto-detect; essential, non-destructive.
           * **CLAHE** contrast — ``clip=2.0`` for even lighting without
             over-amplifying noise.
-          * Background removal is **off** in the universal preset:
-            at 600 DPI a ``blur_kernel=55`` pass costs 2–3 s per A4
-            page with only a marginal accuracy gain over CLAHE. Users
-            with yellowed or photographed pages can toggle it on;
-            ``low_quality_scan`` already bundles it.
+          * Background removal is **off** by default: at 600 DPI
+            ``blur_kernel=55`` стоит 2-3 с на A4 при минимальном
+            приросте точности. Желающие включают через ``duplicate``
+            + ``preprocess.background.enabled=True`` (для пожелтевших
+            или сфотографированных страниц).
           * **Denoise chain** — median ``ksize=3`` then a morphological
             close ``ksize=2`` to repair sub-pixel breaks in thin glyphs
             without swallowing dots of ``ё``, ``ь``, ``ъ``.
           * **Adaptive Gaussian binarisation** (``block=31``, ``C=10``)
             instead of OTSU: better on uneven lighting and safe on
             clean pages too.
-          * **OCR** at 300 DPI with PSM=AUTO, OEM=LSTM_ONLY (best quality
-            Tesseract mode), rus+eng, LOSSLESS PDF.
+          * **OCR** at 400 DPI with PSM=AUTO, OEM=LSTM_ONLY (best
+            quality Tesseract mode), rus+eng, LOSSLESS PDF.
           * **Post-processing**: everything enabled — Unicode NFC,
             hyphenation merge, whitespace normalization, artifact line
             removal, Russian + English autocorrect.
 
-        Users who need raw speed should pick ``default`` (OTSU,
-        single-step median). Users with awful scans should pick
-        ``low_quality_scan`` (NLM denoise + larger CLAHE).
+        Раньше (до декабря 2026) предлагались альтернативы для
+        быстрого режима (``default``, ``quick_reliable``) и для плохих
+        сканов (``low_quality_scan``); все они слиты в этот builtin —
+        пользователи, которым нужны кастомные настройки скорости /
+        агрессивности денойза, ведут duplicate с правкой полей.
         """
         preprocess = PreprocessConfig(
             auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
@@ -294,10 +296,11 @@ class ProfileManager:
             ),
             # Background removal OFF (reverted from on). Measurement
             # showed it added ~5 % CER on clean synthetic scans
-            # without any compensating gain on the noisy ones
-            # (``low_quality_scan`` already has its own
-            # blur_kernel=55 background path for those). Keep the
-            # code path intact so users with dark-gradient phone
+            # without any compensating gain on the noisy ones.
+            # Желающие включают через duplicate +
+            # ``preprocess.background.enabled=True`` (раньше эта опция
+            # была bundled в удалённый ``low_quality_scan``).
+            # Keep the code path intact so users with dark-gradient phone
             # snaps can toggle it on via the UI — just don't default
             # it to true for the universal preset.
             background=BackgroundConfig(enabled=False, blur_kernel=55),

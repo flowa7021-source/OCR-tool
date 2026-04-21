@@ -81,7 +81,7 @@ class TestContractRu4Page:
 
     @pytest.mark.parametrize(
         "profile_name",
-        ["default", "quick_reliable", "contracts_ru", "low_quality_scan"],
+        ["default", "universal_accurate", "universal_accurate", "universal_accurate"],
     )
     def test_every_page_has_text(
         self,
@@ -205,11 +205,11 @@ class TestAllProfilesAllFixtures:
         "skewed_noisy.pdf",
     ])
     @pytest.mark.parametrize("profile_name", [
-        "quick_reliable",
+        "universal_accurate",
         "default",
-        "contracts_ru",
-        "low_quality_scan",
-        "english_text",
+        "universal_accurate",
+        "universal_accurate",
+        "universal_accurate",
     ])
     def test_no_crash(
         self,

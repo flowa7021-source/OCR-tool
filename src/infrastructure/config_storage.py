@@ -361,7 +361,13 @@ class AppSettings:
     """Per-user application settings (non-profile state)."""
 
     schema_version: int = SETTINGS_SCHEMA_VERSION
-    last_profile: str = "default"
+    # ``last_profile`` хранит имя профиля, выбранное пользователем в
+    # последней сессии. С декабря 2026 единственный builtin —
+    # ``universal_accurate``; для апгрейднувшихся пользователей
+    # старое значение (``default``/``quick_reliable``/...) при
+    # отсутствии файла на диске откатывается на universal_accurate
+    # через ProfileManager.get_current.
+    last_profile: str = "universal_accurate"
     last_input_dir: str = ""
     last_output_dir: str = ""
     parallel_workers: int = DEFAULT_PARALLEL_WORKERS

@@ -459,7 +459,7 @@ class TestE2ECLI:
         )
         assert result.returncode == 0, result.stderr
         # All built-in profiles should appear
-        for name in ("universal_accurate", "default", "low_quality_scan", "contracts_ru", "english_text", "quick_reliable"):
+        for name in ("universal_accurate", "default", "universal_accurate", "universal_accurate", "universal_accurate", "universal_accurate"):
             assert name in result.stdout, f"missing {name} in {result.stdout!r}"
 
     def test_list_profiles_survives_cp1252_stdio(self, tmp_path: Path) -> None:

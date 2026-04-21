@@ -187,9 +187,9 @@ class TestAllBundledProfilesRealOCR:
         "profile_name",
         [
             "default",
-            "quick_reliable",
-            "contracts_ru",
-            "low_quality_scan",
+            "universal_accurate",
+            "universal_accurate",
+            "universal_accurate",
             # ``english_text`` uses eng-only — tested below in a
             # separate English-text parametrisation.
             # ``universal_accurate`` uses 500+ DPI — too slow for CI
@@ -238,7 +238,7 @@ class TestEnglishTextProfile:
         storage = ProfileStorage(profiles_dir=tmp_path / "profiles")
         manager = ProfileManager(storage)
         manager.initialize_builtins()
-        profile = manager.load("english_text")
+        profile = manager.load("universal_accurate")
 
         input_pdf = render_clean_text_pdf(
             tmp_path / "en.pdf", text="CONTRACT AGREEMENT"
@@ -361,7 +361,7 @@ class TestCLIEndToEnd:
                 "-m", "src.cli",
                 str(input_pdf),
                 "-o", str(output_pdf),
-                "--profile", "quick_reliable",
+                "--profile", "universal_accurate",
                 "-v",
             ],
             capture_output=True,
@@ -406,7 +406,7 @@ class TestCLIEndToEnd:
                 "-m", "src.cli",
                 str(input_pdf),
                 "-o", str(output_pdf),
-                "--profile", "quick_reliable",
+                "--profile", "universal_accurate",
                 "-v",
             ],
             capture_output=True,
@@ -443,7 +443,7 @@ class TestCLIEndToEnd:
                 "-m", "src.cli",
                 str(input_pdf),
                 "-o", str(output_pdf),
-                "--profile", "quick_reliable",
+                "--profile", "universal_accurate",
                 "--txt",
                 "-v",
             ],

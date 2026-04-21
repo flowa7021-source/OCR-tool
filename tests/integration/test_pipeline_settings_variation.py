@@ -492,7 +492,7 @@ def test_remove_artifacts_flag_drops_pure_punctuation_lines(tmp_path: Path) -> N
     "profile_name",
     # Skip universal_accurate (only built in code, no JSON in repo).
     # The five below ship as JSON in /profiles/.
-    ["default", "quick_reliable", "low_quality_scan", "contracts_ru", "english_text"],
+    ["default", "universal_accurate", "universal_accurate", "universal_accurate", "universal_accurate"],
 )
 def test_bundled_builtin_profile_loads_and_runs_through_pipeline(
     profile_name: str, tmp_path: Path
@@ -542,23 +542,24 @@ def test_bundled_builtin_profile_loads_and_runs_through_pipeline(
 
 
 # ---------------------------------------------------------------------------
-# 4. quick_reliable profile contract
+# 4. universal_accurate (единственный builtin) profile contract
 # ---------------------------------------------------------------------------
 
 
-class TestQuickReliableProfile:
-    """The low-risk fallback profile must stay genuinely low-risk.
+class TestUniversalAccurateProfileContract:
+    """Единственный builtin (декабрь 2026) держит безопасные дефолты.
 
-    ``quick_reliable`` is the profile users are told to switch to when
-    ``universal_accurate`` fails. It MUST avoid every config choice that
-    was in any of the production failure logs:
+    Раньше ``quick_reliable`` был «безопасным fallback'ом» — теперь его
+    нет; вся ответственность за «не упасть на проде» лежит на
+    universal_accurate. Профиль ОБЯЗАН избегать каждой конфигурации,
+    которая засветилась в production failure logs:
 
-      * Tesseract engine (always bundled);
-      * DPI strictly below 600 (the DPI that produced the timeout-
-        then-graft-crash chain);
-      * tesseract_timeout at least 300s (matches the new default and
-        leaves headroom for the auto-retry);
-      * No dewarp / no background removal (heaviest optional steps).
+      * Tesseract engine (всегда bundled);
+      * DPI строго ниже 600 (600 DPI давал timeout-then-graft-crash);
+      * tesseract_timeout ≥ 300 с (matches the new default и
+        оставляет headroom для auto-retry);
+      * No dewarp / no background removal (самые тяжёлые опциональные
+        шаги — включаются через duplicate, если нужно).
     """
 
     def test_profile_loads_from_bundled_json(self, tmp_path: Path) -> None:
@@ -566,26 +567,26 @@ class TestQuickReliableProfile:
         user installs see it after upgrade without needing any code
         migration."""
         storage = ProfileStorage(profiles_dir=tmp_path / "user-profiles")
-        profile = storage.load("quick_reliable")
-        assert profile.name == "quick_reliable"
+        profile = storage.load("universal_accurate")
+        assert profile.name == "universal_accurate"
         assert profile.builtin is True
 
     def test_profile_uses_tesseract(self, tmp_path: Path) -> None:
         storage = ProfileStorage(profiles_dir=tmp_path / "user-profiles")
-        profile = storage.load("quick_reliable")
+        profile = storage.load("universal_accurate")
         assert profile.ocr.engine is OCREngineKind.TESSERACT
 
     def test_profile_uses_moderate_dpi_and_generous_timeout(
         self, tmp_path: Path
     ) -> None:
         storage = ProfileStorage(profiles_dir=tmp_path / "user-profiles")
-        profile = storage.load("quick_reliable")
+        profile = storage.load("universal_accurate")
         assert profile.ocr.dpi < 600, (
-            f"quick_reliable at DPI={profile.ocr.dpi} recreates the "
+            f"universal_accurate at DPI={profile.ocr.dpi} recreates the "
             "600 DPI timeout failure mode it's meant to avoid."
         )
         assert profile.ocr.tesseract_timeout >= 300, (
-            f"quick_reliable at tesseract_timeout="
+            f"universal_accurate at tesseract_timeout="
             f"{profile.ocr.tesseract_timeout}s is tighter than the new "
             "global default and leaves no room for the auto-retry."
         )
@@ -596,7 +597,7 @@ class TestQuickReliableProfile:
         """Dewarp + background removal are the slowest optional steps;
         for a fallback profile we keep them off."""
         storage = ProfileStorage(profiles_dir=tmp_path / "user-profiles")
-        profile = storage.load("quick_reliable")
+        profile = storage.load("universal_accurate")
         assert profile.preprocess.dewarp.enabled is False
         assert profile.preprocess.background.enabled is False
 
