@@ -148,6 +148,27 @@ def find_inn(text: str) -> str | None:
     return None
 
 
+def find_inn_with_conf(
+    text: str,
+    token_conf_map,  # TokenConfMap | None — soft import для избежания цикла
+) -> tuple[str | None, float]:
+    """Как :func:`find_inn`, но доп-но возвращает OCR-conf токенов.
+
+    Extension для idea #5 top-10 (token-level confidence propagation).
+    Returns (inn, ocr_conf 0..1). Если map пустой или None — conf=1.0
+    (backward compat — обещаем полную уверенность).
+    """
+    inn = find_inn(text)
+    if not inn:
+        return None, 0.0
+    if token_conf_map is None:
+        return inn, 1.0
+    conf = token_conf_map.for_substring(text, inn)
+    if conf is None:
+        return inn, 1.0
+    return inn, conf
+
+
 # --- КПП -------------------------------------------------------------------
 #
 # КПП (код причины постановки на учёт) — 9 цифр. Строгой контрольной
