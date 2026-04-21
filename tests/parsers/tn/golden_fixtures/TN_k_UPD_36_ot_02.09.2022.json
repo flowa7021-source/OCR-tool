@@ -1,0 +1,71 @@
+{
+  "_source_pdf": "inputs/TN_k_UPD_36_ot_02.09.2022.pdf",
+  "_ground_truth": "inputs/TN_k_UPD_36_ot_02.09.2022.txt",
+  "_notes": [
+    "Один экземпляр ТН (стр 1-2) + доверенность № 24/2022 (стр 3) + пустая оборотная (стр 4).",
+    "Самого УПД № 36 в PDF нет — это сопроводительные к нему документы.",
+    "Парсер обязан не смешивать реквизиты доверенности с ТН-полями."
+  ],
+  "expected_row": {
+    "date": {
+      "value": "29.08.2022",
+      "tolerance": "exact"
+    },
+    "number": {
+      "value": "2908-23",
+      "tolerance": "contains"
+    },
+    "shipper": {
+      "value": "ГЕКСАФОРМ",
+      "tolerance": "contains"
+    },
+    "shipper_inn": {
+      "value": "7813266190",
+      "tolerance": "exact"
+    },
+    "shipper_kpp": {
+      "value": "?",
+      "tolerance": "optional"
+    },
+    "shipper_ogrn": {
+      "value": "?",
+      "tolerance": "optional"
+    },
+    "consignee": {
+      "value": "Моспроект",
+      "tolerance": "contains"
+    },
+    "consignee_inn": {
+      "value": "7707820890",
+      "tolerance": "exact"
+    },
+    "consignee_kpp": {
+      "value": "770701001",
+      "tolerance": "exact"
+    },
+    "consignee_ogrn": {
+      "value": "5137746157490",
+      "tolerance": "exact"
+    },
+    "cargo": {
+      "value": "TENSAR",
+      "tolerance": "contains"
+    },
+    "volume": {
+      "value": "7309",
+      "tolerance": "contains"
+    },
+    "driver": {
+      "value": "Беляев",
+      "tolerance": "contains"
+    },
+    "vehicle": {
+      "value": "С201ВХ152",
+      "tolerance": "contains"
+    },
+    "reception": {
+      "value": "?",
+      "tolerance": "optional"
+    }
+  }
+}

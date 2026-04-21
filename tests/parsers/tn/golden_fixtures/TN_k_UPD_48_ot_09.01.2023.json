@@ -1,0 +1,46 @@
+{
+  "_source_pdf": "inputs/TN_k_UPD_48_ot_09.01.2023.pdf",
+  "_ground_truth": "inputs/TN_k_UPD_48_ot_09.01.2023.txt",
+  "_notes": [
+    "5 ТН от 18.10.2022, ООО 'Беком' → АО 'Моспроект-3'.",
+    "Первая ТН: № 11778/Б от 18.10.2022."
+  ],
+  "expected_row": {
+    "date": {
+      "value": "18.10.2022",
+      "tolerance": "exact"
+    },
+    "number": {
+      "value": "11778",
+      "tolerance": "contains"
+    },
+    "shipper": {
+      "value": "Беком",
+      "tolerance": "contains"
+    },
+    "shipper_inn": {
+      "value": "7743553262",
+      "tolerance": "exact"
+    },
+    "shipper_kpp": {
+      "value": "504445001",
+      "tolerance": "exact"
+    },
+    "consignee": {
+      "value": "Моспроект",
+      "tolerance": "contains"
+    },
+    "consignee_inn": {
+      "value": "7707820890",
+      "tolerance": "exact"
+    },
+    "consignee_kpp": {
+      "value": "770701001",
+      "tolerance": "exact"
+    },
+    "cargo": {
+      "value": "Tensar",
+      "tolerance": "contains"
+    }
+  }
+}
