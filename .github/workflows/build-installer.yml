@@ -1239,6 +1239,15 @@ jobs:
           # that the orchestrator's graceful-degrade would otherwise
           # hide from this smoke (by design — the pipeline must not
           # fail a job when only the optional parser is broken).
+          #
+          # Важный принцип: проверяем ТОЛЬКО top-level-пакеты (rapidfuzz,
+          # openpyxl) которые PyInstaller гарантированно кладёт
+          # директорией в ``_internal\``. Subpackages ``src.*`` и
+          # ``scripts.*`` PyInstaller архивирует в PYZ / ``base_library.
+          # zip`` — disk-probe их НЕ НАЙДЁТ. Для них стронгер-тест —
+          # фактический успешный прогон installed CLI выше (xlsx + log +
+          # snapshot sidecars созданы → значит ``src.tn_parser.excel`` и
+          # ``src.tn_parser.report`` импортировались и исполнились).
           Write-Host "Verifying parser artefacts on disk..."
           $parserChecks = @(
             # rapidfuzz C-ext: at least one .pyd under the rapidfuzz/
@@ -1256,29 +1265,8 @@ jobs:
               Type = "dir"
             },
             @{
-              # ``src.tn_parser`` — subpackage, не top-level. PyInstaller
-              # в отличие от rapidfuzz/openpyxl НЕ создаёт для него
-              # отдельную директорию в _internal\; модули попадают либо
-              # в ``_internal\src\tn_parser\`` (если пакет не распаковался
-              # в PYZ), либо в ``base_library.zip``. Ищем уникально-
-              # именованный файл ``sections.py`` (принадлежит только
-              # ``src.tn_parser``; других ``sections.py`` в bundle нет),
-              # затем проверяем что его родительская директория
-              # называется именно ``tn_parser`` — иначе мог найтись
-              # одноимённый чужой файл в зависимости.
-              Name = "src.tn_parser package"
-              Pattern = "sections.py"
-              Type = "file"
-              Verify = { param($p) (Split-Path $p -Parent | Split-Path -Leaf) -eq "tn_parser" }
-            },
-            @{
-              Name = "scripts.run_golden"
-              Pattern = "scripts\run_golden.py"
-              Type = "file"
-            },
-            @{
-              Name = "profiles/tn_upd.json"
-              Pattern = "profiles\tn_upd.json"
+              Name = "profiles/universal_accurate.json"
+              Pattern = "profiles\universal_accurate.json"
               Type = "file"
             }
           )
