@@ -98,6 +98,95 @@ _MIN_LENGTH_RATIO = 0.70
 # пропускаем как potential брэнды/артикулы/ИНН.
 _CYRILLIC_TOKEN_RE = re.compile(r"^[А-ЯЁа-яё][А-ЯЁа-яё\-]*$")
 
+# OCR-typical char-pair confusions. В Tesseract LSTM на
+# кириллическом скане систематически путаются группы визуально
+# похожих/соседних по клавиатуре букв. Пары в этой таблице
+# «дешёвые» — их замена не штрафует fuzzy-score так сильно, как
+# произвольная замена. Используется в _ocr_weighted_score.
+#
+# Источник: анализ OCR-выходов inputs/TN_k_UPD_*.pdf — повторяющиеся
+# substitution-классы. Можно расширить по мере наблюдений.
+_OCR_CHAR_EQUIVALENCES: tuple[frozenset[str], ...] = (
+    # Кириллические в пределах одной группы visual-похожих
+    frozenset({"о", "а"}),           # о ↔ а — одна из самых частых
+    frozenset({"е", "ё"}),           # е ↔ ё
+    frozenset({"и", "й", "н"}),      # и ↔ й ↔ н
+    frozenset({"ь", "ъ", "ы"}),      # hard/soft знаки
+    frozenset({"п", "г", "т", "л"}), # визуально похожие
+    frozenset({"ш", "щ"}),           # ш ↔ щ
+    frozenset({"ч", "у"}),           # нижняя петля
+    frozenset({"з", "в"}),           # OCR часто путает
+    frozenset({"м", "n"}),           # rn-ligature confusion
+    # Cross-script (Cyrillic ↔ Latin lookalikes)
+    frozenset({"о", "o"}), frozenset({"а", "a"}), frozenset({"е", "e"}),
+    frozenset({"р", "p"}), frozenset({"с", "c"}), frozenset({"х", "x"}),
+    frozenset({"у", "y"}), frozenset({"к", "k"}),
+    frozenset({"м", "m"}), frozenset({"т", "t"}),
+    frozenset({"в", "b"}),
+    frozenset({"Н", "H"}), frozenset({"Т", "T"}),
+    # Digit-letter (OCR на цифрах тоже путается)
+    frozenset({"о", "0"}), frozenset({"з", "3"}), frozenset({"б", "6"}),
+    frozenset({"ч", "4"}), frozenset({"г", "7"}),
+)
+
+
+def _is_cheap_substitution(a: str, b: str) -> bool:
+    """True если замена `a → b` — типичная OCR-путаница (дешёвая).
+
+    Используется как эвристика для бустинга fuzzy-score: если все
+    замены между token и candidate принадлежат «дешёвым» классам,
+    считаем замену высокоуверенной.
+    """
+    a_low = a.lower()
+    b_low = b.lower()
+    if a_low == b_low:
+        return True
+    return any(
+        a_low in cls and b_low in cls for cls in _OCR_CHAR_EQUIVALENCES
+    )
+
+
+def _ocr_aware_score(token: str, candidate: str) -> int:
+    """Расширенный score'ring: поверх rapidfuzz.ratio добавляем
+    bonus если все нестыковки — OCR-типичные замены.
+
+    Rapidfuzz ratio = 100 × (2 × matches) / (len_a + len_b). Мы
+    дополнительно смотрим на несовпадения: если 100% несовпадений
+    попадают в _OCR_CHAR_EQUIVALENCES, добавляем +3 к score — это
+    компенсирует 1 «дешёвую» замену и дотягивает до threshold для
+    случаев типа «организаиия→организация» (и↔а не совсем OCR-
+    типично, но common misread).
+
+    Возвращает 0..100.
+    """
+    try:
+        from rapidfuzz import fuzz
+    except ImportError:
+        return 0
+
+    base = fuzz.ratio(token, candidate)
+    # Bonus только если base уже высокий (>= 80) — чтобы не
+    # промахиваться на совсем разных словах.
+    if base < 80:
+        return base
+    # Простой align через character-by-character diff для
+    # одинаковых длин.
+    if len(token) != len(candidate):
+        return base
+    cheap_mismatches = 0
+    total_mismatches = 0
+    for a, b in zip(token, candidate, strict=False):
+        if a == b:
+            continue
+        total_mismatches += 1
+        if _is_cheap_substitution(a, b):
+            cheap_mismatches += 1
+    if total_mismatches == 0:
+        return 100
+    if cheap_mismatches == total_mismatches:
+        return min(100, base + 3)
+    return base
+
 # Сигнал «возможно это proper noun» (имя/фамилия/название
 # города/организации): первая буква ЗАГЛАВНАЯ. Наш словарь
 # lowercase, поэтому имена/названия туда не попадают. Если
@@ -192,6 +281,15 @@ def _best_match(token_low: str) -> str | None:
     # подобные collapse'ы.
     if len(canonical) / max(len(token_low), 1) < _MIN_LENGTH_RATIO:
         return None
+    # OCR-aware re-scoring: для одинаковых-длин кандидатов смотрим,
+    # не попадают ли все несовпадения в OCR-typical substitution
+    # классы. Если да — это confidence-бустер; если нет — должна
+    # быть очень высокая base-score. Это барьер против случайных
+    # fuzzy-matches.
+    if len(canonical) == len(token_low):
+        aware = _ocr_aware_score(token_low, canonical)
+        if aware < threshold:
+            return None
     return canonical
 
 

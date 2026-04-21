@@ -36,7 +36,9 @@ from pathlib import Path
 
 from .validators import is_valid_inn
 
-ROOT = Path(__file__).resolve().parent.parent
+# Декабрь 2026 bug-fix: ROOT указывал на src/, а expected/ и data/
+# лежат в repo root (выше src/). Поднимаем на один уровень.
+ROOT = Path(__file__).resolve().parent.parent.parent
 _DEFAULT_CACHE = ROOT / "data" / "org_cache.json"
 _DEFAULT_EXPECTED_DIR = ROOT / "expected"
 

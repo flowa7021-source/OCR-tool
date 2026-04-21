@@ -60,6 +60,134 @@ def _enrich_with_inn(raw: str, full_text: str) -> str:
     return raw
 
 
+def _catalog_crossvalidate(
+    raw: str, field_name: str, full_text: str = "",
+) -> tuple[str, float]:
+    """Cross-validate ORG-поле через ИНН-каталог.
+
+    Если в ``raw`` найден валидный ИНН (by checksum) и в каталоге
+    есть запись по нему, производим три проверки:
+
+    1. **ИНН валиден** — базовый boost confidence +0.05.
+
+    2. **Name fuzzy-match** — сравниваем OCR-имя (первое слово после
+       ORG-префикса) с canonical-именем из каталога через rapidfuzz.
+       Если score ≥ 85 — это ТА ЖЕ организация; boost +0.10.
+
+    3. **Prepend canonical name** (только для сильно-mangled raw) —
+       если OCR-имя fuzzy-мимо canonical (score < 60), но ИНН
+       валиден → OCR катастрофически исказил имя. Подклеиваем
+       canonical как «(каталог: ООО XYZ)» для пользователя.
+
+    Возвращает ``(enriched_raw, conf_delta)``. Если ИНН не найден
+    или каталог пуст, возвращает (raw, 0.0) без изменений.
+
+    Применяется к полям где ИНН legitim:
+      * shipper — включает ИНН, boost полный
+      * reception — включает ИНН (из «Владелец инфраструктуры»)
+      * consignee — БЕЗ prepend (parser design: без ИНН), но boost
+        по match'у имени
+    """
+    if not raw or raw in (MISSING, GARBAGE):
+        return raw, 0.0
+    import re
+    conf_delta = 0.0
+    enriched = raw
+
+    # Находим первый валидный ИНН в строке. Для consignee (по
+    # design без ИНН) пробуем искать в full_text, fuzzy-match'а
+    # имя из raw против каталога по канд. ИНН из full_text.
+    found_inn: str | None = None
+    for m in re.finditer(r"\b(\d{10}|\d{12})\b", raw):
+        candidate = m.group(1)
+        if is_valid_inn(candidate):
+            found_inn = candidate
+            break
+
+    if not found_inn and full_text:
+        # Fallback: для consignee raw без ИНН → сканируем full_text
+        # и fuzzy-сравниваем имя из raw с каталогом-именем каждого
+        # найденного ИНН. Если совпало — это тот же контрагент.
+        try:
+            from rapidfuzz import fuzz
+        except ImportError:
+            return raw, 0.0
+        # Нормализуем обе строки одинаково: только буквы + пробелы,
+        # lowercase. Дефисы / цифры / пунктуация убираются — иначе
+        # «Моспроект-3» vs «Моспроект 3» даёт partial_ratio 82 %
+        # (ниже нашего 85 % threshold), хотя это очевидно та же
+        # организация.
+        def _norm(s: str) -> str:
+            return re.sub(
+                r"\s+", " ",
+                re.sub(r"[^А-Яа-яЁёA-Za-z]", " ", s),
+            ).strip().lower()
+
+        raw_letters = _norm(raw)
+        if not raw_letters or len(raw_letters) < 3:
+            return raw, 0.0
+        for m in re.finditer(r"\b(\d{10}|\d{12})\b", full_text):
+            candidate = m.group(1)
+            if not is_valid_inn(candidate):
+                continue
+            rec = lookup_by_inn(candidate)
+            if not rec:
+                continue
+            canon_name = _norm(rec.get("name") or "")
+            if not canon_name:
+                continue
+            if fuzz.partial_ratio(canon_name, raw_letters) >= 85:
+                found_inn = candidate
+                break
+
+    if not found_inn:
+        return raw, 0.0
+
+    # ИНН прошёл контрольную сумму — это объективный сигнал
+    # что OCR правильно распознал цифры (12 чисел не могут
+    # случайно сложиться в валидный контрольный разряд).
+    conf_delta += 0.05
+
+    rec = lookup_by_inn(found_inn)
+    if not rec:
+        # Catalog не знает этот ИНН — но checksum всё равно пройден,
+        # boost + держим.
+        return raw, conf_delta
+
+    canonical_name = (rec.get("name") or "").strip()
+    if not canonical_name:
+        return raw, conf_delta
+
+    # Fuzzy-сравнение canonical-name с raw (OCR-строкой). Сравниваем
+    # только буквенную часть — игнорируем цифры ИНН/КПП/адрес.
+    raw_letters = re.sub(r"[^А-Яа-яЁёA-Za-z ]", " ", raw).strip()
+    canon_letters = re.sub(r"[^А-Яа-яЁёA-Za-z ]", " ", canonical_name).strip()
+
+    try:
+        from rapidfuzz import fuzz
+        score = fuzz.partial_ratio(
+            canon_letters.lower(), raw_letters.lower(),
+        )
+    except ImportError:
+        # Без rapidfuzz обойдёмся без fuzzy-boost, но ИНН-boost
+        # остаётся — он не требует библиотеки.
+        return enriched, conf_delta
+
+    if score >= 85:
+        # Name совпадает — сильный сигнал что OCR верно распознал
+        # организацию. Boost дополнительно.
+        conf_delta += 0.10
+    elif score < 60 and field_name in ("shipper", "reception"):
+        # OCR катастрофически исказил имя, но ИНН валиден. Добавляем
+        # canonical-имя из каталога как аннотацию, чтобы пользователь
+        # видел что recovery произошло.
+        legal_form = (rec.get("legal_form") or "").strip()
+        display = f"{legal_form} «{canonical_name}»" if legal_form else canonical_name
+        enriched = f"{raw.rstrip(' ,;')} [каталог: {display}]"
+
+    return enriched, min(conf_delta, 0.15)  # cap at +0.15 suma
+
+
 # ---------------------------------------------------------------------------
 # Кэш
 # ---------------------------------------------------------------------------
@@ -154,16 +282,36 @@ def _build_row(text: str, source: str, global_fallback: str = "") -> ParsedRow:
     row.vehicle = fields["vehicle"][0]
     row.reception = fields["reception"][0]
 
+    # Cross-validate ORG-поля через ИНН-каталог: если извлечённая
+    # строка содержит валидный ИНН и он есть в каталоге, добавляем
+    # canonical-name как аннотацию (для shipper/reception) и
+    # повышаем confidence поля (ИНН с checksum — объективный
+    # сигнал). На consignee confidence тоже boost'им, но без
+    # prepend (parser design держит consignee без ИНН).
+    sh_enriched, sh_delta = _catalog_crossvalidate(
+        row.shipper, "shipper", text,
+    )
+    row.shipper = sh_enriched
+    rc_enriched, rc_delta = _catalog_crossvalidate(
+        row.reception, "reception", text,
+    )
+    row.reception = rc_enriched
+    cn_enriched, cn_delta = _catalog_crossvalidate(
+        row.consignee, "consignee", text,
+    )
+    row.consignee = cn_enriched  # consignee prepend не делается внутри
+
     row.confidence = FieldConfidence(
         date=fields["date"][1],
         number=fields["number"][1],
-        shipper=fields["shipper"][1],
-        consignee=fields["consignee"][1],
+        # min(1.0, ...) — confidence не может превышать 1.0 после boost
+        shipper=min(1.0, fields["shipper"][1] + sh_delta),
+        consignee=min(1.0, fields["consignee"][1] + cn_delta),
         cargo=fields["cargo"][1],
         volume=fields["volume"][1],
         driver=fields["driver"][1],
         vehicle=fields["vehicle"][1],
-        reception=fields["reception"][1],
+        reception=min(1.0, fields["reception"][1] + rc_delta),
     )
 
     if row.number not in (MISSING, GARBAGE):
@@ -212,6 +360,71 @@ def _is_noise_row(row: ParsedRow) -> bool:
     return signals == 0
 
 
+def _apply_multi_row_voting(rows: list[ParsedRow]) -> None:
+    """Voting/consolidation across rows of one multi-TN PDF.
+
+    В сводных PDF типа UPD_41/UPD_47/UPD_48 одна и та же
+    организация (shipper / consignee) фигурирует в каждой ТН —
+    и OCR часто распознаёт её с разными degrees of mangling
+    на разных страницах. Voting-стратегия:
+
+    1. Для каждого ORG-поля (shipper / consignee / reception)
+       собираем non-missing значения.
+    2. Группируем по ИНН (если есть) — если разные значения
+       ссылаются на один ИНН, значит это одна организация и
+       OCR просто разошёлся в написании имени.
+    3. В каждой группе выбираем «канонический» вариант — самый
+       длинный (обычно = меньше OCR-обрезки) И имеющий
+       catalog-enrichment (если есть).
+    4. Проставляем его всем rows группы + boost confidence на
+       +0.05 (cross-row confirmation).
+
+    Без этого: row[0].shipper = «ООО Бекам», row[1].shipper =
+    «ООО Беком», row[2].shipper = «ООО Беком, ИНН 7743553262».
+    Пользователь в Excel видит три разных написания одной
+    организации. С voting'ом: все три становятся одним и тем
+    же каноничным вариантом (с ИНН и catalog-аннотацией).
+
+    Применяется в-place к ``rows``.
+    """
+    import re
+    if len(rows) < 2:
+        return
+    for field in ("shipper", "consignee", "reception"):
+        # Группировка по ИНН из raw.
+        groups: dict[str, list[int]] = {}
+        unkeyed: list[int] = []
+        for i, row in enumerate(rows):
+            val = getattr(row, field, "") or ""
+            if val in (MISSING, GARBAGE, ""):
+                continue
+            inn_m = re.search(r"\b(\d{10}|\d{12})\b", val)
+            if inn_m and is_valid_inn(inn_m.group(1)):
+                groups.setdefault(inn_m.group(1), []).append(i)
+            else:
+                unkeyed.append(i)
+        # Для каждой группы выбираем canonical.
+        for _inn, indices in groups.items():
+            if len(indices) < 2:
+                continue
+            # Canonical = самая длинная строка (длинная = меньше
+            # обрезана OCR-шумом, больше контекста).
+            canonical_idx = max(indices, key=lambda i: len(
+                getattr(rows[i], field, "") or "",
+            ))
+            canonical_val = getattr(rows[canonical_idx], field)
+            # Пропагируем во все rows группы.
+            for i in indices:
+                if getattr(rows[i], field) != canonical_val:
+                    setattr(rows[i], field, canonical_val)
+                # Cross-row confirmation — небольшой boost на
+                # consensus. Учитываем, что максимум 1.0.
+                cur = getattr(rows[i].confidence, field, 0.0)
+                setattr(
+                    rows[i].confidence, field, min(1.0, cur + 0.03),
+                )
+
+
 def parse_text(text: str, source: str) -> list[ParsedRow]:
     """Парсит нормализованный текст, возвращая одну или несколько строк."""
     if not text or not text.strip():
@@ -233,6 +446,9 @@ def parse_text(text: str, source: str) -> list[ParsedRow]:
     # Если все отфильтрованы — вернём хотя бы первый (fallback-страховка).
     if not rows and documents:
         rows.append(_build_row(documents[0], source, global_fallback))
+    # Cross-row voting по ORG-полям (shipper/consignee/reception).
+    # На sparse multi-TN PDF даёт консистентность + conf boost.
+    _apply_multi_row_voting(rows)
     return rows
 
 
