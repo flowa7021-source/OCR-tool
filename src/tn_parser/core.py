@@ -366,18 +366,39 @@ def _build_row(text: str, source: str, global_fallback: str = "") -> ParsedRow:
             if fallback_ogrn:
                 row.shipper_ogrn = fallback_ogrn
 
+    # Cross-field requisites consistency check (idea #2 top-10):
+    # структурный invariant + catalog-сверка. Mismatch → понижаем
+    # conf ИНН/КПП/ОГРН с дефолтных 1.0 и пишем маркер в row.note.
+    from .cross_requisites import cross_check_requisites
+
+    shipper_xcheck = cross_check_requisites(
+        row.shipper_inn, row.shipper_kpp, row.shipper_ogrn,
+        catalog=None,  # catalog-mapping будет вкорне позже (idea #3)
+    )
+    consignee_xcheck = cross_check_requisites(
+        row.consignee_inn, row.consignee_kpp, row.consignee_ogrn,
+        catalog=None,
+    )
+
+    def _req_conf(value: str, xcheck_delta: float) -> float:
+        """Confidence реквизита: 1.0 если извлечён + нет mismatch'а,
+        иначе max(0.5, 1.0 + delta)."""
+        if not value:
+            return 0.0
+        return max(0.5, min(1.0, 1.0 + xcheck_delta))
+
     row.confidence = FieldConfidence(
         date=fields["date"][1],
         number=fields["number"][1],
         # min(1.0, ...) — confidence не может превышать 1.0 после boost
         shipper=min(1.0, fields["shipper"][1] + sh_delta),
-        shipper_inn=1.0 if row.shipper_inn else 0.0,
-        shipper_kpp=1.0 if row.shipper_kpp else 0.0,
-        shipper_ogrn=1.0 if row.shipper_ogrn else 0.0,
+        shipper_inn=_req_conf(row.shipper_inn, shipper_xcheck.confidence_delta),
+        shipper_kpp=_req_conf(row.shipper_kpp, shipper_xcheck.confidence_delta),
+        shipper_ogrn=_req_conf(row.shipper_ogrn, shipper_xcheck.confidence_delta),
         consignee=min(1.0, fields["consignee"][1] + cn_delta),
-        consignee_inn=1.0 if row.consignee_inn else 0.0,
-        consignee_kpp=1.0 if row.consignee_kpp else 0.0,
-        consignee_ogrn=1.0 if row.consignee_ogrn else 0.0,
+        consignee_inn=_req_conf(row.consignee_inn, consignee_xcheck.confidence_delta),
+        consignee_kpp=_req_conf(row.consignee_kpp, consignee_xcheck.confidence_delta),
+        consignee_ogrn=_req_conf(row.consignee_ogrn, consignee_xcheck.confidence_delta),
         cargo=fields["cargo"][1],
         volume=fields["volume"][1],
         driver=fields["driver"][1],
@@ -395,6 +416,11 @@ def _build_row(text: str, source: str, global_fallback: str = "") -> ParsedRow:
         notes.append("LOW_TEXT")
     if row.confidence.overall() < 0.4:
         notes.append("LOW_CONF")
+    # Cross-check notes — видны пользователю в колонке «Примечание».
+    if shipper_xcheck.note:
+        notes.append(f"shipper: {shipper_xcheck.note}")
+    if consignee_xcheck.note:
+        notes.append(f"consignee: {consignee_xcheck.note}")
     row.note = ";".join(notes)
 
     # LLM-fallback при низкой уверенности. No-op без ANTHROPIC_API_KEY
