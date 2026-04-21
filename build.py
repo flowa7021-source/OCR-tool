@@ -157,6 +157,12 @@ def build_pyinstaller(onefile: bool = False) -> int:
         f"--paths={PROJECT_ROOT}",
         # Bundled assets
         f"--add-data=resources/tessdata{sep}resources/tessdata",
+        # ru_lexicon.txt — расширенный 1.3M русских форм (5-10 chars)
+        # из pymorphy3 OpenCorpora, ~23 MB. Нужен для fuzzy_corrector'а
+        # в runtime без pymorphy3-dep. Bundle size bump приемлем
+        # (Tesseract rus.traineddata итак 40 MB); win в accuracy
+        # перевешивает.
+        f"--add-data=resources/ru_lexicon.txt{sep}resources",
         f"--add-data=resources/tesseract{sep}resources/tesseract",
         f"--add-data=resources/icons{sep}resources/icons",
         f"--add-data=resources/styles{sep}resources/styles",
@@ -221,7 +227,21 @@ def build_pyinstaller(onefile: bool = False) -> int:
         "--collect-all=rapidfuzz",
         "--collect-all=scripts",
         "--collect-submodules=src.tn_parser",
-        "--hidden-import=openpyxl",
+        # ``openpyxl`` has ~80 submodules (cell/, styles/, writer/, …) —
+        # ``--hidden-import=openpyxl`` only collects the top-level
+        # package and leaves ``import openpyxl.workbook`` failing at
+        # runtime inside the frozen bundle. Use ``--collect-all`` so
+        # every submodule + data file (``_constants.py``, schemas)
+        # ships together. The parser-smoke step asserts an ``openpyxl``
+        # directory lives under the install tree; without this flag
+        # PyInstaller collapses the whole thing into a single .pyc
+        # inside ``base_library.zip`` and the check can't find it.
+        "--collect-all=openpyxl",
+        # ``pymorphy3`` also lazy-loads language dictionaries via
+        # ``importlib.import_module(f'pymorphy3_dicts_{lang}')``. Same
+        # "static analyser misses dynamic import" failure mode.
+        "--collect-all=pymorphy3",
+        "--collect-all=pymorphy3_dicts_ru",
     ]
 
     # Attach Windows .ico if it was generated/placed before the build.

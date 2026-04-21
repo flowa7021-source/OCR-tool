@@ -146,13 +146,18 @@ def test_export_excel_writes_xlsx_log_and_snapshot(tmp_path: Path) -> None:
     assert snapshot_path.exists(), "snapshot.json sidecar must be written"
     assert result.parsed.snapshot_path == str(snapshot_path)
 
-    # Contents verifiable by openpyxl — 13 columns, confidence last.
+    # Contents verifiable by openpyxl. Последняя колонка = «Уверенность, %»,
+    # позиция определяется по ``COLUMNS`` (19 после апреля 2026, было 13).
+    from src.tn_parser.excel import COLUMNS
     wb = load_workbook(out)
     ws = wb.active
     assert ws.cell(row=1, column=1).value == "Транспортная накладная"
-    assert ws.cell(row=1, column=13).value == "Уверенность, %"
+    assert ws.cell(row=1, column=len(COLUMNS)).value == "Уверенность, %"
     # Row 2 is the one parsed row from tn_ocr_tabular.txt: number 7145/Б.
-    row2 = [ws.cell(row=2, column=c).value or "" for c in range(1, 14)]
+    row2 = [
+        ws.cell(row=2, column=c).value or ""
+        for c in range(1, len(COLUMNS) + 1)
+    ]
     assert any("7145" in str(v) for v in row2), f"unexpected row: {row2!r}"
 
 

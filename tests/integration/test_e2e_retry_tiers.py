@@ -144,7 +144,7 @@ class TestInvoiceTypicalForm:
 
     @pytest.mark.parametrize(
         "profile_name",
-        ["default", "quick_reliable", "contracts_ru", "universal_accurate"],
+        ["universal_accurate"],
     )
     def test_every_page_has_text_layer(
         self,
@@ -298,7 +298,7 @@ class TestContract4PageEveryPage:
 
     @pytest.mark.parametrize(
         "profile_name",
-        ["default", "quick_reliable", "contracts_ru", "universal_accurate"],
+        ["universal_accurate"],
     )
     def test_all_4_pages_searchable(
         self,

@@ -1,0 +1,128 @@
+# Nightly golden regression на реальных ТН/УПД PDF.
+#
+# Почему отдельный workflow:
+#   * 5 real PDFs × full pipeline (Tesseract + Ghostscript + Sauvola
+#     400 DPI + tn_parser) = 15-30 мин runtime. Слишком дорого для
+#     каждого PR.
+#   * Цель — ловить регрессии изменений парсера на PROD-данных
+#     (adjacent-cell leak, splitter бага и т.п.) — эти баги не
+#     проявляются на synthetic fixtures.
+#
+# Когда гоняется:
+#   * Cron @ 02:00 UTC ежедневно (тихая зона для runner'ов).
+#   * Manual через workflow_dispatch.
+#   * НЕ на PR — баланс «ловим регрессии до merge vs держим PR-CI
+#     быстрым». Если что-то упадёт ночью — создаём issue и ловим
+#     в следующем PR.
+#
+# Требования окружения:
+#   * inputs/*.pdf должны быть в репо (≈ 5 MB итого, git LFS
+#     не нужен).
+#   * tesseract-ocr-rus + ghostscript + rus.traineddata + tessdata
+#     configs.
+#   * DejaVuSans.ttf (обычно установлен по умолчанию в Ubuntu).
+
+name: Parser golden regression
+
+on:
+  schedule:
+    - cron: "0 2 * * *"  # 02:00 UTC = 05:00 MSK
+  workflow_dispatch:
+    inputs:
+      pdf_filter:
+        description: "Опциональный filter по имени PDF (pytest -k)"
+        required: false
+        default: ""
+
+# По одной копии golden-job'а в полёте — избегаем race условий на
+# разделяемом state (~/.ocrstudio/cache, если он закрепится где-то).
+concurrency:
+  group: parser-golden-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  golden:
+    name: Golden regression on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Ubuntu — основной runner (дешёвый, быстрый Tesseract).
+        # Windows добавим когда потребуется ловить Windows-specific
+        # регрессии (Cyrillic paths + PyInstaller + fonts); пока PR-CI
+        # уже покрывает Windows-путь через integration/e2e tests.
+        os: [ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Tesseract + Ghostscript (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            tesseract-ocr tesseract-ocr-rus \
+            ghostscript \
+            libegl1 libgl1 fonts-dejavu-core
+          tesseract --version
+          gs --version
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-mock rapidfuzz
+
+      - name: Verify inputs/*.pdf present
+        run: |
+          count=$(ls inputs/*.pdf 2>/dev/null | wc -l)
+          if [ "$count" -lt 5 ]; then
+            echo "::error::Expected 5 real PDFs in inputs/, found $count"
+            ls -la inputs/
+            exit 1
+          fi
+          echo "inputs/*.pdf: $count files OK"
+
+      - name: Run golden regression
+        id: golden
+        env:
+          OCR_DISABLE_CACHE: "1"  # см. Bug 7 — кэш скрывает регрессии
+        run: |
+          FILTER="${{ inputs.pdf_filter }}"
+          if [ -n "$FILTER" ]; then
+            pytest -m parser_golden -v -k "$FILTER" --tb=long \
+                   tests/parsers/tn/test_parser_golden_real_pdf.py \
+                   | tee golden_output.log
+          else
+            pytest -m parser_golden -v --tb=long \
+                   tests/parsers/tn/test_parser_golden_real_pdf.py \
+                   | tee golden_output.log
+          fi
+
+      - name: Upload detailed report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-report-${{ github.run_id }}
+          path: |
+            golden_output.log
+          retention-days: 30
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Golden regression summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Run: \`${{ github.run_id }}\` on \`${{ matrix.os }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          grep -E "GOLDEN REPORT|Overall golden score|PASSED|FAILED" golden_output.log \
+            >> $GITHUB_STEP_SUMMARY || echo "(no report lines)" >> $GITHUB_STEP_SUMMARY

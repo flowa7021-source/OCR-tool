@@ -30,8 +30,14 @@ except ImportError:  # pragma: no cover
 # Для shipper/consignee — несколько синонимов: в ТН «Грузоотправитель» /
 # «Грузополучатель», в счёте-фактуре / УПД — «Продавец» / «Покупатель»,
 # иногда «Поставщик».
+# «Погрузка» даёт секцию reception в пост-OCR структурированном формате —
+# там «Владелец инфраструктуры: ООО X, ИНН N» совпадает с infrastructure_owner
+# из экспертной разметки. «Лицо, принимающее груз» — отдельный блок,
+# игнорируется (в inputs это обычно не сторона с ИНН, а ФИО кладовщиков).
 _ROLE_TITLES: list[tuple[str, tuple[str, ...]]] = [
-    ("reception", ("прием груза", "приём груза", "погрузка груза")),
+    ("reception", (
+        "прием груза", "приём груза", "погрузка груза", "погрузка",
+    )),
     ("consignee", ("грузополучатель", "покупатель")),
     ("shipper", ("грузоотправитель", "продавец", "поставщик")),
     ("vehicle", ("транспортное средство",)),
@@ -40,6 +46,11 @@ _ROLE_TITLES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 # Заголовки, которые мы узнаём как стоп-маркеры, но контент не забираем.
+# В пост-OCR структурированном формате добавлены «— СТОРОНЫ —»,
+# «— ОСНОВАНИЕ —», «— РАЗГРУЗКА —», «— ПОДПИСИ И ПЕЧАТИ —»,
+# «— ПРИМЕЧАНИЯ О СКАНЕ —», «заказчик перевозки», «разгрузка»,
+# «подписи и печати», «примечания о скане» — их контент не надо
+# выгружать в поля, но они служат границами между секциями.
 _IGNORED_TITLES: tuple[str, ...] = (
     "сопроводительные документы",
     "указания грузоотправителя",
@@ -54,6 +65,16 @@ _IGNORED_TITLES: tuple[str, ...] = (
     "отметки",
     "выдача груза",
     "сдача груза",
+    "стороны",
+    "основание",
+    "разгрузка",
+    "подписи и печати",
+    "примечания о скане",
+    "заказчик перевозки",
+    "доверенность",
+    "объект строительства",
+    "лицо, принимающее груз",
+    "лицо принимающее груз",
 )
 
 
@@ -83,6 +104,24 @@ _BARE = re.compile(
     + r")\b[^\n]{0,80}$"
 )
 
+# Заголовок в квадратных скобках: «[Грузоотправитель]», «[Перевозчик]»,
+# «[Лицо, принимающее груз]». Используется в пост-OCR структурированном
+# формате (inputs/TN_k_UPD_*.txt).
+_BRACKETED = re.compile(
+    r"(?mi)^\s*\[\s*("
+    + "|".join(re.escape(name) for name in _KNOWN_TITLES)
+    + r")[^\]\n]{0,80}\]\s*$"
+)
+
+# Заголовок в em-dash обрамлении: «— ГРУЗ —», «— ТРАНСПОРТНОЕ СРЕДСТВО —»,
+# «— ПОГРУЗКА —», «— СТОРОНЫ —». Дефисы могут быть разных юникодных форм
+# (\u2014 «—», \u2013 «–», ASCII «-»). Используется в пост-OCR формате.
+_EMDASH_WRAPPED = re.compile(
+    r"(?mi)^\s*[\u2014\u2013\u2015\-]{1,2}\s*("
+    + "|".join(re.escape(name) for name in _KNOWN_TITLES)
+    + r")\b[^\n]{0,80}?[\u2014\u2013\u2015\-]{1,2}\s*$"
+)
+
 
 # Эталоны для нечёткого сопоставления (≥ 6 букв — короче брать опасно,
 # слишком много ложных срабатываний).
@@ -96,6 +135,114 @@ _FUZZY_TITLES: list[tuple[str, tuple[str, ...]]] = [
 
 _FUZZY_THRESHOLD = 82      # минимальный score для принятия
 _FUZZY_MARGIN = 6          # разрыв между лучшим и вторым кандидатом
+
+# Form-comment anchors. На бланках ТН после каждого header'а идёт
+# explanatory text в скобках стандартного образца:
+#
+#   1. Грузоотправитель
+#   ООО "..."
+#   (реквизиты, позволяющие идентифицировать Грузоотправителя)
+#   2. Грузополучатель
+#   АО "..."
+#   (реквизиты, позволяющие идентифицировать Грузополучателя)
+#
+# Когда OCR съедает сам header (Tesseract промахивается на жирном
+# шрифте small-caps), эти comment-anchors часто выживают — они
+# набраны мелким светлым шрифтом, OCR с ним справляется лучше.
+# Используем закрывающую часть «идентифицировать <Роль>» как
+# DETECTION-сигнал того, что мы только что прошли границу секции.
+#
+# Декабрь 2026: на UPD_36 OCR превратил «2. Грузополучатель» в
+# мусор, но «(реквизиты, позволяющие идентифицировать
+# Гручополучателя)» сохранился — без этого anchor'а consignee
+# извлечь нельзя.
+# Form-comment anchors по STEM'ам с толерантностью к OCR-mangling.
+# OCR на бланках ТН систематически портит длинные слова: «(реквизиты»
+# → «Зреквизить», «идентифицировать» → «идентийнииривать»,
+# «Грузополучателя» → «Гручополучателя». Поэтому здесь даём широкие
+# regex'ы по STEM'у роли — корень обычно сохраняется даже когда
+# суффиксы исковерканы.
+#
+# Каждый anchor — пара (role, stem-regex). Anchor сработал =
+# секция <role> существует где-то рядом, даже если её header'а
+# в тексте нет. Применяется как fallback ТОЛЬКО когда обычные
+# header-based маркеры не нашли соответствующую роль.
+# OCR systematically mangles 'з' → 'ч'/'3'/'c' / 'е' → 'с' / 'о' → '0' / 'а' → 'а'.
+# Stem-классы для двух «грузо*» ролей принимают наиболее частые
+# OCR-замены первого характерного chars'а после «гру»:
+#   3 — Latin/Cyr digit-like
+#   ч/щ/Ц — частая mis-recognition бoldface 'з'
+#   c — Latin c (mistaken for 'с')
+_GRUZO_CHARS = "[з3cчщЦzc]"
+_FORM_COMMENT_ANCHORS: list[tuple[str, str]] = [
+    # «грузоотправ» / «гручоотправ» / «гру3оотправ» — толерант к 'з'/'ч'/'3'.
+    ("shipper", rf"гру{_GRUZO_CHARS}[ао]?[оа]?тправ"),
+    # «грузополуч» / «гручополуч» / «гру3опалуч».
+    ("consignee", rf"гру{_GRUZO_CHARS}[аоуeс]?п[оа]?луч"),
+    # «перевозчик» / «перевозщик» / «перевозчнк» / «псрсвозчик» —
+    # ключ здесь СУФФИКС «-чик/-щик/-чнк/-щнк», чтобы не матчить
+    # «перевозки» (genitive of «перевозка» = транспортная операция,
+    # не role-слово). OCR редко ломает суффикс этой длины.
+    ("carrier", r"п[еc][рп]?[еc]во[зc][чщ][ин][кчн]"),
+    # «принимающее груз» / «приним...груз»
+    ("reception", rf"приним\w{{0,4}}\s+гру{_GRUZO_CHARS}"),
+]
+
+
+def _find_form_comment_anchors(text: str) -> list[tuple[int, str]]:
+    """Ищет stem-токены ролей внутри explanatory-комментариев формы.
+
+    Стратегия: для каждой роли ищем stem-regex anywhere в тексте,
+    но требуем чтобы СРАЗУ ПЕРЕД anchor'ом (в ±60 чар) был
+    typical form-comment маркер — «идентифицировать», «позволяющие»,
+    «(реквизиты». Это сигнал что мы попали в explanatory text
+    стандартной формы ТН (где после комментария идёт следующая
+    секция), а не в произвольную прозу с упоминанием роли.
+
+    Без узкого контекста ловятся false-positives: «перевоз» в
+    form-header «Правил перевозок грузов автомобильным транспортом»,
+    «Грузоотправитель» внутри длинных explanatory комментариев
+    о маршруте перевозки и т.п.
+
+    Результат: позиция начала строки ПЕРЕД anchor'ом — там лежит
+    содержимое искомой секции (ORG-line).
+    """
+    out: list[tuple[int, str]] = []
+    # Маркер «explanatory comment стандартной формы ТН». OCR
+    # систематически ломает «идентифицировать» (ф↔й, ц↔н, в→б),
+    # «позволяющие» (л↔п, ю→1, ц→с). Принимаем очень разношёрстно
+    # по первым 5-6 буквам + стабильный хвост «ировать/ировдть/
+    # иривать»). Маркер должен быть в 80-char окне ПЕРЕД stem'ом.
+    context_re = re.compile(
+        r"(?:идент[ийнсв][фйнс][ниио][нцт]?\w*"
+        r"|[пи]озволя\w*|[зс]воляющ\w*|зволяют|"
+        r"реквизит\w*|Зреквизит)",
+        re.IGNORECASE,
+    )
+    for role, stem_pattern in _FORM_COMMENT_ANCHORS:
+        for m in re.finditer(stem_pattern, text, re.IGNORECASE):
+            anchor_pos = m.start()
+            # Узкое окно — 60 чар СЛЕВА от anchor'а. Маркер должен
+            # быть прямо перед stem'ом, как в «идентифицировать
+            # Грузополучателя» — не «идентифицировать (любая прочая
+            # проза 200 chars) Грузополучателя».
+            window_start = max(0, anchor_pos - 60)
+            left_window = text[window_start:anchor_pos]
+            if not context_re.search(left_window):
+                continue
+            # Содержимое секции расположено ПЕРЕД anchor'ом и его
+            # explanatory comment'ом: backwalk до начала последней
+            # значимой строки ВЫШЕ открытой скобки.
+            paren_start = text.rfind("(", window_start, anchor_pos)
+            scan_until = paren_start if paren_start >= 0 else anchor_pos
+            backwalk_pos = max(0, scan_until - 250)
+            line_starts = [
+                i + 1 for i in range(backwalk_pos, scan_until)
+                if text[i] == "\n"
+            ]
+            section_start = line_starts[0] if line_starts else backwalk_pos
+            out.append((section_start, role))
+    return out
 
 _HEAD_WORD_SPLIT_RE = re.compile(r"[\s:.,–—\-]+")
 
@@ -216,6 +363,29 @@ def _find_markers(text: str) -> list[tuple[int, str]]:
         if role is not None:
             candidates.append((m.start(), role))
 
+    # 4) Заголовки в квадратных скобках «[Грузоотправитель]».
+    for m in _BRACKETED.finditer(text):
+        role = _classify_title(m.group(1))
+        if role is not None:
+            candidates.append((m.start(), role))
+
+    # 5) Заголовки в em-dash обрамлении «— ГРУЗ —».
+    for m in _EMDASH_WRAPPED.finditer(text):
+        role = _classify_title(m.group(1))
+        if role is not None:
+            candidates.append((m.start(), role))
+
+    # 6) Form-comment anchors: «(реквизиты, …идентифицировать <Роль>)»
+    #    дают слабые маркеры — только для тех ролей, у которых ИНАЧЕ
+    #    мы вообще не нашли границу. Это спасает шапки, полностью
+    #    съеденные OCR (см. UPD_36 — «2. Грузополучатель» исчез,
+    #    но explanatory comment «(реквизиты, позволяющие
+    #    идентифицировать Гручополучателя)» сохранился).
+    primary_roles = {role for _, role in candidates if role != "__ignored__"}
+    for pos, role in _find_form_comment_anchors(text):
+        if role not in primary_roles:
+            candidates.append((pos, role))
+
     # Первое вхождение каждой роли.
     seen_roles: set[str] = set()
     markers: list[tuple[int, str]] = []
@@ -233,8 +403,28 @@ def _find_markers(text: str) -> list[tuple[int, str]]:
     return markers
 
 
-def split_sections(text: str) -> dict[str, str]:
-    """Делит нормализованный текст на разделы по ролям."""
+def split_sections(
+    text: str,
+    *,
+    tsv: dict[str, list] | None = None,
+    page_width: int | None = None,
+) -> dict[str, str]:
+    """Делит нормализованный текст на разделы по ролям.
+
+    Args:
+        text: Нормализованный OCR-text (уже после TextPostprocessor).
+        tsv: Опциональный ``pytesseract.image_to_data(DICT)`` — если
+            передан, используется layout-aware extraction для
+            устранения adjacent-cell-leak (idea #1 top-10). См.
+            :mod:`src.tn_parser.layout_anchor`. Fallback на regex
+            сохранён.
+        page_width: Ширина страницы для column-определения. Обязателен
+            если передан ``tsv``.
+
+    Returns:
+        Dict вида ``{role: section_body}`` — role = shipper /
+        consignee / carrier / cargo / driver / vehicle / reception.
+    """
     if not text:
         return {}
 
@@ -257,9 +447,15 @@ def split_sections(text: str) -> dict[str, str]:
         header_line = chunk if nl < 0 else chunk[:nl]
         rest = "" if nl < 0 else chunk[nl + 1 :].strip()
 
-        # Inline-значение в заголовке: "1. Грузоотправитель: ООО Ромашка".
+        # Заголовки в em-dash / квадратных скобках — «[Грузоотправитель]»,
+        # «— ГРУЗ —» — не имеют inline-значения. Снимаем обрамление
+        # (скобки и em-dash'и по краям), чтобы inline-split не засосал
+        # хвостовой «—» или «]» как значение поля.
+        stripped_header = header_line.strip(
+            " \t\u2014\u2013\u2015\u2010\u2011\u2012-[]"
+        )
         inline = ""
-        inline_split = re.split(r"[:\-–—]", header_line, maxsplit=1)
+        inline_split = re.split(r"[:\-–—]", stripped_header, maxsplit=1)
         if len(inline_split) == 2 and inline_split[1].strip():
             inline = inline_split[1].strip()
 
@@ -270,4 +466,85 @@ def split_sections(text: str) -> dict[str, str]:
         if role not in result:
             result[role] = body
 
+    # Layout-aware disambiguation для ролей из левой колонки ТН-формы
+    # (idea #1 top-10, Bug 1 класс «adjacent-cell leak»). Срабатывает
+    # только когда передан TSV + page_width AND в body присутствуют
+    # маркеры «соседней ячейки» (например ``заказчик услуг`` в теле
+    # shipper). Попытка переоткрыть тело через bbox-колонку; если
+    # layout-ы дали что-то разумное — заменяем.
+    if tsv and page_width and page_width > 0:
+        patterns_in_order = [_LEFT_COLUMN_ANCHORS[r] for r in _LEFT_COLUMN_ROLES]
+        for role in _LEFT_COLUMN_ROLES:
+            body = result.get(role, "")
+            if not body or not _ADJACENT_CELL_MARKERS_RE.search(body):
+                continue
+            idx = _LEFT_COLUMN_ROLES.index(role)
+            layout_body = _layout_extract_left_column_section(
+                tsv, page_width, patterns_in_order, idx,
+            )
+            if layout_body and len(layout_body.strip()) >= 10:
+                result[role] = layout_body.strip()
+
     return result
+
+
+#: Роли, живущие в левой колонке ТН-формы и подверженные adjacent-
+#: cell leak из правой. Для других ролей (cargo / vehicle / driver /
+#: reception) layout-disambig не применяется — они идут через всю
+#: ширину формы.
+_LEFT_COLUMN_ROLES: tuple[str, ...] = ("shipper", "consignee", "carrier")
+
+#: Anchor-patterns для layout_anchor.find_section_region — IGNORECASE
+#: word-stem'ы (поймают падежи «грузоотправителя», «перевозчиком»).
+_LEFT_COLUMN_ANCHORS: dict[str, str] = {
+    "shipper": r"грузоотправ",
+    "consignee": r"грузополуч",
+    "carrier": r"перевозчик",
+}
+
+#: Маркер «body содержит контамину из соседней (правой) ячейки».
+#: «Заказчик услуг» и «является экспедитором» — типичные слова
+#: 1а-ячейки формы ТН.
+_ADJACENT_CELL_MARKERS_RE = re.compile(
+    r"(?i)заказчик\s+услуг|является\s+экспедит"
+)
+
+
+def _layout_extract_left_column_section(
+    tsv: dict[str, list],
+    page_width: int,
+    anchor_patterns: list[str],
+    role_idx: int,
+) -> str | None:
+    """Извлечь текст левой колонки для секции по индексу anchor'а.
+
+    Body секции — от y-позиции её anchor'а до y-позиции следующего
+    left-column anchor'а, либо до низа страницы.
+    """
+    from .layout_anchor import (
+        extract_column_text_between,
+        find_section_region,
+    )
+
+    anchor = anchor_patterns[role_idx]
+    region = find_section_region(
+        tsv, anchor_pattern=anchor,
+        prefer_column="left", page_width=page_width,
+    )
+    if region is None:
+        return None
+    top = region[0]
+    bottom = 999_999  # защитный верх: возьмём всё ниже якоря
+    for next_anchor in anchor_patterns[role_idx + 1:]:
+        next_region = find_section_region(
+            tsv, anchor_pattern=next_anchor,
+            prefer_column="left", page_width=page_width,
+        )
+        if next_region is not None and next_region[0] > top:
+            bottom = next_region[0]
+            break
+
+    return extract_column_text_between(
+        tsv, y_top=top, y_bottom=bottom,
+        column="left", page_width=page_width,
+    )

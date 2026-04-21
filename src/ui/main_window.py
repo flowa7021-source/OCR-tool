@@ -708,29 +708,19 @@ class MainWindow(QMainWindow):
             self.profile_combo.addItem(f"{prefix}{p.name}", userData=p.name)
         self.profile_combo.blockSignals(False)
         if profiles:
-            # Prefer ``quick_reliable`` as the first-run pick. Apr 2026
-            # measurement on real user scans (transport invoices with
-            # forms + stamps + signatures, 4-12 pages each) via
-            # ``scripts/benchmark_universal.py`` showed:
-            #
-            #   profile             mean(all)   mean(kept)   time
-            #   quick_reliable      57-59       ~82          93-270 s
-            #   universal_accurate  50          ~83          179+ s
-            #
-            # quick_reliable's simpler preprocessing (OTSU + median,
-            # no Sauvola / no background_removal / no border_removal)
-            # survives Russian business documents noticeably better
-            # than universal_accurate's heavier stack, which over-
-            # processes mixed-content scans and feeds Tesseract a
-            # thinned / smudged image. universal_accurate's ~1 pp
-            # edge on kept-words mean_conf is not worth the 2× wall
-            # time and 10 pp drop on overall mean_conf.
-            #
-            # universal_accurate stays in the list for users who
-            # deliberately want the "throw everything at it" option;
-            # it just isn't the default anymore.
+            # First-run pick — единственный builtin ``universal_accurate``.
+            # С декабря 2026 это и единственный builtin: пользователь
+            # попросил собрать best-of-all из удалённых default /
+            # quick_reliable / low_quality_scan / contracts_ru /
+            # english_text / tn_upd. Combo показывает builtin со
+            # звездой (⭐), кастомные пользовательские профили — без.
+            # Если у пользователя апгрейд со старой версии и
+            # universal_accurate почему-то отсутствует, fallback —
+            # первый элемент комбо (любой кастомный профиль или
+            # пустота — последнее даст пустой combo, но не упадёт).
             preferred_idx = next(
-                (i for i, p in enumerate(profiles) if p.name == "quick_reliable"),
+                (i for i, p in enumerate(profiles)
+                 if p.name == "universal_accurate"),
                 0,
             )
             self.profile_combo.setCurrentIndex(preferred_idx)

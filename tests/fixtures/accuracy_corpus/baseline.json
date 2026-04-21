@@ -8,9 +8,9 @@
   },
   "ru_business_letter": {
     "name": "ru_business_letter",
-    "cer": 0.0216,
-    "wer": 0.2317,
-    "recognised_chars": 557,
+    "cer": 0.0432,
+    "wer": 0.0976,
+    "recognised_chars": 540,
     "ground_truth_chars": 556
   },
   "ru_en_mixed_memo": {
@@ -22,9 +22,9 @@
   },
   "ru_invoice_body": {
     "name": "ru_invoice_body",
-    "cer": 0.0156,
-    "wer": 0.0777,
-    "recognised_chars": 579,
+    "cer": 0.0692,
+    "wer": 0.1553,
+    "recognised_chars": 578,
     "ground_truth_chars": 578
   },
   "ru_dense_small": {

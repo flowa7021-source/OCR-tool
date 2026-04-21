@@ -263,7 +263,7 @@ class OCRConfig:
     #: above-threshold words are unreliable because the whole zone was
     #: mis-analysed by Tesseract's layout stage. Off by default to
     #: keep behaviour byte-exact for profiles that haven't opted in;
-    #: ``quick_reliable`` turns it on.
+    #: ``universal_accurate`` enables it.
     redact_noisy_blocks: bool = False
     #: When True, :class:`confidence_threshold` becomes a *nominal*
     #: value that is adapted per page based on that page's mean
@@ -482,7 +482,7 @@ class PostprocessConfig:
     #: ``TextPostprocessor`` was constructed with a non-empty
     #: :class:`src.core.doc_catalog.DocCatalog` — otherwise it's a
     #: silent no-op. Off by default so JSON-profile migrations from
-    #: pre-v3 schemas stay byte-exact; ``quick_reliable`` opts in.
+    #: pre-v3 schemas stay byte-exact; ``universal_accurate`` opts in.
     validate_identifiers: bool = False
     #: When True, normalise dates / amounts / phone numbers in the
     #: OCR output to their canonical Russian business-document
@@ -491,10 +491,18 @@ class PostprocessConfig:
     #: OCR errors on those entities (``12.O1.2O23`` → ``12.01.2023``,
     #: ``+7 (495) 725-8O-62`` → ``+7 (495) 725-80-62``,
     #: ``1 2З4,56`` → ``1 234,56``). Off by default for backwards-
-    #: compatibility; ``universal_accurate`` and ``quick_reliable``
+    #: compatibility; ``universal_accurate`` (раньше также ``quick_reliable``, удалён в декабре 2026)
     #: opt in. Implemented in :mod:`src.core.entity_validators`;
     #: skips tokens that aren't entity-shaped so prose isn't affected.
     validate_entities: bool = False
+    #: Fuzzy-corrector (~17k ru_lexicon.txt forms). Opt-in, off by
+    #: default: применяется ко ВСЕМ русским токенам ≥ 6 chars и
+    #: может менять legitimate word-forms (организация↔организации).
+    #: Полезен на heavily-mangled scan corpus'е (≥ 30 % CER на OCR),
+    #: снижает WER/CER на clean synthetic fixtures из-за form-
+    #: mismatch с ground-truth. Включайте явно только для
+    #: scan-heavy workflow'ов. Декабрь 2026.
+    fuzzy_correction_ru: bool = False
     custom_rules: list[RegexRule] = field(default_factory=list)
 
 
@@ -571,7 +579,7 @@ class ExtractConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 11
+PROFILE_SCHEMA_VERSION: int = 12
 
 
 @dataclass
@@ -670,7 +678,7 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
     # ``adaptive_confidence_threshold=False`` (opt-OUT by default,
     # preserving the exact filter behaviour pre-v4 profiles saw).
     # Builtin profile builders still set ``True`` on the opinionated
-    # presets (``universal_accurate``, ``quick_reliable``).
+    # presets (``universal_accurate`` — после декабря 2026 единственный builtin).
     if version < 4:
         pre = data.setdefault("preprocess", {})
         pre.setdefault(
@@ -686,7 +694,7 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
     # processing. Old profiles get ``False`` (opt-out by default —
     # preserves byte-identical output for pre-v5 profiles); the
     # builtin builders turn it on for the opinionated presets
-    # (``universal_accurate``, ``quick_reliable``).
+    # (``universal_accurate`` — после декабря 2026 единственный builtin).
     if version < 5:
         post = data.setdefault("postprocess", {})
         post.setdefault("mark_suspect_handwritten_blocks", False)
@@ -716,7 +724,7 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
     # v7 → v8: add ``validate_entities`` flag to postprocess.
     # Default False — preserves byte-identical output for old
     # profiles. Builtin builders turn it on for ``universal_accurate``
-    # and ``quick_reliable``.
+    # (``quick_reliable`` удалён в декабре 2026).
     if version < 8:
         post = data.setdefault("postprocess", {})
         post.setdefault("validate_entities", False)
@@ -733,7 +741,7 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
 
     # v9 → v10: add ``soft_rescue_dropped_words`` flag. Default False
     # on every existing profile so the filter behaviour is unchanged —
-    # ``universal_accurate`` and ``quick_reliable`` flip it to True
+    # ``universal_accurate`` (раньше также ``quick_reliable``, удалён в декабре 2026) flip it to True
     # via their builders, not via a migration rewrite, to keep the
     # migration minimal and reversible.
     if version < 10:
@@ -765,7 +773,16 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         data["schema_version"] = 11
         version = 11
 
-    # Future migrations go here: `if version < 12: ...`
+    # v11 → v12 (апрель 2026): add ``postprocess.fuzzy_correction_ru``
+    # default False (preserves exact behaviour for старых профилей,
+    # builtin'ы перестраивают себя с каждым initialize_builtins).
+    if version < 12:
+        post = data.setdefault("postprocess", {})
+        post.setdefault("fuzzy_correction_ru", False)
+        data["schema_version"] = 12
+        version = 12
+
+    # Future migrations go here: `if version < 13: ...`
 
     return data
 
@@ -805,6 +822,21 @@ class PageResult:
     processing_time_sec: float = 0.0
     error: str | None = None
     skew_angle: float = 0.0
+    #: Raw ``pytesseract.image_to_data(output_type=DICT)`` на preprocessed
+    #: PNG. Используется парсером для layout-aware section detection
+    #: (src.tn_parser.layout_anchor) и token-level confidence propagation
+    #: (src.tn_parser.token_confidence). Опциональное поле — только если
+    #: pipeline.compute_confidence=True. None не означает «OCR failed»,
+    #: просто means «TSV не был вычислен» (например cache-hit).
+    tsv_data: dict | None = None
+    #: Ширина preprocessed страницы в px (того же raster'а что tsv_data).
+    #: Нужна для layout_anchor.find_tokens_by_column. 0 = unknown.
+    page_width_px: int = 0
+    #: Абсолютный путь к preprocessed PNG этой страницы. Pipeline
+    #: сохраняет если ``preserve_page_rasters=True`` в профиле (off by
+    #: default — большие PNG'и). Используется field_rescue для
+    #: targeted re-OCR конкретных bbox'ов. None если raster уже удалён.
+    raster_path: str | None = None
 
 
 @dataclass

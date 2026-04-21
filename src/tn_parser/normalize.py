@@ -87,7 +87,24 @@ def _fix_confusables(text: str) -> str:
 
 
 def normalize_for_sections(text: str) -> str:
-    """Мягкая нормализация с сохранением переводов строк."""
+    """Мягкая нормализация с сохранением переводов строк.
+
+    Шаги:
+        1. Strip невидимых символов (soft hyphen, zero-width, BOM).
+        2. CRLF/CR → LF.
+        3. Склеить переносы «сло-\\nво» → «слово».
+        4. Схлопнуть подряд идущие горизонтальные пробелы.
+        5. 2+ \\n → один \\n.
+        6. Confusables: латинские двойники → кириллица в кириллических
+           словах.
+        7. Lexicon correction (декабрь 2026): замена OCR-mangled
+           вариантов критичных ТН/УПД терминов на canonical-формы
+           («Грузаатправитель» → «Грузоотправитель», etc.). Это
+           даёт парсеру canonical-headers по которым matchятся
+           section-регексы; без lex-коррекции section detection
+           работал бы только через form-comment anchors (более
+           хрупкие).
+    """
     if not text:
         return ""
     text = _strip_invisible(text)
@@ -96,6 +113,28 @@ def normalize_for_sections(text: str) -> str:
     text = _HORIZ_WS.sub(" ", text)
     text = _MULTI_NL.sub("\n", text)
     text = _fix_confusables(text)
+    # Lex-коррекция — импортируем лениво, чтобы src.tn_parser остался
+    # независимым от src.core при отсутствии последнего (минимальные
+    # инсталляции парсерного CLI без OCR-стека). Точечный словарь
+    # (122 exact variants) — low-risk и on-by-default.
+    try:
+        from src.core.lexicon_corrector import correct as _lex_correct
+        text = _lex_correct(text)
+    except ImportError:  # pragma: no cover — src.core отсутствует в parser-only билдах
+        pass
+    # Fuzzy-корректор применяется parser-side ВСЕГДА, потому что
+    # парсер без него теряет 10 п.п. accuracy на real-OCR выходах
+    # (section-detection regex'ы не ловят mangled заголовки типа
+    # «Грузоотпрапителъ»). На sidecar-входах (чистый текст) он
+    # идемпотентен — слова уже в словаре. Отличие от finalized
+    # text layer (который отдаётся в Excel/TXT export): там fuzzy
+    # за opt-in флагом ``postprocess.fuzzy_correction_ru``, чтобы
+    # не менять legitimate word-forms в CER/WER benchmark'ах.
+    try:
+        from src.core.fuzzy_corrector import correct as _fuzzy_correct
+        text = _fuzzy_correct(text)
+    except ImportError:  # pragma: no cover
+        pass
     return text.strip()
 
 
@@ -136,6 +175,12 @@ _TRAILING_QUOTE = re.compile(
     r"[\"'`\u2018\u2019\u201A\u201B\u201C\u201D]+$"
 )
 
+# Открывающие/закрывающие кавычки — для исключения парно-окружённых
+# токенов (« "Моспроект-3" ») из правила «цифра + хвостовая кавычка».
+# Без этого легитимные имена в двойных кавычках считаются мусорными.
+_OPEN_QUOTES = "\"'`\u2018\u201A\u201B\u201C\u201E\u201F«„"
+_CLOSE_QUOTES = "\"'`\u2019\u201D«»"
+
 
 def _script_of(ch: str) -> str:
     """'c' — кириллица (включая ё), 'l' — латиница, '' — другое."""
@@ -172,7 +217,13 @@ def is_ocr_garbage_token(token: str) -> bool:
     # в конце. Стрипать нельзя, иначе потеряем сигнал.
     if _EMBEDDED_QUOTE.search(token):
         return True
-    if re.search(r"[0-9][\"'`\u2018\u2019]+$", token):
+    # «цифра + кавычка в конце» — артефакт вида «ав4'», «помощ'». Но
+    # если токен ОКРУЖЁН парными кавычками (« "Моспроект-3" » —
+    # легитимное имя в кавычках), пропускаем — это не OCR-мусор.
+    if (
+        re.search(r"[0-9][\"'`\u2018\u2019]+$", token)
+        and not (token[:1] in _OPEN_QUOTES and token[-1:] in _CLOSE_QUOTES)
+    ):
         return True
     # Стрипаем обрамление.
     core = token.strip(

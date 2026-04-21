@@ -90,10 +90,15 @@ ignore_missing_imports = true
 # to be invoked explicitly with `pytest tests/benchmarks --benchmark-only`.
 testpaths = ["tests/unit", "tests/integration", "tests/parsers"]
 python_files = "test_*.py"
-addopts = "-v --tb=short"
+# ``-m "not parser_golden"`` — golden-suite гоняется 15-30 мин на 5
+# real PDF через Tesseract и не подходит для каждого PR-run'а;
+# запускается отдельно в nightly (workflow ``parser-golden.yml``) либо
+# руками: ``pytest -m parser_golden``. См. test_parser_golden_real_pdf.
+addopts = '-v --tb=short -m "not parser_golden"'
 markers = [
     "benchmark: explicit performance benchmark (run via tests/benchmarks)",
     "exercise_preflight: test wants real external-tools check, not the autouse mock",
+    "parser_golden: real-PDF golden regression suite (slow, nightly-only)",
 ]
 filterwarnings = [
     # Python 3.12+ warns about fork() in multithreaded processes.

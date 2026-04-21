@@ -1,0 +1,59 @@
+{
+  "_source_pdf": "inputs/TN_k_UPD_41_ot_06.09.2022.pdf",
+  "_ground_truth": "inputs/TN_k_UPD_41_ot_06.09.2022.txt",
+  "_notes": [
+    "12 страниц = 6 ТН × 2 стр. Все от ООО 'Беком' → АО 'Моспроект-3'.",
+    "Груз одинаков: блок облицовочный Tensar. Assert на первую ТН.",
+    "Номер первой ТН: № 9508/Б от 01.09.2022."
+  ],
+  "expected_row": {
+    "date": {
+      "value": "01.09.2022",
+      "tolerance": "exact"
+    },
+    "number": {
+      "value": "9508",
+      "tolerance": "contains"
+    },
+    "shipper": {
+      "value": "Беком",
+      "tolerance": "contains"
+    },
+    "shipper_inn": {
+      "value": "7743553262",
+      "tolerance": "exact"
+    },
+    "shipper_kpp": {
+      "value": "504445001",
+      "tolerance": "exact"
+    },
+    "consignee": {
+      "value": "Моспроект",
+      "tolerance": "contains"
+    },
+    "consignee_inn": {
+      "value": "7707820890",
+      "tolerance": "exact"
+    },
+    "consignee_kpp": {
+      "value": "770701001",
+      "tolerance": "exact"
+    },
+    "cargo": {
+      "value": "Tensar",
+      "tolerance": "contains"
+    },
+    "volume": {
+      "value": "?",
+      "tolerance": "optional"
+    },
+    "driver": {
+      "value": "?",
+      "tolerance": "optional"
+    },
+    "vehicle": {
+      "value": "?",
+      "tolerance": "optional"
+    }
+  }
+}

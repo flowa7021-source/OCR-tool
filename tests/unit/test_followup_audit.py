@@ -166,7 +166,12 @@ class TestCorruptProfileJson:
     def test_profile_manager_get_current_falls_back_on_missing(
         self, tmp_path: Path
     ) -> None:
-        """If the saved ``current`` profile disappeared, get_current() returns default."""
+        """If the saved ``current`` profile disappeared, get_current()
+        returns the single builtin.
+
+        Декабрь 2026: fallback profile name сменился с «default» на
+        «universal_accurate» (см. profile_manager консолидацию 7→1).
+        """
         from src.application.profile_manager import ProfileManager
         from src.infrastructure.config_storage import ProfileStorage
 
@@ -175,9 +180,9 @@ class TestCorruptProfileJson:
         manager.initialize_builtins()
         manager._current_name = "ghost"  # type: ignore[attr-defined]
         profile = manager.get_current()
-        # The fallback rebinds to 'default' and returns it.
-        assert profile.name == "default"
-        assert manager._current_name == "default"  # type: ignore[attr-defined]
+        # Fallback rebinds to 'universal_accurate' (the only builtin).
+        assert profile.name == "universal_accurate"
+        assert manager._current_name == "universal_accurate"  # type: ignore[attr-defined]
 
 
 # --------------------------------------------------------------------------

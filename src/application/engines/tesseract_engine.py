@@ -198,6 +198,94 @@ def _page_pdf_has_text(pdf_path: Path) -> bool:
     return False
 
 
+# Threshold: страница с долей тёмных пикселей < 1.5 % И стандартным
+# отклонением < 20 — почти гарантированно blank (служебная пустая
+# обратная сторона документа). Такие пытаться OCR'ить retry-tier'ом
+# с 900s timeout — burning CPU впустую: Tesseract корректно вернул
+# пусто потому что на странице ничего нет, а retry tier ничего не
+# извлечёт даже с агрессивным препроцессингом. Декабрь 2026: эта
+# проверка сэкономила 6+ минут на UPD_36.pdf p4 (mean=254, std=11,
+# dark=0.3% — типичная пустая обратная сторона доверенности).
+_BLANK_PAGE_DARK_PCT_THRESHOLD = 0.015      # < 1.5 % тёмных пикселей
+_BLANK_PAGE_STDDEV_THRESHOLD = 20.0          # std < 20 = почти uniform
+# Минимум area страницы в растеризованных пикселях. Реальный A4
+# при 150 DPI = 1240 × 1754 ≈ 2.17 M px. Тестовые PDF-фикстуры часто
+# 200 × 200 pt = 417 × 417 px ≈ 170 k px. Не классифицируем blank
+# для маленьких страниц — они почти всегда unit-тесты или postcard-
+# размера документы, где даже тонкий текст занимает большую долю,
+# а blank-эвристика по процентам становится ненадёжной.
+_BLANK_PAGE_MIN_AREA_PX = 500_000
+
+
+def _page_is_blank(page_pdf: Path, dpi: int = 150) -> bool:
+    """Эвристика «страница пустая, нечего OCR'ить».
+
+    Растеризуем страницу в grayscale на низком DPI (150 — быстро),
+    меряем долю тёмных пикселей и стандартное отклонение интенсивности.
+    Страница считается blank если ВСЕ три условия:
+      1. area ≥ 500 k px (≈ A5 при 150 DPI — реальный документ, не
+         test-fixture);
+      2. dark_pct < 1.5 % (почти нет тёмных пикселей);
+      3. std < 20 (почти uniform grey/white).
+
+    Условие (1) защищает от ложных срабатываний на unit-тестовых
+    фикстурах: 200×200 pt PDF с текстом «page 2» даёт dark_pct 0.3 %
+    и std 11 — формально passes (2) и (3), но это не blank-страница,
+    это просто маленькая фикстура. Реальные документы (ТН/УПД
+    сканированные на A4) всегда ≥ 1.5 M px при 150 DPI.
+
+    На UPD_36 p4 (служебная обратная сторона) экономит 6 минут
+    aggressive-retry с 900s timeout per page.
+    """
+    try:
+        import fitz
+        import numpy as np
+
+        with fitz.open(str(page_pdf)) as doc:
+            if not doc:
+                return False
+            page = doc[0]
+            pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+            arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                pix.height, pix.width
+            )
+            area = pix.width * pix.height
+            dark_pct = float((arr < 128).mean())
+            stddev = float(arr.std())
+    except Exception as exc:  # noqa: BLE001
+        # Если не смогли растеризовать — не считаем blank, пускаем
+        # обычный pipeline, пусть его retry-tier разбираются.
+        logger.debug("_page_is_blank: failed to probe %s: %s", page_pdf, exc)
+        return False
+
+    is_blank = (
+        area >= _BLANK_PAGE_MIN_AREA_PX
+        and dark_pct < _BLANK_PAGE_DARK_PCT_THRESHOLD
+        and stddev < _BLANK_PAGE_STDDEV_THRESHOLD
+    )
+    if is_blank:
+        logger.debug(
+            "_page_is_blank: %s — area=%d dark_pct=%.3f stddev=%.1f → BLANK",
+            page_pdf.name, area, dark_pct, stddev,
+        )
+    return is_blank
+
+
+def _make_empty_page_output(page_pdf: Path, work_dir: Path,
+                            page_index: int) -> Path:
+    """Скопировать blank-страницу в output без попытки OCR.
+
+    Tesseract retry tier на blank-странице — burning CPU; вместо
+    этого копируем оригинальный raster в page_NNNN_ocr.pdf со
+    статусом «blank» (без text layer). Pipeline дальше склеит
+    multi-page PDF, blank-страницы окажутся раз/два пустыми
+    листами без selectable text — это правильное поведение.
+    """
+    page_out = work_dir / f"page_{page_index:04d}_ocr.pdf"
+    shutil.copy2(page_pdf, page_out)
+    return page_out
+
+
 class TesseractEngine(OCREngine):
     """Tesseract 5 via OCRmyPDF — page-by-page processing with per-page retry.
 
@@ -420,8 +508,8 @@ class TesseractEngine(OCREngine):
                     f"Ни одна из {page_count} страниц не была распознана "
                     "даже после автоматического повтора с упрощёнными "
                     "настройками. Tesseract не смог обработать этот "
-                    "документ на любом уровне настроек. Попробуйте другой "
-                    "профиль (quick_reliable) или уменьшите DPI в настройках."
+                    "документ. Создайте копию профиля universal_accurate "
+                    "и уменьшите DPI или увеличьте tesseract_timeout."
                 )
 
             if ok_count < page_count:
@@ -554,6 +642,25 @@ class TesseractEngine(OCREngine):
                 "Page %d/%d OCR'd successfully", page_index, page_count
             )
             return page_out, "primary"
+
+        # Blank-page short-circuit. До декабря 2026 любая страница с
+        # пустым text layer уходила в 3 retry tier'a (включая
+        # 900-секундный last-resort), и для blank-страниц это значило
+        # 5-10 минут CPU впустую. Теперь сначала проверяем — может,
+        # страница объективно пустая (служебная обратная сторона
+        # доверенности и т.п.), и тогда retry не имеет смысла.
+        # Конкретный кейс: UPD_36 p4 (mean 254, std 11, dark 0.3 %) —
+        # был main причиной зависания pipeline на 6+ минут per
+        # документ.
+        if _page_is_blank(page_pdf):
+            logger.info(
+                "Page %d/%d пустая (нет содержимого для OCR); "
+                "пропускаем retry tier и возвращаем raster-копию.",
+                page_index, page_count,
+            )
+            return _make_empty_page_output(
+                page_pdf, work_dir, page_index,
+            ), "blank"
 
         logger.warning(
             "Page %d/%d primary OCR FAILED (%s); "

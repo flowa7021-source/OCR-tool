@@ -6,6 +6,29 @@ from dataclasses import asdict, dataclass, field
 
 MISSING = "отсутствует"
 GARBAGE = "неразборчиво"
+# Канонический маркер «это поле было рукописным». Вставляется OCR-
+# постпроцессором (``src.core.confidence_filter.HANDWRITTEN_MARKER``)
+# на блоки, где Tesseract вернул critically-low confidence ≥ threshold.
+# Парсер видит маркер в тексте и если поле целиком пустое кроме него —
+# в Excel попадает человекочитаемое «Рукописный текст» (а не
+# unicode-псевдографика, которая ломается в некоторых Excel-reader'ах).
+HANDWRITTEN_MARKER: str = "⟨рукописный текст⟩"
+HANDWRITTEN_LABEL: str = "Рукописный текст"
+
+
+def normalise_handwritten(value: str) -> str:
+    """Если значение — только маркер(ы) рукописного текста (возможно
+    с пробелами/запятыми), вернуть человекочитаемую метку.
+
+    Иначе — пройти через функцию без изменений. Смешанное значение
+    (часть печатная + часть рукописная — например
+    «ООО "ГЕКСАФОРМ СПБ", ⟨рукописный текст⟩») сохраняется как есть:
+    печатная часть ценна и не должна замещаться.
+    """
+    if not value:
+        return value
+    stripped = value.replace(HANDWRITTEN_MARKER, "").strip(" ,;\t\n")
+    return HANDWRITTEN_LABEL if stripped == "" else value
 
 
 @dataclass
@@ -22,7 +45,13 @@ class FieldConfidence:
     date: float = 0.0
     number: float = 0.0
     shipper: float = 0.0
+    shipper_inn: float = 0.0
+    shipper_kpp: float = 0.0
+    shipper_ogrn: float = 0.0
     consignee: float = 0.0
+    consignee_inn: float = 0.0
+    consignee_kpp: float = 0.0
+    consignee_ogrn: float = 0.0
     cargo: float = 0.0
     volume: float = 0.0
     driver: float = 0.0
@@ -30,6 +59,11 @@ class FieldConfidence:
     reception: float = 0.0
 
     def overall(self) -> float:
+        # ИНН/КПП/ОГРН — derived поля, их пустота для ТН без указанных
+        # реквизитов грузополучателя/отправителя — норма, а не сигнал
+        # низкого качества OCR. Усредняем только "основные" 9 полей,
+        # чтобы overall-conf не валилась для legitimate-документов
+        # где ИНН/КПП не указаны.
         values = [
             self.date, self.number, self.shipper, self.consignee, self.cargo,
             self.volume, self.driver, self.vehicle, self.reception,
@@ -46,7 +80,13 @@ class ParsedRow:
     date: str = ""
     number: str = ""
     shipper: str = ""
+    shipper_inn: str = ""
+    shipper_kpp: str = ""
+    shipper_ogrn: str = ""
     consignee: str = ""
+    consignee_inn: str = ""
+    consignee_kpp: str = ""
+    consignee_ogrn: str = ""
     cargo: str = ""
     volume: str = ""
     driver: str = ""
@@ -62,7 +102,13 @@ class ParsedRow:
             self.date,
             self.number,
             self.shipper,
+            self.shipper_inn,
+            self.shipper_kpp,
+            self.shipper_ogrn,
             self.consignee,
+            self.consignee_inn,
+            self.consignee_kpp,
+            self.consignee_ogrn,
             self.cargo,
             self.volume,
             self.driver,
@@ -79,7 +125,13 @@ class ParsedRow:
             date=MISSING,
             number=MISSING,
             shipper=MISSING,
+            shipper_inn="",
+            shipper_kpp="",
+            shipper_ogrn="",
             consignee=MISSING,
+            consignee_inn="",
+            consignee_kpp="",
+            consignee_ogrn="",
             cargo=MISSING,
             volume=MISSING,
             driver=MISSING,

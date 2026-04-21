@@ -70,8 +70,26 @@ _NUMBER_LAX = re.compile(
     re.IGNORECASE,
 )
 
+# Шаблон высокой точности: «№ <значение> от YYYY-MM-DD» или
+# «№ <значение> от DD.MM.YYYY». Встречается в пост-OCR формате
+# (inputs/TN_k_UPD_*.txt) сразу под заголовком ТН. Срабатывает раньше
+# остальных (_NUMBER_STICKY и Co.), потому что структура «№ … от <дата>»
+# однозначно идентифицирует пару (номер ТН, дата ТН) — в отличие от
+# одиночных «№ N» внутри прозы или в «ДОКУМЕНТ №1».
+_NUMBER_WITH_DATE = re.compile(
+    r"(?:№|\bNo\.?)\s*"
+    r"([A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9\-_/.]{1,48})"
+    r"\s+от\s+(\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4})",
+    re.IGNORECASE,
+)
+
+# Якорь для поиска номера и даты ТН — «Транспортная накладная» в
+# именительном падеже. Косвенные падежи («транспортной накладной»,
+# «транспортную накладную») типичны для резюмирующей прозы
+# («Скан содержит один экземпляр транспортной накладной …») и
+# для ссылок на форму; в них номер ТН не следует.
 _WAYBILL_HEADER = re.compile(
-    r"транспортн(?:ая|ой)\s+накладн(?:ая|ой)", re.IGNORECASE
+    r"транспортная\s+накладная", re.IGNORECASE
 )
 
 # Строки-служебки, которые надо пропустить в начале раздела контрагента.
@@ -172,7 +190,7 @@ _ORG_PREFIX_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
-_INN_INCLUSIVE_RE = re.compile(r"\bИНН\s*\d{10,12}", re.IGNORECASE)
+_INN_INCLUSIVE_RE = re.compile(r"\bИНН[:\s]*\d{10,12}", re.IGNORECASE)
 _FINANCIAL_MARKER_RE = re.compile(
     r"\b(?:ИНН|КПП|ОГРН|ОКПО|ОКВЭД|БИК)\b", re.IGNORECASE
 )
@@ -183,12 +201,63 @@ _FIO_RE = re.compile(
     # OCR иногда даёт один инициал: «Кузибеков И.», «Кулоков Ш.»
     r"|\b[А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ]\.(?!\s?[А-ЯЁ])"
 )
-# Полное ФИО — Фамилия Имя Отчество (без инициалов). Первое слово
-# допускает OCR-искажение (кириллица/латиница вперемешку: «Fentes
-# Александр Николаснич»), остальные два строго кириллицей.
+# Полное ФИО — Фамилия Имя Отчество (без инициалов). Все три слова
+# ОБЯЗАНЫ начинаться с заглавной буквы (русской или латинской —
+# первое слово может быть mixed-script после OCR'а: «Fentes
+# Александр Николаснич»). Без требования заглавной первой буквы
+# регекс ловит мусор: «pea Иохтановления Правитеглатва» в OCR'е
+# UPD_36 — лидером там фрагмент «ред pea …», и «pea» — не фамилия.
 _FIO_FULL_RE = re.compile(
-    r"\b[A-Za-zА-ЯЁа-яё]{3,14}[ \t]+[А-ЯЁ][а-яё]{2,14}[ \t]+[А-ЯЁ][а-яё]{2,14}\b"
+    r"\b[A-ZА-ЯЁ][A-Za-zА-ЯЁа-яё]{2,13}[ \t]+"
+    r"[А-ЯЁ][а-яё]{2,14}[ \t]+"
+    r"[А-ЯЁ][а-яё]{2,14}\b"
 )
+
+# Слот-2/слот-3 blacklist (substring-match — OCR может мангнуть
+# любую часть слова). Если 2-й или 3-й токен содержит ВНУТРИ
+# себя один из этих stem'ов — это типовая government / legal
+# формулировка («Постановления Правительства», «Министерство
+# Финансов», «Российской Федерации»), не имя.
+#
+# OCR-tolerant: используем стрипинг гласных и подобных, чтобы
+# одинаково ловить «Постановления» / «Иохтановления» (П→И, о→ох…).
+# Конкретно «тановлен» / «новлени» — стабильные хвосты слова
+# «постановления», переживают любой OCR-шум на префиксе.
+_FAKE_FIO_SUBSTRINGS = (
+    "тановлен", "новлени", "становле",     # постановление
+    "вительств", "ительств", "теглатв",    # правительство
+    "инистер", "инстер",                    # министерство
+    "едераци", "ёдераци",                   # федерация
+    "оссийск", "оссийс", "оссийс",          # российск
+    "оложени", "ложени",                    # положение
+    "риложени", "ложени",                   # приложение
+    "ерзавозк", "перевозк",                 # перевозки
+    "транспорт",
+    "общество",
+    "компани",
+    "предприяти",
+    "налоговой", "налоговая",
+)
+
+
+def _looks_like_real_fio(matched: str) -> bool:
+    """Защита от ложных _FIO_FULL_RE matches на gov/legal-формулировках.
+
+    OCR на bold-шапках бланка часто выдаёт три Capital-Cased
+    токена, не относящиеся к ФИО («Постановления Правительства
+    Российской», «Министерство Финансов России», «ред Постановления
+    Правительства» — последнее в UPD_36 OCR). Защищаемся substring-
+    match'ем по стабильным хвостам слов: даже если OCR мангнул
+    «Постановления» → «Иохтановления», stem «тановлен» сохраняется.
+
+    Возвращает False если match похож на gov/legal-формулировку
+    (т.е. НЕ имя водителя).
+    """
+    parts = matched.split()
+    if len(parts) < 3:
+        return True
+    low = matched.lower()
+    return all(stem not in low for stem in _FAKE_FIO_SUBSTRINGS)
 # OCR регулярно искажает «шт»: «нтт», «штт», «шт.». Допускаем
 # 2–3 буквы, последняя — обязательно «т». НЕ включаем «ит» (слишком
 # часто ловит «Итого», «5 из 10» и подобные артефакты).
@@ -205,11 +274,39 @@ _QTY_SHT_INLINE_RE = re.compile(
 _NETTO_BRUTTO_RE = re.compile(
     r"нетто[^\n]*брутто[^\n]*(?:объ[её]м|м[³3])[^\n]*", re.IGNORECASE
 )
+
+# Компоненты тройки (мест, нетто, объём), встречающиеся в пост-OCR
+# структурированном формате отдельными строками:
+#   Количество мест: 129
+#   Масса нетто: 7.3095 т
+#   Объем: 57.948 м³
+# Допускаем «Кол-во мест», «Количество мест», «Мест:», OCR-варианты
+# единиц («т.», «Т», «тонн», «м3», «м³», «куб»), десятичный
+# разделитель — запятая или точка.
+_PLACES_LINE_RE = re.compile(
+    r"(?im)^\s*(?:кол[-\s]?во|количество)?\s*мест(?:а)?\s*[:\-–—]\s*(\d+)\b"
+)
+_NETTO_LINE_RE = re.compile(
+    r"(?im)(?:масса\s+)?нетто\s*[:\-–—]\s*(\d+(?:[,.]\d+)?)\s*(?:т|тн|тонн)\b"
+)
+_VOLUME_LINE_RE = re.compile(
+    r"(?im)об[ъь][её]м\s*[:\-–—]\s*(\d+(?:[,.]\d+)?)\s*(?:м[³3]|куб)"
+)
+# Split-точка для cargo — слова-label'ы соседних колонок формы ТН
+# («класс опасности», «упаковка», «способ погрузки», «маркировка»,
+# «бирка», «ярлык», «паспорт», «штрих-код», «сертификат»). OCR
+# склеивает соседние ячейки таблицы в одну строку, и без этого
+# регекса cargo превращается в «ACTUAL_NAME, бирка, ярлык; способ».
+# Паттерн консервативный — требует начало слова (\b) и legitimate
+# русский корень, иначе поймаем false-positive'ы вроде «бирки»
+# внутри наименования упаковки.
 _CARGO_ATTR_SPLIT_RE = re.compile(
     r"(?i)\b(?:класс\s+опасност|упаковк|тара\b"
-    r"|способ\s+(?:погрузк|упаковк)"
+    r"|способ\s+(?:погрузк|упаковк|перевозк)"
     r"|условия\s+(?:хранен|перевозк)"
-    r"|маркировк|номер\s+контейнер)"
+    r"|маркировк|номер\s+контейнер"
+    r"|бирк[аи]|ярлык\w*|паспорт\w*|сертификат\w*"
+    r"|штрих[-\s]?код\w*|штриховой\s+код)"
 )
 
 
@@ -389,10 +486,14 @@ def extract_number_and_date(
                     continue
                 # Полное начало строки — для длинных заголовков
                 # («Приложение No 4», «Постановление Правительства», «Договор No …»).
+                # «ДОКУМЕНТ №N — …» — нумерация документа внутри пост-OCR
+                # пакета (inputs/UPD_* / TN_k_UPD_*). N — это порядковый
+                # индекс, а не номер ТН.
                 line_ctx = region[line_start: m.start()].lower()
                 if ("приложение" in line_ctx or "прил." in line_ctx
                         or "постановлен" in line_ctx or "договор" in line_ctx
-                        or "к правилам" in line_ctx):
+                        or "к правилам" in line_ctx
+                        or "документ" in line_ctx):
                     continue
                 # Широкое окно (300 симв. включая предыдущие строки) —
                 # OCR часто переносит «(в ред. Постановления … № 2116)»
@@ -435,7 +536,31 @@ def extract_number_and_date(
         anchor = _WAYBILL_HEADER.search(source)
         if anchor:
             tail = source[anchor.end(): anchor.end() + 500]
-            number, conf_num = _pick_number(tail, 0.9 if head else 0.6)
+            # Высокоприоритетный паттерн «№ X от YYYY-MM-DD» — если
+            # сработал, даёт сразу и номер, и дату ТН. Это устойчивее
+            # к ложным «№» в шапке («ДОКУМЕНТ №1», «Приложение № 4»)
+            # и в самой строке «(в ред. … № 2116)».
+            m_nd = _NUMBER_WITH_DATE.search(tail)
+            if m_nd:
+                cand = m_nd.group(1).strip(" .,:;")
+                if cand and re.search(r"\d", cand) and cand not in (
+                    "1137", "2116", "2200", "2311", "272", "534", "1117",
+                ) and not is_garbage(cand):
+                    number = cand
+                    # 1.0: номер ТН + дата ТН на одной строке — двойной
+                    # сигнал, парсер уверен. 0.7: только из head.
+                    conf_num = 1.0 if head else 0.7
+                    date_raw = m_nd.group(2)
+                    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_raw):
+                        y, mo, d = date_raw.split("-")
+                        cand_date = f"{d}.{mo}.{y}"
+                    else:
+                        cand_date = date_raw
+                    if is_valid_date(cand_date) and cand_date not in _FORM_METADATA_DATES:
+                        date = cand_date
+                        conf_date = 1.0 if head else 0.7
+            if number == MISSING:
+                number, conf_num = _pick_number(tail, 0.9 if head else 0.6)
             for date_m in _DATE_ANY.finditer(tail):
                 cand = date_m.group(1)
                 if not is_valid_date(cand):
@@ -529,11 +654,24 @@ def _fallback_org_line(full_text: str, fallback_kw: str) -> str | None:
     return candidate
 
 
+def _has_validated_inn(text: str) -> bool:
+    """True если в строке есть ИНН-кандидат (10/12 цифр), прошедший
+    контрольную сумму ФНС. Сигнал «поле прошло валидацию» → conf 1.0."""
+    return _find_valid_inn_match(text) is not None
+
+
 def extract_shipper(section_body: str, full_text: str) -> tuple[str, float]:
     """Грузоотправитель: от ORG-префикса до «ИНН \\d+» включительно.
 
     КПП/ОГРН/ОКПО всегда обрезаем. Если ИНН отсутствует — обрезать
     перед первым финансовым маркером.
+
+    Confidence:
+        1.0 — секция найдена + извлечённая строка содержит валидный ИНН
+              (контрольная сумма ФНС прошла).
+        0.9 — секция найдена, ИНН не валидируем (отсутствует или
+              OCR-искажение цифр).
+        0.5 — fallback по «грузоотправитель» в полном тексте.
     """
     if section_body:
         joined = _collect_org_lines(section_body, max_lines=4)
@@ -543,7 +681,7 @@ def extract_shipper(section_body: str, full_text: str) -> tuple[str, float]:
             joined = cut_inn if cut_inn else _cut_before_financial(joined)
             joined = joined[:500].strip(" ,;")
             if joined and not is_garbage(joined):
-                return joined, 0.9
+                return joined, (1.0 if _has_validated_inn(joined) else 0.9)
 
     if full_text:
         candidate = _fallback_org_line(full_text, "грузоотправитель")
@@ -558,10 +696,27 @@ def extract_shipper(section_body: str, full_text: str) -> tuple[str, float]:
     return MISSING, 0.0
 
 
+def _starts_with_org_prefix(text: str) -> bool:
+    """True если строка начинается с одного из ORG-маркеров
+    (ООО / АО / ИП / ...). Используется как «структурная валидация»
+    consignee/cargo, где ИНН по design не включён в поле, но сама
+    форма «ORG имя» — сильный сигнал, что извлечение состоялось."""
+    return bool(_ORG_PREFIX_RE.match(text.strip()))
+
+
 def extract_consignee(section_body: str, full_text: str) -> tuple[str, float]:
     """Грузополучатель: ORG-префикс → перед первым ИНН/КПП/ОГРН/ОКПО.
 
-    Получатель всегда без ИНН и КПП.
+    Получатель всегда без ИНН и КПП (тот, кто принимает груз, не
+    обязан раскрывать налоговые реквизиты в теле поля).
+
+    Confidence:
+        1.0 — секция найдена + результат начинается с ORG-маркера
+              (структурная валидация: «АО Х», «ООО Y» — настоящее
+              имя организации).
+        0.9 — секция найдена, ORG-маркер не на старте (OCR-искажение
+              префикса).
+        0.5 — fallback по «грузополучатель» в полном тексте.
     """
     if section_body:
         joined = _collect_org_lines(section_body, max_lines=4)
@@ -570,7 +725,7 @@ def extract_consignee(section_body: str, full_text: str) -> tuple[str, float]:
             joined = _cut_before_financial(joined)
             joined = joined[:500].strip(" ,;")
             if joined and not is_garbage(joined):
-                return joined, 0.9
+                return joined, (1.0 if _starts_with_org_prefix(joined) else 0.9)
 
     if full_text:
         candidate = _fallback_org_line(full_text, "грузополучатель")
@@ -601,9 +756,31 @@ _CARGO_MEASURE_LINE_RE = re.compile(
 )
 
 
+_CARGO_LEADING_JUNK_RE = re.compile(
+    # OCR-артефакты в начале cargo-строки от соседних колонок формы:
+    # ``]29 мест. тм. TENSAR…`` — цифры + единицы измерения + шум до
+    # реального имени груза. Удаляем ведущую последовательность из
+    # брекета/тире/цифр/единиц + пунктуации, если дальше идёт
+    # легитимное содержательное слово.
+    r"^[\]\[\)\(\-–—\s\d.,;:/]+(?:мест|шт|кг|т|тн|тонн|м[³3])\.?[\s,;.:]*",
+    re.IGNORECASE,
+)
+
+
 def _clean_cargo_name(name: str) -> str:
-    """Очистить наименование груза: без 'кол-во мест', без хвоста 'N шт',
-    без класса опасности / упаковки / тары."""
+    """Очистить наименование груза.
+
+    Удаляются:
+      * leading-артефакты от соседних колонок (``]29 мест. тм.``);
+      * хвост ``«кол-во мест»`` и всё после него;
+      * хвост ``«N шт»``;
+      * label'ы атрибутов упаковки/маркировки/класса опасности
+        (``бирка``, ``ярлык``, ``способ погрузки`` и т.п.) и всё
+        после них.
+    """
+    # Leading-мусор: срезаем даже если дальше пусто (лучше пустая
+    # строка чем фальшивые данные).
+    name = _CARGO_LEADING_JUNK_RE.sub("", name).strip()
     m_kvm = _CARGO_KOL_VO_MEST_RE.search(name)
     if m_kvm:
         name = name[: m_kvm.start()].strip(" ,;-–—")
@@ -672,16 +849,93 @@ def _first_cargo_name_from_lines(lines: list[str]) -> str | None:
     return None
 
 
+_CARGO_VALIDATION_RE = re.compile(
+    r"\b(шт|штт|нтт|кг|т|тонн|м3|м³|куб|"
+    r"рул|рулон|мешк|пач|короб|паллет|поддон|места?"
+    r"|блок|плит[аы]|труб[аы]|кабел|сырь|материал|товар"
+    r"|изделие|оборудовани|георешетк|георешётк|конструкци)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_validated_cargo(name: str) -> bool:
+    """True если в наименовании груза есть structural-сигнал —
+    единица измерения / упаковочный термин / типовой грузовой
+    предмет. Защищает 1.0-conf от ложных срабатываний."""
+    return bool(_CARGO_VALIDATION_RE.search(name))
+
+
+def _is_regex_cargo_contaminated(name: str) -> bool:
+    """True если regex-извлечённое имя содержит явные label-слова
+    соседних колонок формы («класс опасности», «упаковка», «бирка»
+    и т.п.) — значит split недочистил, и table-parser даст лучший
+    результат."""
+    if not name:
+        return False
+    low = name.lower()
+    markers = (
+        "класс опасн", "упаковк", "тара", "бирк", "ярлык",
+        "способ погруз", "способ упаков", "штрих",
+    )
+    return any(m in low for m in markers)
+
+
 def extract_cargo(section_body: str, full_text: str) -> tuple[str, float]:
     """Наименование груза. Без 'Кол-во мест', без хвоста 'N шт',
-    без 'Класс опасности' / 'Упаковка' / 'Тара'."""
+    без 'Класс опасности' / 'Упаковка' / 'Тара'.
+
+    Confidence:
+        1.0 — секция найдена + structural сигнал (ед. измерения /
+              упаковка / типовой грузовой термин).
+        0.9 — секция найдена, без structural сигнала.
+        0.5 — fallback regex по «наименование груза».
+
+    Табличная extraction (idea #7 top-10): если section_body имеет
+    структуру таблицы (≥ 2 rows с consistent separator'ами),
+    пробуем :mod:`src.tn_parser.cargo_table` в параллель к regex.
+    Если regex-name загрязнён label'ами соседних колонок —
+    table-name побеждает.
+    """
+    # Попытка 1: regex-way из секции.
+    regex_name = ""
+    regex_conf = 0.0
     if section_body:
         lines = _meaningful_lines(section_body)
-        name = _first_cargo_name_from_lines(lines)
-        if name:
-            name = _clean_cargo_name(name)
-            if name and not is_garbage(name):
-                return name, 0.9
+        candidate = _first_cargo_name_from_lines(lines)
+        if candidate:
+            candidate = _clean_cargo_name(candidate)
+            if candidate and not is_garbage(candidate):
+                regex_name = candidate
+                regex_conf = 1.0 if _is_validated_cargo(candidate) else 0.9
+
+    # Попытка 2: table-way (form-aware, idea #7).
+    table_name = ""
+    if section_body:
+        try:
+            from .cargo_table import (
+                detect_table_structure,
+                extract_name_from_table,
+            )
+
+            if detect_table_structure(section_body):
+                raw_table = extract_name_from_table(section_body)
+                if raw_table:
+                    cleaned = _clean_cargo_name(raw_table)
+                    if cleaned and not is_garbage(cleaned):
+                        table_name = cleaned
+        except ImportError:
+            pass
+
+    # Table-way побеждает когда regex-name отсутствует или содержит
+    # label-контамину соседних колонок. Table-name идёт из bare
+    # «Наименование»-колонки и label'ами не грешит.
+    if table_name and (
+        not regex_name or _is_regex_cargo_contaminated(regex_name)
+    ):
+        return table_name, 1.0 if _is_validated_cargo(table_name) else 0.9
+
+    if regex_name:
+        return regex_name, regex_conf
 
     if full_text:
         for pat in (
@@ -703,30 +957,75 @@ _KOL_VO_MEST_VALUE_RE = re.compile(
 )
 
 
-def extract_volume(cargo_section: str, full_text: str) -> tuple[str, float]:
-    """Объём / количество мест.
+def _extract_triplet(source: str) -> list[str]:
+    """Извлекает тройку (мест, нетто, объём) из отдельных строк секции.
 
-    Формат вывода: склейка того, что нашлось, через «, »:
-        «N мест» (количество упаковочных мест),
-        «M шт» (штуки товара внутри наименования),
-        «Нетто — X т., Брутто — Y т., Объём — Z м³».
-    Если ничего — MISSING.
+    Порядок в выводе фиксированный: «N мест, X т, Y м³» — чтобы golden-
+    проверка умела вычленять отдельные числа. Если какой-то из
+    компонентов отсутствует — пропускаем его, не ставим плейсхолдер.
     """
-    for source, conf in ((cargo_section, 0.9), (full_text, 0.5)):
+    parts: list[str] = []
+    m = _PLACES_LINE_RE.search(source)
+    if m:
+        parts.append(f"{m.group(1)} мест")
+    m = _NETTO_LINE_RE.search(source)
+    if m:
+        parts.append(f"{m.group(1)} т")
+    m = _VOLUME_LINE_RE.search(source)
+    if m:
+        parts.append(f"{m.group(1)} м³")
+    return parts
+
+
+def extract_volume(cargo_section: str, full_text: str) -> tuple[str, float]:
+    """Объём / количество.
+
+    Правило (согласовано с пользователем):
+        1. Если наименование груза уже содержит «N шт» — это и есть
+           «должный вид» ответа. Выводим «N шт» без лишнего шума.
+        2. Иначе собираем тройку (мест, нетто, объём) из отдельных
+           строк секции «— ГРУЗ —» / кол-во-мест блока.
+        3. Если и тройка пуста, пробуем legacy-формы (однострочный
+           «Нетто … Брутто … Объём …», «Кол-во мест — N»).
+        4. Иначе MISSING.
+    """
+    for source, base_conf in ((cargo_section, 0.9), (full_text, 0.5)):
         if not source:
             continue
+
+        # (1) «N шт» внутри наименования груза — приоритетно, как
+        # просил пользователь. Матч ищем только в секции «Груз», чтобы
+        # не подцепить «384 шт» из верхней сводной прозы
+        # («комбинации из 8 мест / 384 шт / 15 мест / 720 шт»).
+        sht = _QTY_SHT_INLINE_RE.search(source)
+        if sht and source is cargo_section:
+            # 1.0: число + единица «шт» — структурно валидно, парсер
+            # уверен. Это не приближение «может быть штуки».
+            return sht.group(1).strip(), 1.0 if base_conf >= 0.9 else base_conf
+
+        # (2) Тройка по отдельным строкам — структурированный формат
+        # «Количество мест: 129\n Масса нетто: 7.3095 т\n Объем: 57.948 м³».
+        triplet = _extract_triplet(source)
+        if triplet:
+            # 1.0 если все 3 компонента + section-source: каждая строка
+            # дала свой regex-hit, валидация структуры пройдена.
+            full_triplet = (len(triplet) >= 3) and source is cargo_section
+            return ", ".join(triplet), (
+                1.0 if full_triplet else base_conf
+            )
+
+        # (3) Legacy: однострочный «Нетто … Брутто … Объём …».
         parts: list[str] = []
         m = _KOL_VO_MEST_VALUE_RE.search(source)
         if m:
             parts.append(f"{m.group(1)} мест")
-        m = _QTY_SHT_INLINE_RE.search(source)
-        if m:
-            parts.append(m.group(1).strip())
+        if sht:
+            parts.append(sht.group(1).strip())
         m = _NETTO_BRUTTO_RE.search(source)
         if m:
             parts.append(m.group(0).strip(" ,;"))
         if parts:
-            return ", ".join(parts), conf
+            return ", ".join(parts), base_conf
     return MISSING, 0.0
 
 
@@ -766,8 +1065,17 @@ def extract_driver(section_body: str, full_text: str) -> tuple[str, float]:
             if not m:
                 break
             pre = section_body[max(0, m.start() - 5): m.start()].lower()
-            if "ип " not in pre and "ип\n" not in pre:
-                return m.group(0).strip(), 0.9
+            if (
+                "ип " not in pre and "ип\n" not in pre
+                and _looks_like_real_fio(m.group(0))
+            ):
+                # 1.0: полное ФИО (Фамилия Имя Отчество, не «И.И.
+                # Иванов») в section_body — самая специфичная и
+                # однозначная форма; короткие initials — менее
+                # уникальны (могут совпасть с подписью представителя).
+                # _looks_like_real_fio защищает от government/legal
+                # формулировок («ред Постановления Правительства»).
+                return m.group(0).strip(), 1.0
             pos = m.end()
 
     if full_text:
@@ -790,7 +1098,10 @@ def extract_driver(section_body: str, full_text: str) -> tuple[str, float]:
                 if not m:
                     break
                 pre = window[max(0, m.start() - 5): m.start()].lower()
-                if "ип " not in pre and "ип\n" not in pre:
+                if (
+                    "ип " not in pre and "ип\n" not in pre
+                    and _looks_like_real_fio(m.group(0))
+                ):
                     return m.group(0).strip(), 0.4
                 pos = m.end()
 
@@ -967,6 +1278,13 @@ def extract_reception(section_body: str, full_text: str) -> tuple[str, float]:
 
     От ORG-префикса до «ИНН \\d+» включительно; КПП/ОГРН/ОКПО обрезаются.
     Если ни в одной строке нет ORG-префикса — берём первую как есть.
+
+    Confidence:
+        1.0 — секция найдена + результат содержит валидный ИНН
+              (контрольная сумма ФНС прошла) — структурно бесспорный
+              сигнал, что мы извлекли реальную организацию-приёмщика.
+        0.9 — секция найдена, ИНН не валидируется.
+        0.5 — fallback по «приём груза» в полном тексте.
     """
     if section_body:
         body = _RECEPTION_STOP.split(section_body, maxsplit=1)[0]
@@ -982,7 +1300,7 @@ def extract_reception(section_body: str, full_text: str) -> tuple[str, float]:
         if target:
             target = _reception_trim(target)
             if target and not is_garbage(target):
-                return target, 0.9
+                return target, (1.0 if _has_validated_inn(target) else 0.9)
 
     if full_text:
         m = re.search(r"при[ёе]м\s+груз\w*", full_text, re.IGNORECASE)

@@ -303,6 +303,69 @@ def _normalize_cyrillic_latin_word(
     return word
 
 
+# Aggressive Latin→Cyrillic map для context-override (fix #B):
+# в Cyrillic-majority параграфе включает также пары визуально-
+# близкие но не идентичные (d↔д, g↔г, r↔р, f↔ф, n↔н, m↔м, l↔л,
+# b↔б, i↔и, j↔й, u↔и/у, s↔з, h↔н). Применяется только при
+# дополнительных gate'ах (см. _aggressive_cyrillify).
+_AGGRESSIVE_LAT_TO_CYR: Final[dict[str, str]] = {
+    **_LATIN_TO_CYRILLIC,  # наследуем strict look-alike pairs (A/E/O/...)
+    # Uppercase-дополнения:
+    "D": "Д", "G": "Г", "F": "Ф", "N": "Н", "L": "Л", "I": "И",
+    "J": "Й", "U": "У", "R": "Р", "S": "С", "B": "В", "V": "В",
+    # Lowercase-дополнения (в look-alikes только a/c/e/o/p/x/y):
+    "b": "в", "d": "д", "f": "ф", "g": "г", "h": "н",
+    "i": "и", "j": "й", "k": "к", "l": "л", "m": "м", "n": "н",
+    "r": "р", "s": "с", "t": "т", "u": "у", "v": "в",
+}
+
+# Buквы с которыми aggressive-conversion НЕ имеет смысла: Q/W/Z
+# не имеют разумного Cyrillic counterpart'а. Слово с ними — не
+# OCR-typo Cyrillic'а, а legitimately Latin (английское или бренд).
+_AGGRESSIVE_UNCONVERTIBLE: Final[frozenset[str]] = frozenset("QqWwZz")
+
+
+def _aggressive_cyrillify(word: str) -> str | None:
+    """Попытаться полностью конвертировать Latin-классифицированное
+    слово в Cyrillic через :data:`_AGGRESSIVE_LAT_TO_CYR`.
+
+    Returns:
+        Cyrillic-версия word'а, либо ``None`` если word не стоит
+        конвертировать:
+          * содержит буквы из :data:`_AGGRESSIVE_UNCONVERTIBLE`
+            (Q/W/Z — нет Cyrillic counterpart'а);
+          * ALL-UPPERCASE И длина ≥ 3 (brand: TENSAR / VOLVO) —
+            такие намеренно Latin;
+          * содержит хотя бы одну букву без mapping'а.
+    """
+    if not word:
+        return None
+    # Brand heuristic: ALL-UPPERCASE длиной ≥ 3 буквы → likely
+    # brand или abbreviation. Оставляем.
+    letters = [ch for ch in word if ch.isalpha()]
+    if (
+        len(letters) >= 3
+        and all(ch.isupper() for ch in letters)
+    ):
+        return None
+    # Unconvertible chars — явный signal «это не OCR-typo».
+    if any(ch in _AGGRESSIVE_UNCONVERTIBLE for ch in word):
+        return None
+    out_chars: list[str] = []
+    for ch in word:
+        if ch.isalpha():
+            mapped = _AGGRESSIVE_LAT_TO_CYR.get(ch)
+            if mapped is None:
+                # Буква без aggressive mapping (в _AGGRESSIVE_LAT_TO_
+                # CYR нет) — полностью не сконвертируем, лучше
+                # не трогать слово.
+                return None
+            out_chars.append(mapped)
+        else:
+            out_chars.append(ch)
+    return "".join(out_chars)
+
+
 def _paragraph_script_majority(text: str) -> str | None:
     """Return ``"cyr"``, ``"lat"`` or ``None`` for the whole document.
 
@@ -333,6 +396,68 @@ def _paragraph_script_majority(text: str) -> str | None:
 #: Latin even inside a Russian-majority document.
 _NUMERIC_AFTER_RE: Final[Pattern[str]] = re.compile(r"^[-_/.]?\d")
 _NUMERIC_BEFORE_RE: Final[Pattern[str]] = re.compile(r"\d[-_/.]?$")
+
+
+# Экзотическая латинская диакритика — ВСЁ, что не основная ASCII-
+# латиница / кириллица / цифры / пунктуация. Tesseract LSTM при
+# низкой уверенности на кириллице fallback-ит на «похожие по
+# форме» глифы из других training-наборов: французские é/à/è/ç,
+# немецкие ü/ä/ö, польские ł/ż, испанский ñ, норвежский ø и т.п.
+# В русско-/англоязычных документах они НИКОГДА не нужны.
+# Убираем перед autocorrect_russian чтобы regex-правила видели
+# чистый текст.
+_EXOTIC_DIACRITIC_MAP: Final[dict[str, str]] = {
+    # Французский / общий латинский диакритический
+    "à": "a", "á": "a", "â": "a", "ã": "a", "ä": "a", "å": "a",
+    "À": "A", "Á": "A", "Â": "A", "Ã": "A", "Ä": "A", "Å": "A",
+    "è": "e", "é": "e", "ê": "e", "ë": "e",
+    "È": "E", "É": "E", "Ê": "E", "Ë": "E",
+    "ì": "i", "í": "i", "î": "i", "ï": "i",
+    "Ì": "I", "Í": "I", "Î": "I", "Ï": "I",
+    "ò": "o", "ó": "o", "ô": "o", "õ": "o", "ö": "o", "ø": "o",
+    "Ò": "O", "Ó": "O", "Ô": "O", "Õ": "O", "Ö": "O", "Ø": "O",
+    "ù": "u", "ú": "u", "û": "u", "ü": "u",
+    "Ù": "U", "Ú": "U", "Û": "U", "Ü": "U",
+    "ý": "y", "ÿ": "y",
+    "Ý": "Y", "Ÿ": "Y",
+    "ñ": "n", "Ñ": "N",
+    "ç": "c", "Ç": "C",
+    "œ": "oe", "Œ": "OE",
+    "æ": "ae", "Æ": "AE",
+    "ß": "ss",
+    # Польские специфичные
+    "ł": "l", "Ł": "L",
+    "ż": "z", "Ż": "Z",
+    "ź": "z", "Ź": "Z",
+    "ą": "a", "Ą": "A",
+    "ę": "e", "Ę": "E",
+    "ć": "c", "Ć": "C",
+    "ń": "n", "Ń": "N",
+    "ś": "s", "Ś": "S",
+    # Другие европейские
+    "č": "c", "Č": "C",
+    "š": "s", "Š": "S",
+    "ž": "z", "Ž": "Z",
+    "ř": "r", "Ř": "R",
+    "ů": "u", "Ů": "U",
+    "ě": "e", "Ě": "E",
+    "ā": "a", "ē": "e", "ī": "i", "ō": "o", "ū": "u",
+    "ı": "i", "İ": "I",
+}
+
+
+def _strip_exotic_diacritics(text: str) -> str:
+    """Заменяет экзотическую латинскую диакритику на ближайший ASCII-
+    эквивалент. Tesseract LSTM на плохих кириллических сканах часто
+    даёт é/ü/ł/ñ/ç — для русско-/англоязычных документов это OCR-
+    артефакт, засоряющий словарь. Возвращаем обратно к чистой
+    ASCII-латинице (à → a, é → e, ł → l, ñ → n, …).
+
+    Не трогает кириллицу (ё/й останутся), цифры и пунктуацию.
+    """
+    if not text:
+        return text
+    return "".join(_EXOTIC_DIACRITIC_MAP.get(ch, ch) for ch in text)
 
 
 def normalize_cyrillic_latin_confusion(text: str) -> str:
@@ -376,13 +501,26 @@ def normalize_cyrillic_latin_confusion(text: str) -> str:
             _NUMERIC_AFTER_RE.match(after)
             or _NUMERIC_BEFORE_RE.search(before)
         )
-        out.append(
-            _normalize_cyrillic_latin_word(
-                word,
-                paragraph_majority=paragraph_majority,
-                prefer_latin=numeric_context,
-            )
+        normalized = _normalize_cyrillic_latin_word(
+            word,
+            paragraph_majority=paragraph_majority,
+            prefer_latin=numeric_context,
         )
+        # Aggressive context override (idea top-10 дополнение):
+        # в Cyrillic-параграфе слово классифицированное как pure-
+        # ``lat`` — почти наверняка OCR-typo Cyrillic'а. Пробуем
+        # aggressive conversion через расширенный map. Gate'ы
+        # внутри _aggressive_cyrillify: brand ALL-UPPER / чары Q-W-Z
+        # / неконвертируемые буквы → None.
+        if (
+            paragraph_majority == "cyr"
+            and not numeric_context
+            and _classify_word_script(normalized) == "lat"
+        ):
+            aggressive = _aggressive_cyrillify(normalized)
+            if aggressive is not None:
+                normalized = aggressive
+        out.append(normalized)
         last = m.end()
     out.append(text[last:])
     return "".join(out)
@@ -539,8 +677,50 @@ class TextPostprocessor:
             logger.debug("Postprocess: Cyrillic/Latin look-alikes normalised")
 
         if config.autocorrect_russian:
+            # Strip exotic Latin diacritics (é, à, ñ, ç, ý, ł, ż…) —
+            # их выдаёт Tesseract LSTM когда distractor-fallback'ит
+            # на кириллицу и пытается впечатать «что-то похожее» из
+            # training-словаря. В наших ТН/УПД корпусах эти символы
+            # никогда не нужны: нам нужны ТОЛЬКО русский + английский
+            # (см. профиль universal_accurate languages=["rus", "eng"]).
+            # Удаляем их ДО autocorrect_russian, чтобы regex-правила
+            # видели чистый кириллический/ASCII-латинский поток.
+            current = _strip_exotic_diacritics(current)
+
             current = self._autocorrect_russian(current)
             logger.debug("Postprocess: Russian autocorrect applied")
+
+            # Точечная коррекция критичных ТН/УПД терминов через
+            # dict-lookup (23 canonical × 122 OCR-варианта): сначала
+            # быстро и гарантированно чиним Грузоотправитель /
+            # Грузополучатель / Перевозчик / идентифицировать /
+            # реквизиты / TENSAR /... Lexicon содержит только
+            # exact-match варианты из реальных OCR-выходов —
+            # false-positive риск минимальный, поэтому on-by-default
+            # вместе с autocorrect_russian.
+            from src.core.lexicon_corrector import correct as _lex_correct
+            current = _lex_correct(current)
+            logger.debug(
+                "Postprocess: lexicon-corrector applied (TN/УПД vocab)"
+            )
+
+            # Широкий fuzzy-корректор через reference-словарь
+            # ~17 000 русских словоформ (resources/ru_lexicon.txt).
+            # Opt-in через ``postprocess.fuzzy_correction_ru`` —
+            # применяется к ВСЕМ русским токенам ≥ 6 chars и может
+            # менять legitimate word-forms (организация↔организации,
+            # оформил↔оформи). Полезно на heavy-mangled OCR-выходах
+            # типичных ТН-сканов, но на clean synthetic corpus'е
+            # снижает CER/WER из-за form-mismatch с ground-truth.
+            # Включайте явно в профиле только для scan-corpus'а.
+            if getattr(config, "fuzzy_correction_ru", False):
+                from src.core.fuzzy_corrector import (
+                    correct as _fuzzy_correct,
+                )
+                current = _fuzzy_correct(current)
+                logger.debug(
+                    "Postprocess: fuzzy-corrector applied (~17k ref dict)"
+                )
 
         if config.autocorrect_english:
             current = self._autocorrect_english(current)
@@ -572,6 +752,20 @@ class TextPostprocessor:
         if getattr(config, "validate_entities", False):
             current = self._validate_entities(current)
             logger.debug("Postprocess: dates / amounts / phones normalised")
+
+            # Дополнительный слой entity-нормализации (декабрь 2026):
+            # канонизирует даты / телефоны / адресные префиксы через
+            # regex-based normalizers. _validate_entities уже чинит
+            # opt-пат «12.O1.2O23» → «12.01.2023», но не перестраивает
+            # формат даты (29/08/2022 → 29.08.2022) и не распаковывает
+            # слипшиеся адреса (125212,г.Москва → 125212, г. Москва).
+            # Делает Excel-вывод byte-stable между прогонами одного
+            # документа на разных сканах/DPI.
+            from src.core.entity_normalizers import normalize_all
+            current = normalize_all(current)
+            logger.debug(
+                "Postprocess: entity normalizers applied (dates/phones/addrs)"
+            )
 
         return current
 

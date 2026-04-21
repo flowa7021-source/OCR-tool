@@ -1,0 +1,115 @@
+{
+  "name": "universal_clean",
+  "description": "Минимальная предобработка для чистых сканов / digital-экспортов / уже OCR'нутых PDF. Только deskew + OTSU. Без Sauvola / CLAHE / denoise / border removal — сохраняет мелкий шрифт в ячейках таблиц и слабые штрихи подписей. Выгоднее universal_accurate когда на входе high-contrast скан: предобработка экономит ~10 sec и не портит исходный raster. Текстовый слой + парсер полностью те же.",
+  "schema_version": 12,
+  "preprocess": {
+    "auto_rotate": {
+      "enabled": true,
+      "min_confidence": 1.0
+    },
+    "deskew": {
+      "enabled": true,
+      "auto_detect": true,
+      "manual_angle": 0.0,
+      "max_angle": 45.0
+    },
+    "dewarp": {
+      "enabled": false,
+      "text_min_width": 15,
+      "text_min_height": 2,
+      "text_min_aspect": 1.5,
+      "focal_length": 1.2
+    },
+    "binarization": {
+      "method": "otsu",
+      "adaptive_block_size": 31,
+      "adaptive_c": 10,
+      "sauvola_window": 25,
+      "sauvola_k": 0.2
+    },
+    "denoise": {
+      "enabled": false,
+      "steps": []
+    },
+    "contrast": {
+      "clahe_enabled": false,
+      "clahe_clip": 2.0,
+      "clahe_tile": 8,
+      "manual_enabled": false,
+      "alpha": 1.0,
+      "beta": 0
+    },
+    "background": {
+      "enabled": false,
+      "blur_kernel": 55
+    },
+    "border_removal": {
+      "enabled": false,
+      "min_line_length": 75
+    }
+  },
+  "ocr": {
+    "engine": "tesseract",
+    "languages": [
+      "rus",
+      "eng"
+    ],
+    "primary_language": "rus",
+    "psm": 3,
+    "oem": 1,
+    "dpi": 300,
+    "char_whitelist": "",
+    "char_blacklist": "",
+    "confidence_threshold": 60.0,
+    "tesseract_timeout": 180,
+    "optimize_level": 1,
+    "skip_text": true,
+    "max_pages": 0,
+    "use_user_dictionaries": true,
+    "drop_low_conf_words": false,
+    "soft_rescue_dropped_words": true,
+    "redact_noisy_blocks": false,
+    "adaptive_confidence_threshold": true,
+    "per_word_script_disambiguation": true,
+    "per_word_clahe_rescue": true,
+    "per_word_upscale_rescue": true,
+    "user_words_fuzzy_rescue": true,
+    "per_block_psm_retry": true,
+    "extra_tesseract_params": {
+      "preserve_interword_spaces": "1",
+      "tessedit_do_invert": "0",
+      "load_freq_dawg": "0"
+    }
+  },
+  "postprocess": {
+    "autocorrect_russian": true,
+    "autocorrect_english": true,
+    "merge_hyphenated": true,
+    "normalize_whitespace": true,
+    "normalize_unicode": true,
+    "remove_artifacts": true,
+    "fix_cyrillic_latin_confusion": true,
+    "garbage_filter_strictness": "lenient",
+    "mark_suspect_handwritten_blocks": true,
+    "validate_identifiers": true,
+    "validate_entities": true,
+    "fuzzy_correction_ru": true,
+    "custom_rules": []
+  },
+  "extract": {
+    "enabled": true,
+    "kind": "tn_upd",
+    "multi_document": true,
+    "low_text_threshold": 200,
+    "cache_enabled": true,
+    "org_lookup": true,
+    "llm_fallback": {
+      "enabled": false,
+      "min_confidence": 0.4,
+      "model": "claude-opus-4-7",
+      "max_text_chars": 20000
+    }
+  },
+  "builtin": true,
+  "created_at": "2026-04-21T20:00:00+00:00"
+}

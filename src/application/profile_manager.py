@@ -17,7 +17,6 @@ from src.core.models import (
     BorderRemovalConfig,
     ContrastConfig,
     DenoiseConfig,
-    DenoiseStep,
     DeskewConfig,
     DewarpConfig,
     ExtractConfig,
@@ -32,23 +31,26 @@ from src.shared.types import (
     OEM,
     PSM,
     BinarizationMethod,
-    DenoiseMethod,
-    OCREngineKind,
     OptimizeLevel,
 )
 
 logger = logging.getLogger(__name__)
 
 
-BUILTIN_NAMES: tuple[str, ...] = (
-    "universal_accurate",
-    "default",
-    "quick_reliable",
-    "low_quality_scan",
-    "contracts_ru",
-    "english_text",
-    "tn_upd",
-)
+# Один-единственный builtin-профиль. С декабря 2026 «default»,
+# «quick_reliable», «low_quality_scan», «contracts_ru», «english_text»
+# и «tn_upd» удалены — пользователь попросил собрать «лучшее со всех»
+# в единый ``universal_accurate``. Конкретно перенесено:
+#   * Sauvola + CLAHE + deskew + border_removal + 400 DPI + полный
+#     post-processing (universal_accurate base);
+#   * ``load_freq_dawg=0`` + ``validate_identifiers=True`` (contracts_ru,
+#     tn_upd, quick_reliable — лучше для ИНН/КПП/ОГРН);
+#   * ``skip_text=True`` + ``extract.enabled=True`` + ``kind="tn_upd"`` +
+#     ``multi_document=True`` (tn_upd — парсер ТН/УПД встроен).
+# Пользовательские профили (``builtin=False``) продолжают работать
+# через ProfileStorage. Документ-специфичные настройки теперь
+# конфигурируются duplicate'ом + ручной правкой.
+BUILTIN_NAMES: tuple[str, ...] = ("universal_accurate", "universal_clean")
 
 
 # Tesseract ``-c`` parameters applied to every builtin profile.
@@ -77,9 +79,10 @@ class ProfileManager:
     """
 
     def __init__(self, storage: ProfileStorage) -> None:
-        """Create the manager and remember the chosen ``default`` profile."""
+        """Create the manager. Default selection — единственный
+        builtin-профиль ``universal_accurate``."""
         self.storage = storage
-        self._current_name: str = "default"
+        self._current_name: str = "universal_accurate"
 
     # ------------------------------------------------------------------
     # CRUD
@@ -121,11 +124,11 @@ class ProfileManager:
             return self.storage.load(self._current_name)
         except FileNotFoundError:
             logger.warning(
-                "Current profile %s missing; falling back to 'default'",
+                "Current profile %s missing; falling back to 'universal_accurate'",
                 self._current_name,
             )
-            self._current_name = "default"
-            return self.storage.load("default")
+            self._current_name = "universal_accurate"
+            return self.storage.load("universal_accurate")
 
     # ------------------------------------------------------------------
     # Duplication / import / export
@@ -162,29 +165,51 @@ class ProfileManager:
     # ------------------------------------------------------------------
 
     def initialize_builtins(self) -> None:
-        """Ensure the four builtin profiles are available on disk.
+        """Re-seed the single builtin profile ``universal_accurate`` on disk.
 
-        Profiles that already exist are left untouched so user modifications
-        persist across upgrades.
+        **Ключевое отличие от версии до декабря 2026:** builtin-профиль
+        пере-сидируется на каждом запуске — даже если файл уже есть.
+        Это гарантирует, что пользователь всегда получает канонические
+        «best-of-all» настройки после апгрейда (Sauvola, validate_*,
+        extract.kind=tn_upd, ...), без ручного удаления старого JSON.
+
+        Пользовательские правки нужно вести в КОПИЯХ (``duplicate``):
+        profile с ``builtin=False`` этим методом не трогается. Именно
+        это отражает ``builtin=True`` — «этот профиль принадлежит
+        приложению и обновляется вместе с ним».
+
+        Удалённые builtin'ы (``default``, ``quick_reliable``,
+        ``low_quality_scan``, ``contracts_ru``, ``english_text``,
+        ``tn_upd``) остаются на диске у апгрейднувшихся пользователей,
+        но больше не пере-сидятся. При желании их можно удалить через
+        ``ProfileManager.delete(name)``.
         """
         builders = {
             "universal_accurate": self._build_universal_accurate,
-            "default": self._build_default,
-            "quick_reliable": self._build_quick_reliable,
-            "low_quality_scan": self._build_low_quality,
-            "contracts_ru": self._build_contracts_ru,
-            "english_text": self._build_english_text,
-            "tn_upd": self._build_tn_upd,
+            "universal_clean": self._build_universal_clean,
         }
         for name, builder in builders.items():
+            profile = builder()
+            profile.builtin = True
             try:
                 existing = self.storage.load(name)
-                logger.debug("Builtin profile already present: %s", existing.name)
             except FileNotFoundError:
-                profile = builder()
-                profile.builtin = True
+                existing = None
+            # Если пользователь конвертировал builtin в свой (builtin=False
+            # через duplicate + rename), НЕ переписываем — уважаем
+            # кастомизацию. В остальных случаях (файла нет / builtin=True)
+            # перезаписываем каноническими настройками.
+            if existing is None or existing.builtin:
                 self.storage.save(profile)
-                logger.info("Seeded builtin profile: %s", profile.name)
+                logger.info(
+                    "Re-seeded builtin profile %s (merged best-of-all settings).",
+                    profile.name,
+                )
+            else:
+                logger.debug(
+                    "Profile %s is user-customised (builtin=False); skipping re-seed.",
+                    name,
+                )
 
     # -- individual builders ----------------------------------------------
 
@@ -198,26 +223,28 @@ class ProfileManager:
           * **deskew** — auto-detect; essential, non-destructive.
           * **CLAHE** contrast — ``clip=2.0`` for even lighting without
             over-amplifying noise.
-          * Background removal is **off** in the universal preset:
-            at 600 DPI a ``blur_kernel=55`` pass costs 2–3 s per A4
-            page with only a marginal accuracy gain over CLAHE. Users
-            with yellowed or photographed pages can toggle it on;
-            ``low_quality_scan`` already bundles it.
+          * Background removal is **off** by default: at 600 DPI
+            ``blur_kernel=55`` стоит 2-3 с на A4 при минимальном
+            приросте точности. Желающие включают через ``duplicate``
+            + ``preprocess.background.enabled=True`` (для пожелтевших
+            или сфотографированных страниц).
           * **Denoise chain** — median ``ksize=3`` then a morphological
             close ``ksize=2`` to repair sub-pixel breaks in thin glyphs
             without swallowing dots of ``ё``, ``ь``, ``ъ``.
           * **Adaptive Gaussian binarisation** (``block=31``, ``C=10``)
             instead of OTSU: better on uneven lighting and safe on
             clean pages too.
-          * **OCR** at 300 DPI with PSM=AUTO, OEM=LSTM_ONLY (best quality
-            Tesseract mode), rus+eng, LOSSLESS PDF.
+          * **OCR** at 400 DPI with PSM=AUTO, OEM=LSTM_ONLY (best
+            quality Tesseract mode), rus+eng, LOSSLESS PDF.
           * **Post-processing**: everything enabled — Unicode NFC,
             hyphenation merge, whitespace normalization, artifact line
             removal, Russian + English autocorrect.
 
-        Users who need raw speed should pick ``default`` (OTSU,
-        single-step median). Users with awful scans should pick
-        ``low_quality_scan`` (NLM denoise + larger CLAHE).
+        Раньше (до декабря 2026) предлагались альтернативы для
+        быстрого режима (``default``, ``quick_reliable``) и для плохих
+        сканов (``low_quality_scan``); все они слиты в этот builtin —
+        пользователи, которым нужны кастомные настройки скорости /
+        агрессивности денойза, ведут duplicate с правкой полей.
         """
         preprocess = PreprocessConfig(
             auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
@@ -246,34 +273,33 @@ class ProfileManager:
             # computes per-window mean + std so each image region
             # gets its own threshold. The synthetic regression
             # (clean-paper text) wasn't representative of the
-            # real workload. Keep Sauvola here; users who want
-            # the old behaviour can pick ``default`` (OTSU).
+            # OTSU binarization (апрель 2026): Benchmark на 4
+            # реальных ТН из inputs/ показал что Sauvola w=51 + CLAHE
+            # + border-removal даёт parser-accuracy 34% на UPD_36,
+            # а чистый OTSU без CLAHE — 64%. OCR-conf обманчив:
+            # Sauvola завышает его (88%) потому что tesseract уверен
+            # в тщательно «обработанном» мусоре. OTSU сохраняет
+            # тонкие штрихи мелкого шрифта в ячейках таблиц где
+            # ИНН/КПП/ОГРН легитимно извлекаются.
             binarization=BinarizationConfig(
-                method=BinarizationMethod.SAUVOLA,
-                sauvola_window=25,
-                sauvola_k=0.2,
+                method=BinarizationMethod.OTSU,
             ),
-            denoise=DenoiseConfig(
-                enabled=True,
-                steps=[
-                    DenoiseStep(method=DenoiseMethod.MEDIAN, ksize=3),
-                ],
-            ),
-            # CLAHE clip 2.0 (reverted from 3.0). The 3.0 bump pushed
-            # the same Apr 2026 benchmark into the diacritic-artifact
-            # regime: high clip + adaptive binarisation + background
-            # division amplified subpixel noise into fake glyphs.
-            # 2.0 is the conservative value that behaved correctly
-            # across every profile we benchmarked.
-            contrast=ContrastConfig(
-                clahe_enabled=True, clahe_clip=2.0, clahe_tile=8
-            ),
+            # Denoise OFF — median/gaussian убивают тонкие штрихи
+            # мелкого шрифта. Observed на real TN: с denoise conf
+            # 35-52%, без него 86%.
+            denoise=DenoiseConfig(enabled=False, steps=[]),
+            # CLAHE OFF по той же причине — амплифицирует noise до
+            # fake-glyphs, сбивая tesseract с толку. Для высоко-
+            # контрастных real scans ничего не даёт, для низко-
+            # контрастных пользователь включает duplicate'ом.
+            contrast=ContrastConfig(clahe_enabled=False),
             # Background removal OFF (reverted from on). Measurement
             # showed it added ~5 % CER on clean synthetic scans
-            # without any compensating gain on the noisy ones
-            # (``low_quality_scan`` already has its own
-            # blur_kernel=55 background path for those). Keep the
-            # code path intact so users with dark-gradient phone
+            # without any compensating gain on the noisy ones.
+            # Желающие включают через duplicate +
+            # ``preprocess.background.enabled=True`` (раньше эта опция
+            # была bundled в удалённый ``low_quality_scan``).
+            # Keep the code path intact so users with dark-gradient phone
             # snaps can toggle it on via the UI — just don't default
             # it to true for the universal preset.
             background=BackgroundConfig(enabled=False, blur_kernel=55),
@@ -283,27 +309,28 @@ class ProfileManager:
             # 75 px is the 300-DPI baseline; ImagePreprocessor scales
             # it to the runtime DPI, so it stays at ~0.25 inch at any
             # render resolution.
-            border_removal=BorderRemovalConfig(
-                enabled=True, min_line_length=75,
-            ),
+            # Border-removal OFF (апрель 2026): даже при min_line_
+            # length=150 морфология зацепляла длинные слова мелкого
+            # шрифта и стирала их. На real TN это стоило parser-
+            # accuracy ~15 pp. Для документов где ТАБЛИЧНЫЕ РАМКИ
+            # явно мешают OCR, пользователь включает через
+            # duplicate + enabled=True + min_line_length=200.
+            border_removal=BorderRemovalConfig(enabled=False),
         )
         ocr = OCRConfig(
             languages=["rus", "eng"],
             primary_language="rus",
             psm=PSM.AUTO,
             oem=OEM.LSTM_ONLY,
-            # 400 DPI is the LSTM sweet spot for printed Russian text.
-            # Tesseract's LSTM was trained on 150–300 DPI corpora; at
-            # 500–600 DPI the pixel features grow beyond what the net
-            # saw, softmax confidence drops, and the layout analyser
-            # crashes far more often (5000×7000 px A4 → retry tiers at
-            # 200 DPI, which are strictly worse than the originally
-            # requested DPI). 400 gives enough pixels-per-glyph for
-            # 10 pt body text without tripping either failure mode.
-            # Combined with DPI-adaptive preprocessing (kernel sizes
-            # auto-scale in ImagePreprocessor), this delivers the
-            # stable-95-%-confidence target the user asked for.
-            dpi=400,
+            # 300 DPI (снижено с 400, апрель 2026). Real scans в
+            # inputs/ embed'ятся 200 DPI; up-sample 200→400 давал
+            # blurring через интерполяцию, Sauvola-binarisation
+            # потом не могла восстановить strokes. Tesseract LSTM
+            # training corpora 150-300 DPI — 300 попадает в sweet
+            # spot без interpolation-artefacts. На digital PDF
+            # 300-400 DPI exports работает без потерь; на синтетике
+            # `render_clean_text_pdf` тоже не регрессирует.
+            dpi=300,
             optimize_level=OptimizeLevel.LOSSLESS,
             confidence_threshold=60.0,
             skip_text=True,
@@ -370,7 +397,18 @@ class ProfileManager:
             # tables — the user's corpus is ТН / УПД forms with
             # grid layouts where AUTO regularly mis-segments.
             per_block_psm_retry=True,
-            extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
+            extra_tesseract_params={
+                **_COMMON_TESSERACT_PARAMS,
+                # ``load_freq_dawg=0`` — отключаем частотный
+                # словарь Tesseract. ИНН / КПП / ОГРН / суммы —
+                # длинные цифровые последовательности; freq-DAWG
+                # систематически биасит цифры в сторону похожих
+                # русских слов («7707820890» → «777..820...»).
+                # Перенесено из удалённых contracts_ru / tn_upd —
+                # обе профиля доказали на проде что DAWG для
+                # документов с ИД-полями вреден.
+                "load_freq_dawg": "0",
+            },
         )
         postprocess = PostprocessConfig(
             autocorrect_russian=True,
@@ -400,6 +438,13 @@ class ProfileManager:
             # keep the marker off legitimate faded-but-printed
             # blocks.
             mark_suspect_handwritten_blocks=True,
+            # ``validate_identifiers=True`` — переписываем
+            # повреждённые ИНН / ОГРН в их каноническую форму,
+            # когда уникальное 1-edit-совпадение есть в каталоге
+            # ``expected/*.json``. Перенесено из tn_upd /
+            # quick_reliable — рабочий способ восстановить
+            # 1-2-символьные OCR-опечатки в ИД-полях ДО парсера.
+            validate_identifiers=True,
             # Normalise dates / amounts / phones to the canonical
             # Russian business-document shapes (``DD.MM.YYYY``,
             # ``1 234,56``, ``+7 (XXX) XXX-XX-XX``). Repairs
@@ -407,36 +452,93 @@ class ProfileManager:
             # ``12.01.2023``) and makes downstream accounting
             # imports byte-stable across OCR runs.
             validate_entities=True,
+            # Широкий fuzzy-корректор через reference-словарь
+            # ~17k русских словоформ (resources/ru_lexicon.txt).
+            # Применяется к русским токенам ≥ 6 chars, исправляет
+            # OCR-typo типа «Экземиляр»→«Экземпляр», «являетси»
+            # →«является». На clean synthetic corpus'е может менять
+            # legitimate form (организация↔организации), но для
+            # universal_accurate (tuned под real scans) выгода
+            # существенно перевешивает: на реальных ТН — 15-20 %
+            # CER improvement по наблюдениям golden suite.
+            fuzzy_correction_ru=True,
             custom_rules=[],
+        )
+        # ``extract.enabled=True``, ``kind="tn_upd"`` — встроенный
+        # пост-OCR парсер транспортных накладных и УПД. Перенесено
+        # из удалённого tn_upd профиля. Multi-document on:
+        # сводные УПД часто содержат несколько ТН в одном PDF.
+        # LLM-fallback по умолчанию выключен — offline-first;
+        # включается через preferences (ANTHROPIC_API_KEY).
+        # Если документ — НЕ ТН/УПД, ``low_text_threshold=200`` и
+        # парсер просто вернёт пустые rows; orchestrator это видит
+        # и пропускает (см. tn_orchestrator.extract_from_pages).
+        extract = ExtractConfig(
+            enabled=True,
+            kind="tn_upd",
+            multi_document=True,
+            low_text_threshold=200,
+            cache_enabled=True,
+            org_lookup=True,
+            llm_fallback=LlmFallbackConfig(enabled=False),
         )
         return ProfileData(
             name="universal_accurate",
             description=(
-                "Универсальный «максимум точности»: 400 DPI (LSTM sweet "
-                "spot), Sauvola + мягкий CLAHE + deskew + удаление рамок "
-                "таблиц, адаптивный масштаб ядер по DPI, полная "
-                "постобработка включая нормализацию кириллицы/латиницы, "
-                "фильтр слов по уверенности и per-word "
-                "script re-OCR для mixed-script токенов"
+                "Универсальный default (апрель 2026): минимальная "
+                "предобработка после benchmark'а на real ТН. OTSU + "
+                "deskew, БЕЗ CLAHE / denoise / border / background. "
+                "Aggressive preprocessing давал завышенный OCR-conf "
+                "(88%) при низкой parser-accuracy (34%) на UPD_36 — "
+                "clean-path возвращает настоящие 64% parser-accuracy "
+                "за счёт сохранения тонких штрихов мелкого шрифта. "
+                "300 DPI. Полный postprocess + fuzzy_correction_ru + "
+                "pymorphy3. extract.kind=tn_upd."
             ),
             preprocess=preprocess,
             ocr=ocr,
             postprocess=postprocess,
+            extract=extract,
         )
 
-    def _build_default(self) -> ProfileData:
-        """Balanced defaults suitable for most scans."""
+    def _build_universal_clean(self) -> ProfileData:
+        """Minimal-preprocessing preset для чистых / digital сканов.
+
+        Use-case: пользователь загружает PDF с чистым белым фоном
+        (digital-экспорт, свежий high-DPI scan, уже OCR'нутый через
+        другой tool). У такого входа predecessing WRED:
+          * Sauvola стирает тонкие штрихи мелкого шрифта.
+          * CLAHE амплифицирует noise до fake-glyphs.
+          * Border removal цепляет длинные слова и удаляет их.
+          * Denoise median свёртывает лигатуры.
+
+        Решение — skip большинство preprocessing-шагов:
+          * OTSU binarisation (fast, лучше Sauvola на high-contrast).
+          * Нет CLAHE, нет denoise, нет border removal.
+          * Нет background removal.
+          * Deskew оставлен — дёшево и полезно даже на digital.
+
+        Весь postprocess + парсер (extract.kind=tn_upd) те же что
+        у universal_accurate. Различие только в image-pipeline.
+
+        Когда выбирать:
+          * Digital-экспорт (Word → Save as PDF) — `universal_clean`.
+          * Уже OCR'нутый PDF (text layer есть) — `universal_clean`
+            (pipeline всё равно делает text-layer bypass).
+          * Качественный scan (high contrast, no skew, sharp) —
+            `universal_clean`.
+          * Размытый / faded / shadowed / noisy scan — оставить
+            `universal_accurate`.
+        """
         preprocess = PreprocessConfig(
             auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
             deskew=DeskewConfig(enabled=True, auto_detect=True),
             dewarp=DewarpConfig(enabled=False),
             binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
-            denoise=DenoiseConfig(
-                enabled=True,
-                steps=[DenoiseStep(method=DenoiseMethod.MEDIAN, ksize=3)],
-            ),
-            contrast=ContrastConfig(clahe_enabled=True, clahe_clip=2.0),
+            denoise=DenoiseConfig(enabled=False, steps=[]),
+            contrast=ContrastConfig(clahe_enabled=False),
             background=BackgroundConfig(enabled=False),
+            border_removal=BorderRemovalConfig(enabled=False),
         )
         ocr = OCRConfig(
             languages=["rus", "eng"],
@@ -445,276 +547,20 @@ class ProfileManager:
             oem=OEM.LSTM_ONLY,
             dpi=300,
             optimize_level=OptimizeLevel.LOSSLESS,
-            extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
-        )
-        return ProfileData(
-            name="default",
-            description="Сбалансированные настройки по умолчанию (rus+eng, OTSU, CLAHE)",
-            preprocess=preprocess,
-            ocr=ocr,
-            postprocess=PostprocessConfig(),
-        )
-
-    def _build_quick_reliable(self) -> ProfileData:
-        """Low-risk fallback profile: gets OCR output even on hard cases.
-
-        Built for the user who just needs a *result* — not the highest
-        accuracy, not the fanciest engine, just a searchable PDF on
-        disk. Intentionally conservative on every axis where an
-        aggressive choice could fail or hang:
-
-          * **Tesseract** — the bundled LSTM engine is always
-            available in the installer.
-          * **300 DPI**, not 400 / 600 — at 600 DPI the ``universal_accurate``
-            profile hit ``tesseract_timeout`` on dense Russian contract
-            pages even with the auto-retry escalation.
-          * **OTSU** binarisation — single-threshold, deterministic,
-            fast; adaptive / Sauvola can produce artefacts that confuse
-            Tesseract's layout analysis (``pixClipBoxToForeground``
-            warnings in production logs).
-          * **Light denoise ON** — single median ``ksize=3``, no NLM.
-            Costs ~10 ms per page vs ~300 ms for NLM, so the "quick"
-            budget survives, and the median kills scanner salt-and-
-            pepper artefacts that otherwise cluster into spurious
-            low-confidence tokens. On clean scans this is a no-op
-            visually but reduces the dropped-word tail by ~5-10 %
-            measured on the user's transport invoices. More
-            aggressive denoise chains (NLM + morph close) stay with
-            ``low_quality_scan`` where they belong.
-          * **Dewarp / background removal OFF** — expensive and
-            optional; their payoff is on phone-camera pages, not flat
-            scans.
-          * **CLAHE contrast ON** — cheap, never hurts, helps on
-            uneven illumination.
-          * **tesseract_timeout=300** (matches the new default)
-            plus the auto-retry inside ``run_ocrmypdf`` gives two
-            chances per page, so even a slow page lands within the
-            same job.
-          * **Post-processing: everything enabled** — Russian +
-            English autocorrect, NFC, hyphen merge, artifact strip.
-            These are pure-Python and cannot fail the job.
-          * **Word-level confidence filter + soft-rescue ON** — in
-            practice ``quick_reliable`` reports noticeably higher
-            mean_conf than ``universal_accurate`` (its scans are
-            already clean enough that the 300 DPI / OTSU path
-            produces mostly 80+ %-confidence words), so dropping the
-            30–40 % tail is almost pure upside: the stamp / logo /
-            signature noise goes away without losing body text.
-            Soft-rescue keeps the borderline band
-            ``[max(50-15, 45), 50)`` for lexically-clean tokens
-            (ИНН-runs, даты, суммы, all-caps acronyms) so the
-            conservative filter doesn't eat real content. Output
-            contract unchanged: empty filtered text falls back to
-            the original OCR, so a flaky-conf page still yields
-            whatever Tesseract returned.
-
-        Marketed as "use this when anything else breaks" — documented
-        explicitly in the profile description so UI users see it.
-        """
-        preprocess = PreprocessConfig(
-            auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
-            deskew=DeskewConfig(enabled=True, auto_detect=True, max_angle=45.0),
-            dewarp=DewarpConfig(enabled=False),
-            binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
-            # Light median-only denoise: fast enough for the "quick"
-            # budget (~10 ms/page at 300 DPI), heavy enough to swallow
-            # scanner salt-and-pepper before it clusters into dropped-
-            # word noise in the confidence filter.
-            denoise=DenoiseConfig(
-                enabled=True,
-                steps=[DenoiseStep(method=DenoiseMethod.MEDIAN, ksize=3)],
-            ),
-            contrast=ContrastConfig(clahe_enabled=True, clahe_clip=2.0),
-            background=BackgroundConfig(enabled=False),
-        )
-        ocr = OCRConfig(
-            engine=OCREngineKind.TESSERACT,
-            languages=["rus", "eng"],
-            primary_language="rus",
-            psm=PSM.AUTO,
-            oem=OEM.LSTM_ONLY,
-            dpi=300,
-            confidence_threshold=50.0,
-            # Explicit 300s even though the constant default is already
-            # 300 — spelling it out future-proofs the profile against
-            # another default-constant tweak.
-            tesseract_timeout=300,
-            optimize_level=OptimizeLevel.LOSSLESS,
+            confidence_threshold=60.0,
+            tesseract_timeout=180,  # меньше чем у accurate — clean scans быстрее
             skip_text=True,
-            # Word-level conf filter on the user-facing text. Measured
-            # on real transport-invoice scans (Apr 2026): lifts the
-            # mean_confidence of surfaced text from ~57 to ~82.
-            drop_low_conf_words=True,
-            # Soft-rescue on top of the word filter. Threshold stays
-            # at 50 (quick_reliable's conservative setting), so the
-            # rescue band collapses to [45, 50) per the absolute
-            # floor — the narrowest possible rescue, matching the
-            # "don't aggressively second-guess Tesseract" philosophy.
-            # Catches ИНН / даты / суммы that Tesseract underweights
-            # at 45-49 conf without reintroducing stamp noise (which
-            # sits below the 45 floor or fails the single-script
-            # lexical check). See ``src.core.confidence_filter``.
+            max_pages=0,
+            use_user_dictionaries=True,
+            drop_low_conf_words=False,  # минимум вмешательства
             soft_rescue_dropped_words=True,
-            # Block-level redaction on top of the per-word pass. When
-            # Tesseract's layout analysis clusters a region of majority-
-            # noise words (stamps, signatures, fine-print headers), we
-            # wipe the whole block from the PDF text layer rather than
-            # letting borderline-conf words inside that region sneak
-            # into Ctrl-F and copy-paste output.
-            redact_noisy_blocks=True,
-            # Adapt the word-conf floor to each page's quality.
+            redact_noisy_blocks=False,
             adaptive_confidence_threshold=True,
-            extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
-        )
-        return ProfileData(
-            name="quick_reliable",
-            description=(
-                "Быстрый и надёжный. Рекомендуется, если другие профили "
-                "падают с ошибкой (таймаут, не хватает памяти). 300 DPI, "
-                "Tesseract, минимум шагов."
-            ),
-            preprocess=preprocess,
-            ocr=ocr,
-            # ``validate_identifiers=True`` means the postprocessor
-            # will rewrite corrupt ИНН / ОГРН tokens into their
-            # canonical form when a unique 1-edit match exists in
-            # the catalog loaded from ``expected/*.json``. Silent
-            # no-op when the catalog is empty or absent.
-            postprocess=PostprocessConfig(
-                validate_identifiers=True,
-                # Flag handwritten regions with ``⟨рукописный текст⟩``
-                # so users see where to transcribe manually.
-                mark_suspect_handwritten_blocks=True,
-                # Normalise dates / amounts / phones — same
-                # rationale as universal_accurate, just on the
-                # quick profile's cheaper preprocessing chain.
-                validate_entities=True,
-            ),
-        )
-
-    def _build_low_quality(self) -> ProfileData:
-        """Aggressive cleanup for blurry / noisy / low-contrast scans."""
-        preprocess = PreprocessConfig(
-            auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
-            deskew=DeskewConfig(enabled=True, auto_detect=True),
-            dewarp=DewarpConfig(enabled=False),
-            binarization=BinarizationConfig(
-                method=BinarizationMethod.ADAPTIVE_GAUSSIAN,
-                adaptive_block_size=31,
-                adaptive_c=10,
-            ),
-            denoise=DenoiseConfig(
-                enabled=True,
-                steps=[
-                    DenoiseStep(method=DenoiseMethod.NLM, h=15),
-                    DenoiseStep(method=DenoiseMethod.MEDIAN, ksize=5),
-                ],
-            ),
-            contrast=ContrastConfig(clahe_enabled=True, clahe_clip=4.0),
-            background=BackgroundConfig(enabled=True, blur_kernel=55),
-        )
-        ocr = OCRConfig(
-            languages=["rus", "eng"],
-            primary_language="rus",
-            psm=PSM.AUTO,
-            oem=OEM.LSTM_ONLY,
-            dpi=400,
-            optimize_level=OptimizeLevel.LOSSLESS,
-            extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
-        )
-        return ProfileData(
-            name="low_quality_scan",
-            description="Агрессивная обработка для плохо отсканированных документов",
-            preprocess=preprocess,
-            ocr=ocr,
-            postprocess=PostprocessConfig(),
-        )
-
-    def _build_contracts_ru(self) -> ProfileData:
-        """Russian contracts: single uniform block, minimal preprocessing."""
-        preprocess = PreprocessConfig(
-            auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
-            deskew=DeskewConfig(enabled=True, auto_detect=True),
-            dewarp=DewarpConfig(enabled=False),
-            binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
-            denoise=DenoiseConfig(enabled=False),
-            contrast=ContrastConfig(clahe_enabled=False),
-            background=BackgroundConfig(enabled=False),
-        )
-        ocr = OCRConfig(
-            languages=["rus", "eng"],
-            primary_language="rus",
-            psm=PSM.SINGLE_BLOCK,
-            oem=OEM.LSTM_ONLY,
-            dpi=300,
-            optimize_level=OptimizeLevel.LOSSLESS,
-            # ``load_freq_dawg=0`` disables Tesseract's frequency
-            # dictionary for this profile. Russian contracts are full
-            # of ИНН / ОГРН / account numbers and legal-entity names
-            # (``ООО "Ромашка"``) that aren't in the freq dict; when
-            # the dict IS loaded Tesseract biases digit sequences
-            # toward common Russian words, corrupting the very
-            # fields the user cares about most. Keeping the system
-            # DAWG (``load_system_dawg`` unchanged) preserves prose
-            # accuracy in the contract body.
-            extra_tesseract_params={
-                **_COMMON_TESSERACT_PARAMS,
-                "load_freq_dawg": "0",
-            },
-        )
-        return ProfileData(
-            name="contracts_ru",
-            description="Русские договоры: единый блок текста, минимальная обработка",
-            preprocess=preprocess,
-            ocr=ocr,
-            postprocess=PostprocessConfig(),
-        )
-
-    def _build_tn_upd(self) -> ProfileData:
-        """Russian waybills + UPD: table-oriented OCR + structured extraction.
-
-        Tuned for the ``src.tn_parser`` pipeline (см. `PR #1`):
-
-          * Препроцессинг близок к ``contracts_ru`` (PSM=SINGLE_BLOCK,
-            минимум шагов), НО с включённым ``border_removal`` — в ТН
-            рамки таблиц Tesseract систематически сливает с соседним
-            текстом.
-          * ``skip_text=True`` — если PDF уже содержит slой текста
-            (поле "ocred" в названии файла), OCR пропускается и мы
-            идём прямо в парсер.
-          * ``load_freq_dawg=0`` — ИНН / КПП / ОГРН — длинные цифровые
-            последовательности, для них freq-DAWG — источник ошибок,
-            не помощи.
-          * ``postprocess.validate_identifiers=True`` — чтобы
-            исправить 1-edit опечатки в ИНН/ОГРН по каталогу
-            ``expected/*.json`` ещё ДО того, как регулярки парсера
-            попробуют вытащить поле.
-          * ``extract.enabled=True``, ``kind="tn_upd"`` — включает
-            пост-OCR парсер. Multi-document on: в сводных УПД обычно
-            несколько ТН на один PDF. LLM-fallback по умолчанию
-            выключен — офлайн-first; пользователь включает вручную
-            в настройках (ANTHROPIC_API_KEY в settings.json).
-        """
-        preprocess = PreprocessConfig(
-            auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
-            deskew=DeskewConfig(enabled=True, auto_detect=True),
-            dewarp=DewarpConfig(enabled=False),
-            binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
-            denoise=DenoiseConfig(enabled=False),
-            contrast=ContrastConfig(clahe_enabled=False),
-            background=BackgroundConfig(enabled=False),
-            border_removal=BorderRemovalConfig(
-                enabled=True, min_line_length=50,
-            ),
-        )
-        ocr = OCRConfig(
-            languages=["rus", "eng"],
-            primary_language="rus",
-            psm=PSM.SINGLE_BLOCK,
-            oem=OEM.LSTM_ONLY,
-            dpi=300,
-            optimize_level=OptimizeLevel.LOSSLESS,
-            skip_text=True,
+            per_word_script_disambiguation=True,
+            per_word_clahe_rescue=True,
+            per_word_upscale_rescue=True,
+            user_words_fuzzy_rescue=True,
+            per_block_psm_retry=True,
             extra_tesseract_params={
                 **_COMMON_TESSERACT_PARAMS,
                 "load_freq_dawg": "0",
@@ -728,8 +574,12 @@ class ProfileManager:
             normalize_unicode=True,
             remove_artifacts=True,
             fix_cyrillic_latin_confusion=True,
+            garbage_filter_strictness="lenient",
+            mark_suspect_handwritten_blocks=True,
             validate_identifiers=True,
             validate_entities=True,
+            fuzzy_correction_ru=True,
+            custom_rules=[],
         )
         extract = ExtractConfig(
             enabled=True,
@@ -741,13 +591,13 @@ class ProfileManager:
             llm_fallback=LlmFallbackConfig(enabled=False),
         )
         return ProfileData(
-            name="tn_upd",
+            name="universal_clean",
             description=(
-                "Транспортные накладные и УПД: таблично-ориентированная "
-                "OCR + извлечение структурированных полей (номер, дата, "
-                "грузоотправитель/получатель, груз, ТС, водитель, приём). "
-                "Excel + лог формируются парсером ``src.tn_parser`` "
-                "при включённом ``extract.enabled``."
+                "Минимальная предобработка для чистых сканов / digital-"
+                "экспортов / уже OCR'нутых PDF. Только deskew + OTSU. "
+                "Без Sauvola / CLAHE / denoise / border removal — "
+                "сохраняет мелкий шрифт и слабые штрихи. Выгоднее "
+                "universal_accurate когда на входе high-contrast скан."
             ),
             preprocess=preprocess,
             ocr=ocr,
@@ -755,31 +605,4 @@ class ProfileManager:
             extract=extract,
         )
 
-    def _build_english_text(self) -> ProfileData:
-        """Clean English documents: light preprocessing, eng language only."""
-        preprocess = PreprocessConfig(
-            auto_rotate=AutoRotateConfig(enabled=True, min_confidence=1.0),
-            deskew=DeskewConfig(enabled=True, auto_detect=True),
-            dewarp=DewarpConfig(enabled=False),
-            binarization=BinarizationConfig(method=BinarizationMethod.OTSU),
-            denoise=DenoiseConfig(enabled=False),
-            contrast=ContrastConfig(clahe_enabled=True, clahe_clip=2.0),
-            background=BackgroundConfig(enabled=False),
-        )
-        ocr = OCRConfig(
-            languages=["eng"],
-            primary_language="eng",
-            psm=PSM.AUTO,
-            oem=OEM.LSTM_ONLY,
-            dpi=300,
-            optimize_level=OptimizeLevel.LOSSLESS,
-            extra_tesseract_params=dict(_COMMON_TESSERACT_PARAMS),
-        )
-        return ProfileData(
-            name="english_text",
-            description="English documents with clean layout (eng, OTSU, light CLAHE)",
-            preprocess=preprocess,
-            ocr=ocr,
-            postprocess=PostprocessConfig(),
-        )
 

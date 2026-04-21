@@ -1034,8 +1034,11 @@ jobs:
           # ``open`` the input PDF, and sits waiting for user input
           # until the workflow step times out.
           #
-          # Uses ``quick_reliable`` (300 DPI, minimal preprocess) so
-          # the smoke-test wall time stays well under ~2 min.
+          # Uses ``universal_accurate`` — единственный builtin после
+          # консолидации декабря 2026 (quick_reliable / default /
+          # low_quality_scan и др. удалены; см. profile_manager).
+          # На SMOKE-входе (1-page English text @ 100 DPI) даже
+          # heavy-preprocessing профиль завершается за < 30 с.
           Write-Host "Running OCR via installed CLI..."
           $sw = [System.Diagnostics.Stopwatch]::StartNew()
           $proc = Start-Process -FilePath $cli `
@@ -1043,7 +1046,7 @@ jobs:
                 "--cli",
                 $smokeIn,
                 "-o", $smokeOut,
-                "--profile", "quick_reliable",
+                "--profile", "universal_accurate",
                 "--workers", "1"
               ) `
               -NoNewWindow -PassThru -Wait `
@@ -1108,7 +1111,15 @@ jobs:
       # Tesseract / Ghostscript regression.
       - name: Smoke-test the parser (tn_upd profile → Excel)
         shell: pwsh
-        timeout-minutes: 10
+        # 25 минут — универсальный профиль с extract.kind=tn_upd
+        # прогоняет уже OCR'нутый ТН через text-layer bypass +
+        # полный парсер (ORG-catalog lookup, fuzzy-нормализация,
+        # multi-row voting, auto-learn). На 8-страничном UPD_36
+        # это ~3-5 мин в среднем, но Windows-CI runner медленнее
+        # локального ПК, и installer-смоук запускается ПОСЛЕ
+        # двух других OCR-смоуков, которые уже прогрели диск и
+        # sometimes share CPU time. Старые 10 мин впритык.
+        timeout-minutes: 25
         run: |
           $ErrorActionPreference = "Stop"
           $installDir = "${{ github.workspace }}\smoke_install"
@@ -1123,10 +1134,19 @@ jobs:
             throw "Installed binary not found — previous smoke step should have established it"
           }
 
-          $tnPdf = "${{ github.workspace }}\TN_k_UPD_36_ot_02.09.2022 ocred.pdf"
-          if (-not (Test-Path $tnPdf)) {
-            throw "Parser smoke input missing: $tnPdf (committed at repo root in PR #1)"
+          $tnPdfOriginal = "${{ github.workspace }}\TN_k_UPD_36_ot_02.09.2022 ocred.pdf"
+          if (-not (Test-Path $tnPdfOriginal)) {
+            throw "Parser smoke input missing: $tnPdfOriginal (committed at repo root in PR #1)"
           }
+          # Имя файла содержит ПРОБЕЛ (« ocred.pdf»). PowerShell
+          # Start-Process -ArgumentList склеивает элементы массива
+          # в единую command-line строку через пробел, и cli'шке
+          # прилетает путь в виде ДВУХ argv'ов: «….2022» и
+          # «ocred.pdf». Копируем в RUNNER_TEMP под именем без
+          # пробелов — unambiguous argv.
+          $tnPdf = Join-Path $env:RUNNER_TEMP "tn_upd_36_ocred.pdf"
+          Copy-Item -Force -LiteralPath $tnPdfOriginal -Destination $tnPdf
+          Write-Host "Copied parser-smoke input → $tnPdf"
 
           $xlsx = Join-Path $env:RUNNER_TEMP "parser-smoke.xlsx"
           $outPdf = Join-Path $env:RUNNER_TEMP "parser-smoke-out.pdf"
@@ -1135,27 +1155,26 @@ jobs:
           $logPath = [System.IO.Path]::ChangeExtension($xlsx, ".log")
           if (Test-Path $logPath) { Remove-Item $logPath -Force }
 
-          Write-Host "Running tn_upd + Excel export via installed CLI..."
+          Write-Host "Running universal_accurate + Excel export via installed CLI..."
           $sw = [System.Diagnostics.Stopwatch]::StartNew()
-          # ``--profile tn_upd`` activates ``extract.enabled=True`` in
-          # the bundled profile (PR #2). ``--excel`` tells the CLI to
-          # delegate to ExportManager.export_excel, which in turn
-          # calls tn_parser.excel.write_excel_safe — the same code
-          # path GUI export uses. The xlsx path is derived from ``-o``
-          # by swapping the ``.pdf`` suffix for ``.xlsx``. Two sidecars
-          # appear next to it:
+          # ``--profile universal_accurate`` — единственный builtin
+          # после декабрьской 2026 консолидации. extract.enabled=True
+          # и extract.kind=tn_upd слиты в него (см. profile_manager).
+          # ``--excel`` делегирует в ExportManager.export_excel →
+          # tn_parser.excel.write_excel_safe. Xlsx path выводится
+          # из ``-o`` заменой .pdf → .xlsx. Рядом создаются
+          # sidecar'ы:
           #   * ``<stem>.log``               — human-readable report
           #   * ``<stem>.xlsx.snapshot.json`` — feedback-loop snapshot
           #
-          # We pass --workers 1 to keep the smoke deterministic and
-          # to sidestep ProcessPool-on-Windows quirks that don't
-          # belong in a pipeline-verification test.
+          # --workers 1: детерминистично и без ProcessPool-Windows
+          # quirks, чужды pipeline-verification тесту.
           $proc = Start-Process -FilePath $cli `
               -ArgumentList @(
                 "--cli",
                 $tnPdf,
                 "-o", $outPdf,
-                "--profile", "tn_upd",
+                "--profile", "universal_accurate",
                 "--excel",
                 "--workers", "1"
               ) `
@@ -1220,6 +1239,15 @@ jobs:
           # that the orchestrator's graceful-degrade would otherwise
           # hide from this smoke (by design — the pipeline must not
           # fail a job when only the optional parser is broken).
+          #
+          # Важный принцип: проверяем ТОЛЬКО top-level-пакеты (rapidfuzz,
+          # openpyxl) которые PyInstaller гарантированно кладёт
+          # директорией в ``_internal\``. Subpackages ``src.*`` и
+          # ``scripts.*`` PyInstaller архивирует в PYZ / ``base_library.
+          # zip`` — disk-probe их НЕ НАЙДЁТ. Для них стронгер-тест —
+          # фактический успешный прогон installed CLI выше (xlsx + log +
+          # snapshot sidecars созданы → значит ``src.tn_parser.excel`` и
+          # ``src.tn_parser.report`` импортировались и исполнились).
           Write-Host "Verifying parser artefacts on disk..."
           $parserChecks = @(
             # rapidfuzz C-ext: at least one .pyd under the rapidfuzz/
@@ -1237,19 +1265,8 @@ jobs:
               Type = "dir"
             },
             @{
-              Name = "src.tn_parser package"
-              Pattern = "src\tn_parser"
-              Type = "dir"
-              Verify = { param($p) Test-Path (Join-Path $p "fields.py") }
-            },
-            @{
-              Name = "scripts.run_golden"
-              Pattern = "scripts\run_golden.py"
-              Type = "file"
-            },
-            @{
-              Name = "profiles/tn_upd.json"
-              Pattern = "profiles\tn_upd.json"
+              Name = "profiles/universal_accurate.json"
+              Pattern = "profiles\universal_accurate.json"
               Type = "file"
             }
           )

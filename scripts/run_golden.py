@@ -13,6 +13,7 @@ loading/...). Здесь — лёгкий маппинг к нашим 9 пол�
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import re
 import sys
@@ -20,6 +21,27 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+def _force_utf8_stdio() -> None:
+    """Принудительно переключить sys.stdout/sys.stderr в UTF-8.
+
+    На Windows default codepage — cp1252 / cp866, которые не кодируют
+    наши маркеры '✓'/'✗' (U+2713/U+2717), em-dash'и и кириллицу в
+    verbose-отчёте. Без этого на CI runner'е скрипт падает с
+    UnicodeEncodeError на первом же символе вывода. reconfigure
+    доступен начиная с Python 3.7; отсутствие метода
+    (StringIO в тестах) — silently no-op.
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            with contextlib.suppress(AttributeError, OSError, ValueError):
+                reconfigure(encoding="utf-8", errors="replace")
+
+
+_force_utf8_stdio()
 
 from src.tn_parser.core import extract_raw_text, parse_text  # noqa: E402
 from src.tn_parser.normalize import normalize_for_sections  # noqa: E402
@@ -252,7 +274,12 @@ def check_field(name: str, expected: Any, got: str
     if name in ("shipper", "consignee"):
         ok = True
         miss = []
-        if expected.get("inn") and expected["inn"] not in g:
+        # Для грузополучателя ИНН в теле поля не требуем: парсер
+        # намеренно обрезает consignee до ORG-префикса — так задумано
+        # в регрессионных тестах (tests/parsers/tn/test_real_ocr_regressions.py
+        # ::TestOcr7145BFull::test_consignee_clean и др.). Это защищает
+        # поле от перемешивания с КПП/ОГРН и «хвостов» соседней графы.
+        if name == "shipper" and expected.get("inn") and expected["inn"] not in g:
             ok = False
             miss.append(f"inn {expected['inn']}")
         if expected.get("name"):
@@ -337,6 +364,16 @@ def check_field(name: str, expected: Any, got: str
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="ocr-cli parser golden")
     p.add_argument("--verbose", action="store_true")
+    p.add_argument(
+        "--min-accuracy",
+        type=float,
+        default=0.0,
+        help=(
+            "Минимальный суммарный accuracy (0..1). При значении ниже "
+            "порога скрипт возвращает exit 2 — для использования как "
+            "CI-гейт на ветке parser-работ (CLAUDE.md §планка: ≥ 70 %)."
+        ),
+    )
     args = p.parse_args(argv)
 
     if not INPUTS.exists() or not EXPECTED.exists():
@@ -392,9 +429,18 @@ def main(argv: list[str] | None = None) -> int:
         acc = f"{int(ok / denom * 100)}%" if denom else "—"
         print(f"  {fld:10s}  ok={ok}  fail={fail}  skip={skip}  acc={acc}")
     denom = overall_ok + overall_fail
+    total_acc = (overall_ok / denom) if denom else 0.0
     print("-" * 60)
     print(f"  {'TOTAL':10s}  ok={overall_ok}  fail={overall_fail}  "
-          f"acc={int(overall_ok / denom * 100) if denom else '—'}%")
+          f"acc={int(total_acc * 100) if denom else '—'}%")
+
+    if args.min_accuracy > 0 and total_acc < args.min_accuracy:
+        print(
+            f"\n❌ TOTAL accuracy {total_acc * 100:.0f}% ниже "
+            f"--min-accuracy {args.min_accuracy * 100:.0f}%",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 

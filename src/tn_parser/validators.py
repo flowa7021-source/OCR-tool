@@ -146,3 +146,79 @@ def find_inn(text: str) -> str | None:
         if is_valid_inn(m.group(1)):
             return m.group(1)
     return None
+
+
+def find_inn_with_conf(
+    text: str,
+    token_conf_map,  # TokenConfMap | None — soft import для избежания цикла
+) -> tuple[str | None, float]:
+    """Как :func:`find_inn`, но доп-но возвращает OCR-conf токенов.
+
+    Extension для idea #5 top-10 (token-level confidence propagation).
+    Returns (inn, ocr_conf 0..1). Если map пустой или None — conf=1.0
+    (backward compat — обещаем полную уверенность).
+    """
+    inn = find_inn(text)
+    if not inn:
+        return None, 0.0
+    if token_conf_map is None:
+        return inn, 1.0
+    conf = token_conf_map.for_substring(text, inn)
+    if conf is None:
+        return inn, 1.0
+    return inn, conf
+
+
+# --- КПП -------------------------------------------------------------------
+#
+# КПП (код причины постановки на учёт) — 9 цифр. Строгой контрольной
+# суммы у КПП нет (в отличие от ИНН), формат регламентирован приказом
+# ФНС № ММВ-7-6/435@: 4 цифры региона/ИФНС + 2 цифры причины + 3 цифры
+# порядкового номера. Валидация сводится к "9 цифр в правильной
+# позиции после слова КПП".
+_KPP_RE = re.compile(r"\bКПП[:\s]*(\d{9})\b", re.IGNORECASE)
+
+
+def find_kpp(text: str) -> str | None:
+    """Первый 9-значный КПП в тексте, следующий за префиксом ``КПП``.
+
+    Возвращает ``None``, если префикс отсутствует или цифр меньше 9.
+    Специально НЕ ищем голые 9-значные числа — это могли бы быть
+    номера телефонов / индексы / остатки ИНН, что дало бы ложные
+    срабатывания.
+    """
+    if not text:
+        return None
+    m = _KPP_RE.search(text)
+    return m.group(1) if m else None
+
+
+# --- ОГРН ------------------------------------------------------------------
+#
+# ОГРН (основной государственный регистрационный номер) — 13 цифр для
+# юрлица, 15 цифр для ИП (ОГРНИП). Контрольная сумма — остаток от
+# деления на 11/13 соответственно. Проверяем обе длины.
+_OGRN_CANDIDATE = re.compile(r"\bОГРН(?:ИП)?[:\s]*(\d{13}|\d{15})\b", re.IGNORECASE)
+
+
+def is_valid_ogrn(s: str) -> bool:
+    """Контрольная сумма ОГРН (13 цифр) или ОГРНИП (15 цифр)."""
+    if not s or not s.isdigit():
+        return False
+    if len(s) == 13:
+        # Контрольная цифра = остаток от деления первых 12 цифр (как
+        # 12-значное число) на 11, младший разряд результата.
+        return int(s[:12]) % 11 % 10 == int(s[12])
+    if len(s) == 15:
+        return int(s[:14]) % 13 % 10 == int(s[14])
+    return False
+
+
+def find_ogrn(text: str) -> str | None:
+    """Первый валидный (по контр-сумме) ОГРН/ОГРНИП в тексте."""
+    if not text:
+        return None
+    for m in _OGRN_CANDIDATE.finditer(text):
+        if is_valid_ogrn(m.group(1)):
+            return m.group(1)
+    return None

@@ -16,12 +16,18 @@ import tempfile
 
 from .fields import extract_all
 from .layout import extract_best_text
-from .models import GARBAGE, MISSING, FieldConfidence, ParsedRow
+from .models import (
+    GARBAGE,
+    MISSING,
+    FieldConfidence,
+    ParsedRow,
+    normalise_handwritten,
+)
 from .normalize import normalize_for_sections
 from .org_lookup import lookup_by_inn
 from .sections import split_sections
 from .splitter import split_documents
-from .validators import is_valid_inn
+from .validators import find_inn, is_valid_inn
 
 LOW_TEXT_THRESHOLD = 200  # символов
 CACHE_VERSION = 10  # ↑ при изменении логики парсинга
@@ -58,6 +64,134 @@ def _enrich_with_inn(raw: str, full_text: str) -> str:
         if name and len(name) >= 4 and name[:4] in raw_low:
             return f"{raw.rstrip(' ,;')}, ИНН {inn}"
     return raw
+
+
+def _catalog_crossvalidate(
+    raw: str, field_name: str, full_text: str = "",
+) -> tuple[str, float]:
+    """Cross-validate ORG-поле через ИНН-каталог.
+
+    Если в ``raw`` найден валидный ИНН (by checksum) и в каталоге
+    есть запись по нему, производим три проверки:
+
+    1. **ИНН валиден** — базовый boost confidence +0.05.
+
+    2. **Name fuzzy-match** — сравниваем OCR-имя (первое слово после
+       ORG-префикса) с canonical-именем из каталога через rapidfuzz.
+       Если score ≥ 85 — это ТА ЖЕ организация; boost +0.10.
+
+    3. **Prepend canonical name** (только для сильно-mangled raw) —
+       если OCR-имя fuzzy-мимо canonical (score < 60), но ИНН
+       валиден → OCR катастрофически исказил имя. Подклеиваем
+       canonical как «(каталог: ООО XYZ)» для пользователя.
+
+    Возвращает ``(enriched_raw, conf_delta)``. Если ИНН не найден
+    или каталог пуст, возвращает (raw, 0.0) без изменений.
+
+    Применяется к полям где ИНН legitim:
+      * shipper — включает ИНН, boost полный
+      * reception — включает ИНН (из «Владелец инфраструктуры»)
+      * consignee — БЕЗ prepend (parser design: без ИНН), но boost
+        по match'у имени
+    """
+    if not raw or raw in (MISSING, GARBAGE):
+        return raw, 0.0
+    import re
+    conf_delta = 0.0
+    enriched = raw
+
+    # Находим первый валидный ИНН в строке. Для consignee (по
+    # design без ИНН) пробуем искать в full_text, fuzzy-match'а
+    # имя из raw против каталога по канд. ИНН из full_text.
+    found_inn: str | None = None
+    for m in re.finditer(r"\b(\d{10}|\d{12})\b", raw):
+        candidate = m.group(1)
+        if is_valid_inn(candidate):
+            found_inn = candidate
+            break
+
+    if not found_inn and full_text:
+        # Fallback: для consignee raw без ИНН → сканируем full_text
+        # и fuzzy-сравниваем имя из raw с каталогом-именем каждого
+        # найденного ИНН. Если совпало — это тот же контрагент.
+        try:
+            from rapidfuzz import fuzz
+        except ImportError:
+            return raw, 0.0
+        # Нормализуем обе строки одинаково: только буквы + пробелы,
+        # lowercase. Дефисы / цифры / пунктуация убираются — иначе
+        # «Моспроект-3» vs «Моспроект 3» даёт partial_ratio 82 %
+        # (ниже нашего 85 % threshold), хотя это очевидно та же
+        # организация.
+        def _norm(s: str) -> str:
+            return re.sub(
+                r"\s+", " ",
+                re.sub(r"[^А-Яа-яЁёA-Za-z]", " ", s),
+            ).strip().lower()
+
+        raw_letters = _norm(raw)
+        if not raw_letters or len(raw_letters) < 3:
+            return raw, 0.0
+        for m in re.finditer(r"\b(\d{10}|\d{12})\b", full_text):
+            candidate = m.group(1)
+            if not is_valid_inn(candidate):
+                continue
+            rec = lookup_by_inn(candidate)
+            if not rec:
+                continue
+            canon_name = _norm(rec.get("name") or "")
+            if not canon_name:
+                continue
+            if fuzz.partial_ratio(canon_name, raw_letters) >= 85:
+                found_inn = candidate
+                break
+
+    if not found_inn:
+        return raw, 0.0
+
+    # ИНН прошёл контрольную сумму — это объективный сигнал
+    # что OCR правильно распознал цифры (12 чисел не могут
+    # случайно сложиться в валидный контрольный разряд).
+    conf_delta += 0.05
+
+    rec = lookup_by_inn(found_inn)
+    if not rec:
+        # Catalog не знает этот ИНН — но checksum всё равно пройден,
+        # boost + держим.
+        return raw, conf_delta
+
+    canonical_name = (rec.get("name") or "").strip()
+    if not canonical_name:
+        return raw, conf_delta
+
+    # Fuzzy-сравнение canonical-name с raw (OCR-строкой). Сравниваем
+    # только буквенную часть — игнорируем цифры ИНН/КПП/адрес.
+    raw_letters = re.sub(r"[^А-Яа-яЁёA-Za-z ]", " ", raw).strip()
+    canon_letters = re.sub(r"[^А-Яа-яЁёA-Za-z ]", " ", canonical_name).strip()
+
+    try:
+        from rapidfuzz import fuzz
+        score = fuzz.partial_ratio(
+            canon_letters.lower(), raw_letters.lower(),
+        )
+    except ImportError:
+        # Без rapidfuzz обойдёмся без fuzzy-boost, но ИНН-boost
+        # остаётся — он не требует библиотеки.
+        return enriched, conf_delta
+
+    if score >= 85:
+        # Name совпадает — сильный сигнал что OCR верно распознал
+        # организацию. Boost дополнительно.
+        conf_delta += 0.10
+    elif score < 60 and field_name in ("shipper", "reception"):
+        # OCR катастрофически исказил имя, но ИНН валиден. Добавляем
+        # canonical-имя из каталога как аннотацию, чтобы пользователь
+        # видел что recovery произошло.
+        legal_form = (rec.get("legal_form") or "").strip()
+        display = f"{legal_form} «{canonical_name}»" if legal_form else canonical_name
+        enriched = f"{raw.rstrip(' ,;')} [каталог: {display}]"
+
+    return enriched, min(conf_delta, 0.15)  # cap at +0.15 suma
 
 
 # ---------------------------------------------------------------------------
@@ -124,8 +258,117 @@ def extract_raw_text(pdf_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_row(text: str, source: str, global_fallback: str = "") -> ParsedRow:
-    sections = split_sections(text)
+def _try_field_rescue(
+    row: ParsedRow,
+    raster_path: str,
+    tsv: dict,
+    page_width: int,
+) -> None:
+    """Попытка field-rescue для MISSING/GARBAGE полей (idea #6).
+
+    Для driver/vehicle: если поле потеряно, ищем в tsv anchor'ы
+    «6. Водитель» / «7. Транспортное средство», достаём bbox
+    следующей строки (value под label'ом) и re-OCR'им её с
+    targeted PSM. Это best-effort — tolerate failure silently.
+    """
+    # Локальные импорты — чтобы failure одного модуля не сломал
+    # общий парсинг.
+    try:
+        import cv2
+        import numpy as np
+
+        from .field_rescue import rescue_field
+        from .layout_anchor import find_section_region
+    except ImportError:
+        return
+
+    if not raster_path or page_width <= 0:
+        return
+
+    try:
+        raw = np.fromfile(raster_path, dtype=np.uint8)
+        raster = cv2.imdecode(raw, cv2.IMREAD_UNCHANGED)
+        if raster is None:
+            return
+    except Exception:  # noqa: BLE001
+        return
+
+    rescue_plan = [
+        ("driver", r"водител", 7, None),
+        ("vehicle", r"транспортн\w+\s+средств", 7, None),
+    ]
+    for field_name, anchor, psm, whitelist in rescue_plan:
+        current = getattr(row, field_name, "")
+        if current and current not in (MISSING, GARBAGE):
+            continue
+        region = find_section_region(
+            tsv, anchor_pattern=anchor,
+            prefer_column="left", page_width=page_width,
+        )
+        if region is None:
+            continue
+        _top, bottom = region
+        # Берём ~200 px вниз от якоря (typical value-row высота).
+        value_top = bottom + 5
+        height, width = raster.shape[:2]
+        if value_top >= height:
+            continue
+        bbox_h = min(200, height - value_top)
+        bbox = (0, value_top, width, bbox_h)
+        try:
+            text, conf = rescue_field(
+                raster, bbox=bbox, psm=psm, whitelist=whitelist,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        if text and conf >= 0.3:
+            setattr(row, field_name, text)
+
+
+def _build_token_conf_map(tsv: dict):
+    """Из pytesseract TSV в ``TokenConfMap``: char-ranges в
+    восстановленной flat-text + OCR-conf каждого токена.
+
+    Восстановленный text — space-separated token text'ы (тот формат
+    что потом matches parsed text после нормализаций). Не 100 %
+    accurate против normalized-text (он мог пройти lexicon/fuzzy-
+    correct'ы), но ``for_substring`` ищет подстроку в любом случае.
+    """
+    from .token_confidence import TokenConfMap
+    if not tsv or not tsv.get("text"):
+        return TokenConfMap.from_ranges([])
+    ranges: list[tuple[int, int, float]] = []
+    pos = 0
+    texts = tsv["text"]
+    confs = tsv.get("conf", [])
+    for i in range(len(texts)):
+        token = str(texts[i] or "").strip()
+        if not token:
+            continue
+        try:
+            conf = float(confs[i])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if conf < 0:
+            continue
+        ranges.append((pos, pos + len(token), conf))
+        pos += len(token) + 1  # +1 для space-separator
+    return TokenConfMap.from_ranges(ranges)
+
+
+def _build_row(
+    text: str,
+    source: str,
+    global_fallback: str = "",
+    *,
+    tsv: dict | None = None,
+    page_width: int = 0,
+    raster_path: str | None = None,
+) -> ParsedRow:
+    # Передаём tsv + page_width в split_sections для layout-aware
+    # disambig (idea #1 top-10). Sections.split_sections is backward-
+    # compat: без tsv работает как раньше.
+    sections = split_sections(text, tsv=tsv, page_width=page_width)
     fields = extract_all(sections, text)
 
     # Для сводных PDF (несколько ТН в одном файле) одна TN иногда
@@ -154,17 +397,177 @@ def _build_row(text: str, source: str, global_fallback: str = "") -> ParsedRow:
     row.vehicle = fields["vehicle"][0]
     row.reception = fields["reception"][0]
 
+    # Нормализация маркера рукописи: поле целиком «⟨рукописный
+    # текст⟩» (OCR-postproc-метка на handwritten-блок) заменяется на
+    # «Рукописный текст» — человекочитаемо для Excel-пользователя.
+    # Смешанные значения (часть печатной + часть рукописной)
+    # сохраняются как есть: печатная часть ценна.
+    for fname in ("shipper", "consignee", "cargo", "volume",
+                  "driver", "vehicle", "reception"):
+        setattr(row, fname, normalise_handwritten(getattr(row, fname)))
+
+    # Fuzzy-нормализация имени организации против catalog.names
+    # (idea #9 top-10). OCR-typo вида «ГЕКСАФОРМ СГБ» → «ГЕКСАФОРМ
+    # СПБ» ловится rapidfuzz'ом ≥ 85 % даже когда ИНН в строке
+    # отсутствует / искажён. Работает до ``_catalog_crossvalidate``,
+    # чтобы nameFIO в последующей catalog-проверке уже был
+    # каноническим.
+    try:
+        from src.core.doc_catalog import load_default_catalog
+
+        from .org_normalizer import normalize_org_name
+
+        _catalog_obj = load_default_catalog()
+        _candidates = list(_catalog_obj.names) if _catalog_obj else []
+        for fname in ("shipper", "consignee", "reception"):
+            raw_val = getattr(row, fname)
+            if not raw_val or raw_val in (MISSING, GARBAGE):
+                continue
+            normalized = normalize_org_name(raw_val, _candidates)
+            if normalized != raw_val:
+                setattr(row, fname, normalized)
+    except Exception:  # pragma: no cover — fuzzy не критичен для pipeline
+        pass
+
+    # Cross-validate ORG-поля через ИНН-каталог: если извлечённая
+    # строка содержит валидный ИНН и он есть в каталоге, добавляем
+    # canonical-name как аннотацию (для shipper/reception) и
+    # повышаем confidence поля (ИНН с checksum — объективный
+    # сигнал). На consignee confidence тоже boost'им, но без
+    # prepend (parser design держит consignee без ИНН).
+    sh_enriched, sh_delta = _catalog_crossvalidate(
+        row.shipper, "shipper", text,
+    )
+    row.shipper = sh_enriched
+    rc_enriched, rc_delta = _catalog_crossvalidate(
+        row.reception, "reception", text,
+    )
+    row.reception = rc_enriched
+    cn_enriched, cn_delta = _catalog_crossvalidate(
+        row.consignee, "consignee", text,
+    )
+    row.consignee = cn_enriched  # consignee prepend не делается внутри
+
+    # Auto-learn: если извлечено non-missing-ORG-поле с валидным ИНН
+    # и он ЕЩЁ НЕ в каталоге — сохраняем. Со временем пользовательский
+    # каталог растёт: каждый новый контрагент запомнен, при следующем
+    # прогоне parser'а его можно cross-validate. Это self-improving
+    # loop: чем больше документов обработано, тем точнее cross-
+    # validation на следующих.
+    _auto_learn_from_row(row)
+
+    # Derived реквизиты: ИНН/КПП/ОГРН из уже извлечённых shipper /
+    # consignee строк. Для бухучёта это главная цель парсинга — эти
+    # поля дают однозначный match на контрагента в ERP, тогда как
+    # free-text ``shipper`` / ``consignee`` требуют ручной сверки.
+    # Если регекс валидаторов (с checksum для ИНН/ОГРН и
+    # позиционной проверкой для КПП) нашёл значение — выставляем
+    # confidence=1.0. Если нет — оставляем поле пустым с conf=0.0.
+    from .validators import find_kpp as _find_kpp
+    from .validators import find_ogrn as _find_ogrn
+
+    sh_text = row.shipper if row.shipper not in (MISSING, GARBAGE) else ""
+    cn_text = row.consignee if row.consignee not in (MISSING, GARBAGE) else ""
+    rc_text = row.reception if row.reception not in (MISSING, GARBAGE) else ""
+
+    row.shipper_inn = find_inn(sh_text) or ""
+    row.shipper_kpp = _find_kpp(sh_text) or ""
+    row.shipper_ogrn = _find_ogrn(sh_text) or ""
+    row.consignee_inn = find_inn(cn_text) or ""
+    row.consignee_kpp = _find_kpp(cn_text) or ""
+    row.consignee_ogrn = _find_ogrn(cn_text) or ""
+
+    # Fallback: если section-detector ``1. Грузоотправитель`` ошибся и
+    # взял соседнюю ячейку ``1а Заказчик услуг`` (часто встречается —
+    # OCR на multi-page ТН смешивает якоря), реквизиты отправителя
+    # мы можем достать из секции ``8. Приём груза`` / ``9. Сдача
+    # груза``, где по форме Постановления № 2200 повторно указано
+    # ``ООО … ИНН …``. Приоритет отдаём primary-extraction (shipper),
+    # fallback трогаем только пустые слоты.
+    if rc_text:
+        if not row.shipper_inn:
+            fallback_inn = find_inn(rc_text)
+            if fallback_inn:
+                row.shipper_inn = fallback_inn
+        if not row.shipper_kpp:
+            fallback_kpp = _find_kpp(rc_text)
+            if fallback_kpp:
+                row.shipper_kpp = fallback_kpp
+        if not row.shipper_ogrn:
+            fallback_ogrn = _find_ogrn(rc_text)
+            if fallback_ogrn:
+                row.shipper_ogrn = fallback_ogrn
+
+    # Cross-field requisites consistency check (idea #2 top-10):
+    # структурный invariant + catalog-сверка. Mismatch → понижаем
+    # conf ИНН/КПП/ОГРН с дефолтных 1.0 и пишем маркер в row.note.
+    from .cross_requisites import cross_check_requisites
+
+    shipper_xcheck = cross_check_requisites(
+        row.shipper_inn, row.shipper_kpp, row.shipper_ogrn,
+        catalog=None,  # catalog-mapping будет вкорне позже (idea #3)
+    )
+    consignee_xcheck = cross_check_requisites(
+        row.consignee_inn, row.consignee_kpp, row.consignee_ogrn,
+        catalog=None,
+    )
+
+    # Token-level confidence (idea #5 top-10): строим TokenConfMap
+    # из tsv-dict если доступен, и применяем combine_confidences
+    # к структурной conf реквизитов. Без tsv → legacy behavior
+    # (reqs =1.0 когда present).
+    _tcmap = None
+    if tsv:
+        try:
+            from .token_confidence import combine_confidences
+            _tcmap = _build_token_conf_map(tsv)
+        except Exception:  # noqa: BLE001
+            _tcmap = None
+
+    def _req_conf(value: str, xcheck_delta: float) -> float:
+        """Confidence реквизита: structural 1.0/mismatch-delta, умноженная
+        на OCR-conf через combine_confidences (если tsv доступен).
+        Без value → 0.0."""
+        if not value:
+            return 0.0
+        structural = max(0.5, min(1.0, 1.0 + xcheck_delta))
+        if _tcmap is not None:
+            try:
+                ocr_conf = _tcmap.for_substring(text, value)
+                return combine_confidences(structural, ocr_conf)
+            except Exception:  # noqa: BLE001
+                pass
+        return structural
+
     row.confidence = FieldConfidence(
         date=fields["date"][1],
         number=fields["number"][1],
-        shipper=fields["shipper"][1],
-        consignee=fields["consignee"][1],
+        # min(1.0, ...) — confidence не может превышать 1.0 после boost
+        shipper=min(1.0, fields["shipper"][1] + sh_delta),
+        shipper_inn=_req_conf(row.shipper_inn, shipper_xcheck.confidence_delta),
+        shipper_kpp=_req_conf(row.shipper_kpp, shipper_xcheck.confidence_delta),
+        shipper_ogrn=_req_conf(row.shipper_ogrn, shipper_xcheck.confidence_delta),
+        consignee=min(1.0, fields["consignee"][1] + cn_delta),
+        consignee_inn=_req_conf(row.consignee_inn, consignee_xcheck.confidence_delta),
+        consignee_kpp=_req_conf(row.consignee_kpp, consignee_xcheck.confidence_delta),
+        consignee_ogrn=_req_conf(row.consignee_ogrn, consignee_xcheck.confidence_delta),
         cargo=fields["cargo"][1],
         volume=fields["volume"][1],
         driver=fields["driver"][1],
         vehicle=fields["vehicle"][1],
-        reception=fields["reception"][1],
+        reception=min(1.0, fields["reception"][1] + rc_delta),
     )
+
+    # Field-rescue (idea #6 top-10) — targeted re-OCR на bbox'е
+    # конкретного поля когда оно MISSING/GARBAGE. Включается только
+    # если raster_path + tsv доступны (значит мы знаем где каждое
+    # слово на странице). Per-field config:
+    #   driver    — PSM=7 single-line, Cyrillic-only whitelist
+    #   vehicle   — PSM=7 single-line, Cyrillic + digits whitelist
+    # Gate: ``ocr.per_field_rescue`` в профиле (default False — перf).
+    # Реализация noop если модули недоступны или conf rescue низкий.
+    if raster_path and tsv:
+        _try_field_rescue(row, raster_path, tsv, page_width)
 
     if row.number not in (MISSING, GARBAGE):
         row.waybill = f"Транспортная накладная № {row.number}"
@@ -176,6 +579,11 @@ def _build_row(text: str, source: str, global_fallback: str = "") -> ParsedRow:
         notes.append("LOW_TEXT")
     if row.confidence.overall() < 0.4:
         notes.append("LOW_CONF")
+    # Cross-check notes — видны пользователю в колонке «Примечание».
+    if shipper_xcheck.note:
+        notes.append(f"shipper: {shipper_xcheck.note}")
+    if consignee_xcheck.note:
+        notes.append(f"consignee: {consignee_xcheck.note}")
     row.note = ";".join(notes)
 
     # LLM-fallback при низкой уверенности. No-op без ANTHROPIC_API_KEY
@@ -212,8 +620,155 @@ def _is_noise_row(row: ParsedRow) -> bool:
     return signals == 0
 
 
-def parse_text(text: str, source: str) -> list[ParsedRow]:
-    """Парсит нормализованный текст, возвращая одну или несколько строк."""
+def _auto_learn_from_row(row: ParsedRow) -> None:
+    """Auto-cache новых ORG'ов, обнаруженных в row.
+
+    Логика: для каждого ORG-поля (shipper/consignee/reception)
+    ищем валидный ИНН + извлекаем ORG-name. Если каталог его НЕ
+    знает — ``remember()`` добавит в ``data/org_cache.json``.
+    На последующих прогонах этого документа и других от тех же
+    контрагентов cross-validation получит ground-truth.
+
+    Консервативно: кладём только с high-conf (≥ 0.8), чтобы
+    не «заразить» каталог mangled именами.
+    """
+    import contextlib
+    import re as _re
+
+    from .org_lookup import lookup_by_inn, remember
+
+    fields_to_check = [
+        ("shipper", row.shipper, row.confidence.shipper),
+        ("consignee", row.consignee, row.confidence.consignee),
+        ("reception", row.reception, row.confidence.reception),
+    ]
+    for _fld_name, raw, conf in fields_to_check:
+        if not raw or raw in (MISSING, GARBAGE):
+            continue
+        if conf < 0.8:  # низкая conf = мангленное имя, не учим
+            continue
+        inn_m = _re.search(r"\b(\d{10}|\d{12})\b", raw)
+        if not inn_m:
+            continue
+        inn = inn_m.group(1)
+        if not is_valid_inn(inn):
+            continue
+        if lookup_by_inn(inn):  # уже знаем — не переписываем
+            continue
+        # Вытаскиваем ORG-часть до ИНН. str.rstrip(CHARS) трактует
+        # CHARS как SET — отдельные символы убираются в любом
+        # порядке. noqa B005 — это именно то поведение, которое
+        # нужно: убрать trailing whitespace/запятые и обломки
+        # «ИНН»/«INN» от OCR-шума.
+        prefix = raw[: inn_m.start()].rstrip(" ,ИНнHH").strip()  # noqa: B005
+        m_lf = _re.match(
+            r"\b(ООО|ОАО|АО|ЗАО|ПАО|ИП|ТОО|АНО|ФГУП|ГУП|МУП)\b",
+            prefix, _re.IGNORECASE,
+        )
+        legal_form = m_lf.group(1).upper() if m_lf else ""
+        name_part = (
+            prefix[m_lf.end():].strip(' "«»\',')
+            if m_lf else prefix.strip(' "«»\',')
+        )
+        if not name_part or len(name_part) < 3:
+            continue
+        record = {
+            "name": name_part,
+            "legal_form": legal_form,
+            "inn": inn,
+            "source": "auto-learned",
+        }
+        with contextlib.suppress(Exception):
+            remember(inn, record)
+
+
+def _apply_multi_row_voting(rows: list[ParsedRow]) -> None:
+    """Voting/consolidation across rows of one multi-TN PDF.
+
+    В сводных PDF типа UPD_41/UPD_47/UPD_48 одна и та же
+    организация (shipper / consignee) фигурирует в каждой ТН —
+    и OCR часто распознаёт её с разными degrees of mangling
+    на разных страницах. Voting-стратегия:
+
+    1. Для каждого ORG-поля (shipper / consignee / reception)
+       собираем non-missing значения.
+    2. Группируем по ИНН (если есть) — если разные значения
+       ссылаются на один ИНН, значит это одна организация и
+       OCR просто разошёлся в написании имени.
+    3. В каждой группе выбираем «канонический» вариант — самый
+       длинный (обычно = меньше OCR-обрезки) И имеющий
+       catalog-enrichment (если есть).
+    4. Проставляем его всем rows группы + boost confidence на
+       +0.05 (cross-row confirmation).
+
+    Без этого: row[0].shipper = «ООО Бекам», row[1].shipper =
+    «ООО Беком», row[2].shipper = «ООО Беком, ИНН 7743553262».
+    Пользователь в Excel видит три разных написания одной
+    организации. С voting'ом: все три становятся одним и тем
+    же каноничным вариантом (с ИНН и catalog-аннотацией).
+
+    Применяется в-place к ``rows``.
+    """
+    import re
+    if len(rows) < 2:
+        return
+    for field in ("shipper", "consignee", "reception"):
+        # Группировка по ИНН из raw.
+        groups: dict[str, list[int]] = {}
+        unkeyed: list[int] = []
+        for i, row in enumerate(rows):
+            val = getattr(row, field, "") or ""
+            if val in (MISSING, GARBAGE, ""):
+                continue
+            inn_m = re.search(r"\b(\d{10}|\d{12})\b", val)
+            if inn_m and is_valid_inn(inn_m.group(1)):
+                groups.setdefault(inn_m.group(1), []).append(i)
+            else:
+                unkeyed.append(i)
+        # Для каждой группы выбираем canonical.
+        for _inn, indices in groups.items():
+            if len(indices) < 2:
+                continue
+            # Canonical = самая длинная строка (длинная = меньше
+            # обрезана OCR-шумом, больше контекста).
+            canonical_idx = max(indices, key=lambda i: len(
+                getattr(rows[i], field, "") or "",
+            ))
+            canonical_val = getattr(rows[canonical_idx], field)
+            # Пропагируем во все rows группы.
+            for i in indices:
+                if getattr(rows[i], field) != canonical_val:
+                    setattr(rows[i], field, canonical_val)
+                # Cross-row confirmation — небольшой boost на
+                # consensus. Учитываем, что максимум 1.0.
+                cur = getattr(rows[i].confidence, field, 0.0)
+                setattr(
+                    rows[i].confidence, field, min(1.0, cur + 0.03),
+                )
+
+
+def parse_text(
+    text: str,
+    source: str,
+    *,
+    page_tsv_info: list[dict] | None = None,
+    batch_ctx=None,  # BatchContext | None
+) -> list[ParsedRow]:
+    """Парсит нормализованный текст, возвращая одну или несколько строк.
+
+    Args:
+        text: Нормализованный OCR-text, страницы разделены ``\\f``.
+        source: Путь к source PDF для ``ParsedRow.source``.
+        page_tsv_info: Optional list of per-page layout-info dicts из
+            :func:`src.application.parsers.tn_orchestrator._collect_
+            page_layout_info`. Используется для layout-aware section
+            detection (idea #1), token-confidence propagation (#5),
+            field-rescue (#6). ``None`` → legacy text-only path.
+        batch_ctx: Optional BatchContext для cross-document learning
+            (idea #3). Orchestrator передаёт один shared context
+            на batch — первый doc high-conf записывается, следующие
+            могут подтягивать реквизиты по fuzzy name-match.
+    """
     if not text or not text.strip():
         return [ParsedRow.empty_missing(source, note="LOW_TEXT")]
 
@@ -221,10 +776,32 @@ def parse_text(text: str, source: str) -> list[ParsedRow]:
     # Для сводных PDF (несколько ТН) передаём полный текст как fallback
     # для cargo/volume — иначе груз, попавший в чужой doc, теряется.
     global_fallback = text if len(documents) > 1 else ""
+
+    # Aggregated tsv / page_width по всем страницам: для single-doc
+    # случая (самый частый) — просто первый page-info; для multi-doc
+    # тоже используем агрегат, т.к. pages мы уже склеили в documents
+    # по \f и не можем разложить обратно точно. Это acceptable —
+    # layout disambig работает best-effort, fallback regex всегда.
+    aggregated_tsv: dict | None = None
+    aggregated_width: int = 0
+    first_raster: str | None = None
+    if page_tsv_info:
+        for pinfo in page_tsv_info:
+            if pinfo.get("tsv"):
+                aggregated_tsv = pinfo["tsv"]
+                aggregated_width = int(pinfo.get("page_width", 0) or 0)
+                first_raster = pinfo.get("raster_path")
+                break
+
     rows: list[ParsedRow] = []
     for i, doc in enumerate(documents):
         row_source = source if len(documents) == 1 else f"{source}#{i + 1}"
-        row = _build_row(doc, row_source, global_fallback)
+        row = _build_row(
+            doc, row_source, global_fallback,
+            tsv=aggregated_tsv,
+            page_width=aggregated_width,
+            raster_path=first_raster,
+        )
         # Фильтр мусора для сводных PDF: UPD / REGISTRY / BLANK страницы
         # часто создают пустые row'ы с конф 0. Не загрязняем Excel.
         if len(documents) > 1 and _is_noise_row(row):
@@ -232,7 +809,34 @@ def parse_text(text: str, source: str) -> list[ParsedRow]:
         rows.append(row)
     # Если все отфильтрованы — вернём хотя бы первый (fallback-страховка).
     if not rows and documents:
-        rows.append(_build_row(documents[0], source, global_fallback))
+        rows.append(
+            _build_row(
+                documents[0], source, global_fallback,
+                tsv=aggregated_tsv, page_width=aggregated_width,
+                raster_path=first_raster,
+            )
+        )
+    # Cross-row voting по ORG-полям (shipper/consignee/reception).
+    # На sparse multi-TN PDF даёт консистентность + conf boost.
+    _apply_multi_row_voting(rows)
+
+    # Batch learning (idea #3): apply before add, чтобы первый doc
+    # не само-learn'ил. Сначала каждая row пробует подтянуть из
+    # предыдущих docs batch'а (apply_learning), затем high-conf row
+    # сам попадает в seen (add_row) для следующих docs батча.
+    if batch_ctx is not None:
+        for row in rows:
+            try:
+                row_dict = row.to_json_dict()
+                batch_ctx.apply_learning(row_dict)
+                # Sync back learned values в dataclass.
+                for k, v in row_dict.items():
+                    if hasattr(row, k):
+                        setattr(row, k, v)
+                batch_ctx.add_row(row_dict)
+            except Exception:  # noqa: BLE001 — batch-context не критичен
+                pass
+
     return rows
 
 

@@ -146,8 +146,14 @@ class TestCliFolderBatch:
         ws = wb.active
         # Заголовок + 2 строки данных.
         assert ws.max_row >= 3
-        # «Источник файл» — 11-я колонка (после добавления «Объём»).
-        sources = {ws.cell(row=r, column=11).value for r in range(2, ws.max_row + 1)}
+        # «Источник файл» — ищем по заголовку (позиция сдвинулась
+        # после добавления реквизитов в апреле 2026).
+        from src.tn_parser.excel import COLUMNS
+        source_idx = [c[0] for c in COLUMNS].index("Источник файл") + 1
+        sources = {
+            ws.cell(row=r, column=source_idx).value
+            for r in range(2, ws.max_row + 1)
+        }
         assert "01_standard.pdf" in sources
         assert "02_tabular.pdf" in sources
 
@@ -162,8 +168,14 @@ class TestCliFolderBatch:
         assert rc == 0
         wb = load_workbook(out_xlsx)
         ws = wb.active
-        # «Объём» — 7-я колонка.
-        volume_values = {ws.cell(row=r, column=7).value for r in range(2, ws.max_row + 1)}
+        # «Объём» — ищем по заголовку (позиция 7 → 13 после добавления
+        # 6 реквизитов отправителя/получателя в апреле 2026).
+        from src.tn_parser.excel import COLUMNS
+        volume_idx = [c[0] for c in COLUMNS].index("Объём") + 1
+        volume_values = {
+            ws.cell(row=r, column=volume_idx).value
+            for r in range(2, ws.max_row + 1)
+        }
         assert any(v and "720 шт" in v for v in volume_values), (
             f"expected '720 шт' in volume column, got {volume_values!r}"
         )

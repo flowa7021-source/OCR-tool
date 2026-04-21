@@ -192,6 +192,61 @@ class ImagePreprocessor:
         self._dewarp_handler = dewarp_handler or DewarpHandler()
 
     # ------------------------------------------------------------------
+    # Aggressive scan-cleanup auto-detection
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _detect_scan_quality(image: np.ndarray) -> dict[str, float | str]:
+        """Анализ качества скана (для авто-выбора уровня агрессии preproc).
+
+        Возвращает словарь с метриками + ярлыком ``quality`` ∈
+        ``{"clean", "dim", "noisy", "blank"}``:
+
+        * ``clean`` — нормальный белый фон (mean ≥ 230), хороший
+          контраст (std ≥ 50), нормальная доля тёмного (3-25 %).
+        * ``dim``   — серый/блёклый скан (mean 180-225 ИЛИ low std)
+          → нужен агрессивный CLAHE + Sauvola.
+        * ``noisy`` — много мелкой грязи (high std + лишних тёмных
+          пикселей) → нужен NLM denoise.
+        * ``blank`` — почти полностью пустой (dark < 1 % AND std < 20).
+          Pipeline такой странице должен пропускать OCR.
+
+        Используется внутри ``process`` чтобы автоматически
+        включать препроцессорные шаги, которые в стандартном
+        профиле выключены (background removal, NLM), когда скан
+        этого требует. На UPD_36 (mean 230, dark 9.6 %) это
+        переключает в ``clean`` режим — ничего лишнего не делаем;
+        UPD_36 p4 (mean 254, dark 0.3 %) → ``blank``, OCR
+        пропускается на уровне tesseract_engine.
+        """
+        gray = (
+            image if image.ndim == 2
+            else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            if image.ndim == 3 else image
+        )
+        mean = float(gray.mean())
+        std = float(gray.std())
+        dark_pct = float((gray < 128).mean())
+
+        # Blank: «ничего нет».
+        if dark_pct < 0.01 and std < 20.0:
+            quality = "blank"
+        # Dim: серый общий тон или крайне низкий контраст.
+        elif mean < 200.0 or std < 35.0:
+            quality = "dim"
+        # Noisy: высокий контраст + много мелких тёмных точек
+        # (более чем нормальная доля при таком std — индикатор
+        # salt-and-pepper noise или фоновой грязи).
+        elif std > 80.0 and dark_pct > 0.30:
+            quality = "noisy"
+        else:
+            quality = "clean"
+        return {
+            "mean": mean, "std": std, "dark_pct": dark_pct,
+            "quality": quality,
+        }
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -837,8 +892,9 @@ def build_universal_preprocess_config() -> PreprocessConfig:
       amplification.
     * Background removal is **off** — at 600 DPI the large-kernel blur
       pass costs more than all other preprocessing steps combined with
-      only a marginal accuracy gain. Pick ``low_quality_scan`` if the
-      input has heavy page tint.
+      only a marginal accuracy gain. Создайте копию профиля
+      ``universal_accurate`` и включите ``preprocess.background.enabled=True``,
+      если на сканах много фоновой грязи.
     * Denoise chain: median ksize=3 → morphological close ksize=3.
       Removes salt-and-pepper artefacts and closes sub-pixel breaks
       in thin glyphs. Larger ksizes would start eating dots of

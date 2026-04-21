@@ -63,10 +63,14 @@ class TestStandardWaybill:
         # не предписывает структуру, если нет ORG-префикса. Главное — не MISSING.
         assert self.row.reception != MISSING
 
-    def test_to_excel_tuple_has_12_columns(self):
-        # 12 колонок: waybill, date, number, shipper, consignee,
-        # cargo, volume, carrier, vehicle, reception, source, note.
-        assert len(self.row.to_excel_tuple()) == 12
+    def test_to_excel_tuple_has_18_columns(self):
+        # 18 колонок: waybill, date, number, shipper, shipper_inn,
+        # shipper_kpp, shipper_ogrn, consignee, consignee_inn,
+        # consignee_kpp, consignee_ogrn, cargo, volume, driver,
+        # vehicle, reception, source, note.
+        # Апрель 2026: добавлены 6 derived-полей ИНН/КПП/ОГРН × 2
+        # (shipper + consignee) для бухучётных выгрузок.
+        assert len(self.row.to_excel_tuple()) == 18
 
 
 class TestRealSample7145B:

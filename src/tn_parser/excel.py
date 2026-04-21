@@ -3,8 +3,17 @@
 Модуль общий для GUI и CLI. Содержит единственную публичную функцию
 `write_excel(rows, output_path)`.
 
-Схема колонок — 12 штук. Последняя колонка — «Уверенность, %» — окрашивается
-условным форматированием: красным для <50%, жёлтым для 50–70%, зелёным выше.
+Схема колонок — 18 штук. Последняя колонка — «Уверенность, %» —
+окрашивается условным форматированием: красным для <50%, жёлтым для
+50–70%, зелёным выше.
+
+Апрель 2026: добавлены 6 derived-колонок с реквизитами отправителя
+и получателя (ИНН/КПП/ОГРН × 2). Эти реквизиты — главная цель
+парсинга ТН/УПД для бухучёта; раньше они были зашиты в строки
+``shipper`` / ``consignee`` как часть одного длинного текста, и
+получатель Excel был вынужден парсить текст глазами/regex'ом.
+Теперь каждый реквизит в отдельной колонке с собственным
+confidence-скором (FieldConfidence.shipper_inn и т.п.).
 """
 
 from __future__ import annotations
@@ -16,7 +25,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from .models import ParsedRow
+from .models import GARBAGE, MISSING, ParsedRow
 
 SHEET_NAME = "Extraction"
 
@@ -25,7 +34,13 @@ COLUMNS: list[tuple[str, int]] = [
     ("Дата", 14),
     ("№", 15),
     ("Грузоотправитель", 35),
+    ("ИНН отправителя", 14),
+    ("КПП отправителя", 13),
+    ("ОГРН отправителя", 16),
     ("Грузополучатель", 35),
+    ("ИНН получателя", 14),
+    ("КПП получателя", 13),
+    ("ОГРН получателя", 16),
     ("Груз", 35),
     ("Объём", 22),
     ("Водитель", 25),
@@ -42,11 +57,46 @@ _CONF_FILL_MID = PatternFill("solid", fgColor="FFF2CC")    # бледно-жёл
 _CONF_FILL_OK = PatternFill("solid", fgColor="D9EAD3")     # бледно-зелёный
 
 
+# Колонки-источники (индексы в ``to_excel_tuple()``), для которых
+# литерал ``MISSING`` / ``GARBAGE`` в Excel выглядит странно и
+# зашумляет отчёт. Лучше оставить ячейку пустой — пользователь сразу
+# видит «здесь нет данных», вместо «отсутствует» / «неразборчиво»
+# которое читается как содержимое документа, а не как маркер.
+# ``source`` (11-й/17-й индекс) и ``note`` (12-й/18-й) мы НЕ
+# нормализуем: source всегда есть, note содержит LOW_CONF/LOW_TEXT
+# — их пользователь хочет видеть явно.
+_MISSING_SENTINELS = (MISSING, GARBAGE)
+
+
+def _normalise_for_excel(value: object) -> object:
+    """Заменить ``MISSING``/``GARBAGE`` на пустую строку для экспорта.
+
+    Остальные значения пропускаем без изменений (в т.ч. числа в
+    confidence-колонке и человекочитаемую «Рукописный текст»-метку,
+    которая уже нормализована в ``core._build_row`` через
+    ``normalise_handwritten``).
+    """
+    if isinstance(value, str) and value in _MISSING_SENTINELS:
+        return ""
+    return value
+
+
 def _row_to_tuple(row: ParsedRow) -> tuple:
-    """Расширяет `ParsedRow.to_excel_tuple()` колонкой confidence."""
+    """Расширяет `ParsedRow.to_excel_tuple()` колонкой confidence.
+
+    Литералы ``MISSING`` / ``GARBAGE`` в текстовых колонках
+    нормализуются в пустую строку перед записью — см.
+    ``_normalise_for_excel`` для rationale. ``source`` и ``note``
+    (последние два столбца до confidence) пропускаются без
+    нормализации чтобы сохранить service-информацию.
+    """
     base = row.to_excel_tuple()
+    # Всё кроме двух последних (source, note) проходит через
+    # нормализацию MISSING → "".
+    head = tuple(_normalise_for_excel(v) for v in base[:-2])
+    tail = base[-2:]  # source, note — оставляем как есть
     conf_pct = round(row.confidence.overall() * 100)
-    return base + (conf_pct,)
+    return head + tail + (conf_pct,)
 
 
 def _conf_fill(pct: int) -> PatternFill:

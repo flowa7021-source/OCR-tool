@@ -184,7 +184,24 @@ class OCRPipeline:
         # rebuild the JobResult from the stored metadata — skipping
         # rasterisation, OCR, and post-processing entirely. This is the
         # single biggest win for the "tune a profile, re-run" workflow.
-        cached = self._try_cache_hit(input_path, job.profile, output_path, job_id)
+        #
+        # Escape-hatch: env var ``OCR_DISABLE_CACHE=1`` отключает и
+        # lookup, и последующий store. Нужно для тестов / отладки,
+        # чтобы точно знать что видишь результат текущего кода, а не
+        # удачный хит с прошлого прогона (классическая ошибка
+        # "fix работает" когда на самом деле просто cache-hit).
+        import os as _os
+        cache_disabled = _os.environ.get("OCR_DISABLE_CACHE", "").lower() in (
+            "1", "true", "yes",
+        )
+        if cache_disabled:
+            logger.info(
+                "OCR cache disabled via OCR_DISABLE_CACHE env var; "
+                "skipping lookup for job %s", job_id,
+            )
+        cached = None if cache_disabled else self._try_cache_hit(
+            input_path, job.profile, output_path, job_id,
+        )
         if cached is not None:
             self._report(cached.page_count or 1, cached.page_count or 1, "cache-hit")
             # Profile may have flipped ``extract.enabled=True`` since
@@ -493,43 +510,40 @@ class OCRPipeline:
             if all_empty:
                 logger.warning(
                     "Job %s COMPLETED but NO text was recognised on any "
-                    "page. Likely causes: wrong DPI for this scan, "
-                    "Tesseract timed out silently, or preprocessing "
-                    "destroyed the glyphs. Try the 'quick_reliable' "
-                    "profile or lower DPI.",
+                    "page. Likely causes: damaged scan, Tesseract timed "
+                    "out, или preprocessing уничтожил глифы. Создайте "
+                    "копию профиля и понизьте DPI / включите более "
+                    "агрессивный denoise (CLAHE clip 4.0, NLM h=15).",
                     job_id,
                 )
                 result.error = (
                     "Документ обработан, но текст не был распознан "
-                    "ни на одной странице. Попробуйте профиль "
-                    "«quick_reliable» или уменьшите DPI."
+                    "ни на одной странице. Создайте копию профиля "
+                    "universal_accurate и снизьте DPI или включите "
+                    "более агрессивный денойз."
                 )
 
-            # Wrong-profile hint — when the job finished but mean
-            # confidence is low the user almost certainly picked the
-            # wrong profile for the document (high-DPI profile on a
-            # blurry phone snap; contracts_ru on an invoice with
-            # table rules; English profile on Russian text). Surface
-            # the suggestion via both the logger and a structured
-            # ``profile_recommendation`` progress event so the UI can
-            # show a non-blocking toast instead of burying the hint
-            # in the log viewer.
+            # Wrong-profile hint — после удаления fast/slow профилей
+            # (декабрь 2026) рекомендация переключиться на специальный
+            # builtin больше не релевантна: единственный builtin
+            # ``universal_accurate`` уже включает все best-of-all
+            # настройки. Если confidence остался низким, проблема
+            # либо в самом скане (низкое DPI / artefacts), либо в
+            # пользовательской копии профиля с урезанным препроцессингом.
+            # Предлагаем — но не предписываем — пересохранить копию
+            # профиля или вернуться на builtin.
             if not all_empty and result.pages:
                 avg_conf = result.average_confidence
                 if 0.0 < avg_conf < 60.0:
                     current_profile = job.profile.name
-                    recommended: list[str] = []
-                    if current_profile != "low_quality_scan":
-                        recommended.append("low_quality_scan")
-                    if current_profile != "quick_reliable":
-                        recommended.append("quick_reliable")
-                    if recommended:
+                    if current_profile != "universal_accurate":
                         logger.warning(
-                            "Job %s finished at %.1f%% mean confidence — "
-                            "current profile %r may not be the best "
-                            "match. Consider trying: %s",
+                            "Job %s finished at %.1f%% mean confidence "
+                            "with custom profile %r. Try the builtin "
+                            "'universal_accurate' to compare — оно "
+                            "включает Sauvola + полный postprocessing + "
+                            "адаптивный confidence threshold.",
                             job_id, avg_conf, current_profile,
-                            " / ".join(recommended),
                         )
                         import contextlib
 
@@ -537,9 +551,19 @@ class OCRPipeline:
                             self._report(
                                 total_pages,
                                 total_pages,
-                                f"profile_recommendation:{avg_conf:.0f}:"
-                                + ",".join(recommended),
+                                (
+                                    f"profile_recommendation:{avg_conf:.0f}:"
+                                    "universal_accurate"
+                                ),
                             )
+                    else:
+                        logger.warning(
+                            "Job %s finished at %.1f%% mean confidence on "
+                            "the canonical builtin profile. Это указывает "
+                            "на качество скана (low DPI / artefacts), а не "
+                            "на конфигурацию OCR.",
+                            job_id, avg_conf,
+                        )
 
             logger.info(
                 "Job %s COMPLETED in %.2fs (avg conf=%.1f, pages=%d, out=%s)",
@@ -594,10 +618,11 @@ class OCRPipeline:
             return
         if dpi >= 600 and timeout < 300:
             logger.warning(
-                "Job %s: DPI=%d + tesseract_timeout=%ds is a known risky "
-                "combination. Expect to hit the auto-retry path. "
-                "Recommendation: use the 'quick_reliable' profile, or "
-                "raise tesseract_timeout to 300+ in the active profile.",
+                "Job %s: DPI=%d + tesseract_timeout=%ds — рискованная "
+                "комбинация, ожидайте auto-retry. Поднимите "
+                "tesseract_timeout до 300+ в активном профиле, либо "
+                "вернитесь на builtin 'universal_accurate' (DPI=400, "
+                "timeout=360 — проверенный sweet spot для LSTM).",
                 job_id, dpi, timeout,
             )
 
@@ -809,6 +834,13 @@ class OCRPipeline:
                         mean_conf, min_conf,
                     )
                     return
+
+            import os as _os
+            if _os.environ.get("OCR_DISABLE_CACHE", "").lower() in (
+                "1", "true", "yes",
+            ):
+                logger.debug("OCR cache disabled via env; skipping store")
+                return
 
             ocr_cache.store(
                 input_path,
@@ -1413,10 +1445,18 @@ class OCRPipeline:
             )
             return
         try:
+            # Batch context propagation (idea #3 top-10): pipeline
+            # может работать в batch-mode через ParallelProcessor
+            # или CLI folder-batch. Если caller подготовил общий
+            # BatchContext и передал его через job.batch_ctx,
+            # орchestrator использует его для cross-doc learning.
+            # Single-doc runs — batch_ctx=None, no-op.
+            batch_ctx = getattr(job, "batch_ctx", None)
             result.parsed = extract_from_pages(
                 pages=result.pages,
                 config=job.profile.extract,
                 source_path=Path(result.input_path),
+                batch_ctx=batch_ctx,
             )
         except Exception as exc:  # noqa: BLE001 — belt-and-braces
             logger.exception(
@@ -1831,6 +1871,20 @@ class OCRPipeline:
                 if confidences:
                     pr.mean_confidence = sum(confidences) / len(confidences)
                     pr.low_confidence_words = low_words
+
+                # Layout-aware parser (idea #1 top-10) + token-level
+                # confidence propagation (idea #5) нуждаются в raw
+                # TSV + размерах raster'а. Сохраняем на result — оно
+                # optional, ноль overhead для callers которые не
+                # используют парсер.
+                pr.tsv_data = data
+                try:
+                    pr.page_width_px = int(img.shape[1])
+                except Exception:  # noqa: BLE001
+                    pr.page_width_px = 0
+                # Сохраняем путь к preprocessed PNG — field_rescue
+                # (idea #6) его использует для targeted re-OCR.
+                pr.raster_path = str(png_path) if png_path.exists() else None
 
                 # Word-level drop: rebuild pr.text from the same TSV,
                 # dropping every word below ``confidence_threshold``. The

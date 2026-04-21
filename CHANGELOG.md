@@ -5,6 +5,76 @@
 
 ## [Unreleased]
 
+### Changed — Profiles consolidation (декабрь 2026)
+- **7 builtin профилей → 1.** Удалены `default`, `quick_reliable`,
+  `low_quality_scan`, `contracts_ru`, `english_text` и `tn_upd`.
+  Единственный builtin теперь — **`universal_accurate`**, в котором
+  собран best-of-all из удалённых:
+  * Sauvola binarisation + 400 DPI + deskew + CLAHE + border_removal
+    (база, проверена на real scan корпусе);
+  * полный word-level pipeline: drop_low_conf_words +
+    soft_rescue_dropped_words + adaptive_confidence_threshold +
+    per_word_script_disambiguation + per_word_clahe_rescue +
+    per_word_upscale_rescue + user_words_fuzzy_rescue +
+    per_block_psm_retry;
+  * `skip_text=True` (для уже OCR'нутых PDF — экономит 30-60 с/документ),
+    из удалённого `tn_upd`;
+  * `load_freq_dawg=0` (отключает freq-DAWG, который биасит ИНН/КПП/ОГРН
+    в похожие слова), из `contracts_ru` + `tn_upd`;
+  * `validate_identifiers=True` (1-edit fix для ИД-полей через каталог
+    `expected/*.json`), из `tn_upd` + `quick_reliable`;
+  * `extract.enabled=True, kind="tn_upd", multi_document=True` —
+    встроенный парсер ТН/УПД работает по умолчанию.
+
+  `ProfileManager.initialize_builtins` теперь **перезаписывает**
+  builtin при каждом запуске → апгрейд приложения автоматически
+  даёт canonical-настройки без ручной чистки %APPDATA%/profiles.
+  Кастомизация — через `duplicate` (профиль с `builtin=False` не
+  трогается).
+
+  CLI default `--profile`: `default` → `universal_accurate`.
+  GUI dropdown preselect — `universal_accurate`. `last_profile` в
+  settings.json при FileNotFoundError откатывается на
+  `universal_accurate` через `ProfileManager.get_current`.
+
+### Changed — Parser confidence ceiling (0.93 → 0.99)
+- **Per-field validation paths** в 7 extractors. Раньше потолок
+  per-field был 0.9 (декларированная шкала «1.0 = section + validated»
+  не реализована); теперь возвращаем 1.0 при прохождении structural-
+  валидации:
+  * `shipper`, `reception` — ИНН проходит контрольную сумму ФНС;
+  * `consignee` — результат начинается с ORG-маркера (ООО/АО/ИП);
+  * `cargo` — содержит ед. изм. (шт/кг/т/м³) или типовой грузовой
+    термин (блок/плита/материал/георешетка);
+  * `volume` — full triplet (мест+нетто+объём) ИЛИ «N шт» из cargo;
+  * `driver` — полное ФИО (Фамилия Имя Отчество);
+  * `number` — паттерн «№ X от ДАТА» (двойной сигнал).
+
+  Замер: avg parser conf на чистом sidecar-корпусе **0.93 → 0.99**
+  (4 PDF, 16 rows × 9 полей).
+
+### Added — Parser accuracy 35% → 91% on `inputs/*.txt`
+- Структурный парсинг пост-OCR `[Грузоотправитель]` / `— ГРУЗ —` /
+  `— ПОГРУЗКА —` секций; per-field accuracy на golden-датасете:
+  number 0% → 100%, shipper 0% → 100%, consignee 0% → 100%,
+  cargo 25% → 100%, volume 0% → 25%* (`«N шт»` — должный вид),
+  driver 75% → 100%, reception 0% → 100%.
+
+### Added — End-to-end OCR + parser workflow
+- **`.github/workflows/e2e-tn-pipeline.yml`** — Windows-runner
+  workflow с полным production стеком (Tesseract 5.5 + tessdata_best
+  rus/eng/osd + Ghostscript) и 4 независимыми гейтами:
+  1. parser-only golden (`run_golden.py`, ≥ 70% accuracy);
+  2. parser ceiling (avg parser conf ≥ 95% на clean sidecar);
+  3. fast E2E (`scripts/e2e_tn_pipeline.py`, pytesseract+parser);
+  4. full E2E (`scripts/e2e_tn_pipeline_full.py`, production
+     `OCRPipeline` + `universal_accurate` + parser).
+- **`scripts/e2e_tn_pipeline_full.py`** — production-pipeline e2e
+  тест с combined confidence (geometric mean of OCR_conf × parser_conf),
+  fail-fast на отсутствующую среду (exit 4, без silent skip).
+- **`scripts/run_golden.py --min-accuracy`** флаг → exit 2 при
+  просадке.
+
 ### Added
 - **Извлечение полей ТН / УПД как пост-OCR шаг** — парсер
   `src.tn_parser` (ранее отдельный `OCR parser/`) интегрирован в
@@ -13,6 +83,8 @@
     OTSU, `border_removal=True`, `load_freq_dawg=0`,
     `validate_identifiers/entities=True` + `extract.enabled=True`.
     Сигналит пайплайну запускать парсер после OCR.
+    *(Декабрь 2026: `tn_upd` слит в `universal_accurate` — см. раздел
+    «Profiles consolidation» выше.)*
   - Новая секция **`ProfileData.extract`** (`ExtractConfig` +
     `LlmFallbackConfig`) в JSON-профилях. Миграция v10→v11
     прозрачна: profile без extract → `enabled=False`.

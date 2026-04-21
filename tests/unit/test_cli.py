@@ -20,7 +20,10 @@ class TestArgumentParsing:
     def test_parser_accepts_single_pdf(self) -> None:
         args = cli.build_parser().parse_args(["file.pdf"])
         assert args.inputs == [Path("file.pdf")]
-        assert args.profile == "default"
+        # С декабря 2026 единственный builtin — universal_accurate
+        # (default / quick_reliable / contracts_ru / english_text /
+        # low_quality_scan / tn_upd удалены, см. profile_manager).
+        assert args.profile == "universal_accurate"
         assert args.workers == 1
         assert args.txt is False
         assert args.docx is False
@@ -213,7 +216,7 @@ class TestProcessSingle:
             pipeline_cls.return_value = instance
             with patch("src.infrastructure.tesseract_wrapper.TesseractWrapper") as tw:
                 tw.return_value.configure_pytesseract.return_value = None
-                rc = cli.process_single(pdf, out, "default", False, False)
+                rc = cli.process_single(pdf, out, "universal_accurate", False, False)
 
         assert rc == 0
 
@@ -234,7 +237,7 @@ class TestProcessSingle:
             instance.run.return_value = fake_result
             pipeline_cls.return_value = instance
             with patch("src.infrastructure.tesseract_wrapper.TesseractWrapper"):
-                rc = cli.process_single(pdf, out, "default", False, False)
+                rc = cli.process_single(pdf, out, "universal_accurate", False, False)
         assert rc == 1
 
     def test_txt_export_uses_export_manager(self, tmp_path: Path) -> None:
@@ -257,7 +260,7 @@ class TestProcessSingle:
             em_instance = MagicMock()
             em_cls.return_value = em_instance
 
-            rc = cli.process_single(pdf, out, "default", True, False)
+            rc = cli.process_single(pdf, out, "universal_accurate", True, False)
 
         assert rc == 0
         assert em_instance.export.called
@@ -294,7 +297,7 @@ class TestProcessSingle:
             em_cls.return_value = em_instance
 
             rc = cli.process_single(
-                pdf, out, "default", False, False, want_excel=True,
+                pdf, out, "universal_accurate", False, False, want_excel=True,
             )
 
         assert rc == 0

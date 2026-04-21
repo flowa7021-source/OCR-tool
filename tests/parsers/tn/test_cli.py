@@ -59,8 +59,11 @@ class TestCLI:
         ws = wb.active
         # Заголовок + 2 строки (по одной накладной на файл).
         assert ws.max_row >= 3
-        # Последняя колонка — confidence (13-я после добавления «Объём»).
-        assert ws.cell(row=1, column=13).value == "Уверенность, %"
+        # Последняя колонка — confidence. Позиция динамически
+        # определяется по COLUMNS (после добавления ИНН/КПП/ОГРН
+        # × 2 в апреле 2026 их 19, до этого было 13).
+        from src.tn_parser.excel import COLUMNS
+        assert ws.cell(row=1, column=len(COLUMNS)).value == "Уверенность, %"
 
         log_text = log.read_text(encoding="utf-8")
         assert "a.pdf" in log_text
