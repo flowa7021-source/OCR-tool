@@ -1,8 +1,4 @@
-"""Engine registry. Maps :class:`OCREngineKind` values to instances.
-
-Only Tesseract is registered. The lazy-import pattern is preserved so
-a future second engine can be added without restructuring this file.
-"""
+"""Engine registry. Maps :class:`OCREngineKind` to instances."""
 
 from __future__ import annotations
 
@@ -16,24 +12,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CACHE: dict[OCREngineKind, OCREngine] = {}
+_CACHE: dict[OCREngineKind, "OCREngine"] = {}
 
 
-def get_engine(kind: OCREngineKind) -> OCREngine:
-    """Return the engine instance for ``kind``, constructing it lazily.
-
-    Raises:
-        KeyError: If the requested engine is not registered.
-    """
+def get_engine(kind: OCREngineKind) -> "OCREngine":
+    """Return the engine for ``kind``, constructing it lazily."""
     cached = _CACHE.get(kind)
     if cached is not None:
         return cached
 
-    if kind is OCREngineKind.TESSERACT:
-        from src.application.engines.tesseract_engine import TesseractEngine
-
-        engine: OCREngine = TesseractEngine()
-    else:  # pragma: no cover — exhaustive guard
+    if kind is OCREngineKind.EASYOCR:
+        from src.application.engines.easyocr_engine import EasyOCREngine
+        engine: "OCREngine" = EasyOCREngine()
+    else:  # pragma: no cover
         raise KeyError(f"Unknown engine kind: {kind}")
 
     _CACHE[kind] = engine
@@ -41,11 +32,7 @@ def get_engine(kind: OCREngineKind) -> OCREngine:
 
 
 def list_engines() -> list[tuple[OCREngineKind, str, bool, str]]:
-    """Return ``[(kind, name, available, availability_message), ...]``.
-
-    Used to populate the UI engine dropdown without forcing heavy
-    imports just to know which engines are registered.
-    """
+    """Return ``[(kind, name, available, availability_message), ...]``."""
     result: list[tuple[OCREngineKind, str, bool, str]] = []
     for kind in OCREngineKind:
         try:
@@ -59,12 +46,7 @@ def list_engines() -> list[tuple[OCREngineKind, str, bool, str]]:
 
 
 def reset_cache() -> None:
-    """Clear the engine cache, releasing any expensive resources first.
-
-    Every cached engine gets :meth:`OCREngine.unload` called before it
-    is dropped. For Tesseract this is a no-op; the hook stays in place
-    for any future engine that holds onto heavy resources.
-    """
+    """Clear the engine cache, releasing any expensive resources first."""
     for engine in list(_CACHE.values()):
         try:
             engine.unload()

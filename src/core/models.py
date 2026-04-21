@@ -25,16 +25,12 @@ from src.shared.constants import (
     DEFAULT_NLM_H,
     DEFAULT_SAUVOLA_K,
     DEFAULT_SAUVOLA_WINDOW,
-    DEFAULT_TESSERACT_TIMEOUT_SEC,
 )
 from src.shared.types import (
-    OEM,
-    PSM,
     BinarizationMethod,
     DenoiseMethod,
     JobStatus,
     OCREngineKind,
-    OptimizeLevel,
 )
 
 # ---------------------------------------------------------------------------
@@ -182,206 +178,56 @@ class PreprocessConfig:
 
 @dataclass
 class OCRConfig:
-    """OCR engine configuration.
+    """OCR engine configuration (EasyOCR back-end)."""
 
-    The ``engine`` field selects the backend; remaining fields are
-    primarily interpreted by Tesseract/OCRmyPDF but alternative engines
-    reuse the language list, DPI, and confidence threshold where they
-    make sense.
-    """
-
-    engine: OCREngineKind = OCREngineKind.TESSERACT
-    languages: list[str] = field(default_factory=lambda: ["rus", "eng"])
-    primary_language: str = "rus"  # determines priority order in OCR string
-    psm: PSM = PSM.AUTO
-    oem: OEM = OEM.LSTM_ONLY
+    engine: OCREngineKind = OCREngineKind.EASYOCR
+    #: EasyOCR language codes: ``"ru"``, ``"en"``. Older profiles with
+    #: Tesseract codes (``"rus"``, ``"eng"``) are remapped on load.
+    languages: list[str] = field(default_factory=lambda: ["ru", "en"])
+    primary_language: str = "ru"
     dpi: int = DEFAULT_DPI
-    char_whitelist: str = ""
-    char_blacklist: str = ""
+    #: Optional character allowlist (passed to ``readtext(allowlist=)``).
+    #: Empty string = accept everything.
+    allowlist: str = ""
+    #: User-facing confidence threshold (0..100). Used by the
+    #: confidence filter for drop / soft-rescue decisions.
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
-    tesseract_timeout: int = DEFAULT_TESSERACT_TIMEOUT_SEC
-    optimize_level: OptimizeLevel = OptimizeLevel.LOSSLESS
-    skip_text: bool = True  # don't re-OCR pages with existing text
+    #: Engine-side minimum confidence (0..1) — boxes below this are
+    #: dropped BEFORE they reach the filter. Protects downstream code
+    #: from the ``conf<10%`` hallucination blocks EasyOCR emits on
+    #: stamps / borders.
+    min_keep_confidence: float = 0.1
+    #: Use GPU (CUDA) for inference when available. Safe to leave True
+    #: on CPU-only hosts — EasyOCR falls back automatically.
+    gpu: bool = False
+    skip_text: bool = True  # don't re-OCR pages with existing text layer
     #: If >0, only the first N pages of each input are processed. 0 (the
     #: default) disables the limit and means "OCR the whole document".
-    #: Useful for previewing a profile before running a full 500-page job.
     max_pages: int = 0
-    #: Forward bundled ``resources/tessdata/user-words.{lang}`` and
-    #: ``user-patterns.{lang}`` to Tesseract via OCRmyPDF's ``user_words=``
-    #: and ``user_patterns=`` kwargs. OCRmyPDF / Tesseract accept only
-    #: ONE of each per run, so :mod:`src.application.ocrmypdf_integration`
-    #: picks the pair matching ``primary_language`` (typically ``"rus"``
-    #: for this app's Russian-first audience). Enabled by default: the
-    #: files are tiny, the accuracy win on ИНН / КПП / dates / entity
-    #: abbreviations is consistent, and if the files happen to be
-    #: missing the integration degrades gracefully with a WARNING.
-    use_user_dictionaries: bool = True
-    #: When True, rebuild the per-page extracted text from Tesseract's
-    #: ``image_to_data`` TSV output, keeping ONLY words whose confidence
-    #: meets or exceeds :attr:`confidence_threshold`. Without this, the
-    #: text surfaced to the user (results panel, TXT/DOCX exports) is
-    #: exactly what OCRmyPDF stamped into the PDF — including every
-    #: stamp, signature, logo and table-border artefact Tesseract
-    #: guessed at with 10–40 % confidence. Dropping those words lifts
-    #: the PERCEIVED accuracy of a mixed-content scan far more than
-    #: any amount of preprocessing re-tuning: a 51 %-mean document
-    #: typically presents as 80–90 % once the sub-threshold noise is
-    #: gone. Off by default for backwards-compatibility with existing
-    #: profiles / tests; the ``universal_accurate`` profile opts in.
-    #:
-    #: Caveat: this affects only the text exposed through ``PageResult
-    #: .text`` (what the user sees and exports). The searchable text
-    #: layer inside the OCRmyPDF output PDF is still the union of every
-    #: word Tesseract emitted — regenerating THAT requires rewriting
-    #: the hOCR stream and is a larger, separate piece of work.
+    #: When True, rebuild the per-page extracted text from the engine's
+    #: per-word output, keeping ONLY words whose confidence
+    #: meets or exceeds :attr:`confidence_threshold`. Dropping sub-
+    #: threshold words lifts perceived accuracy: a 51 %-mean document
+    #: typically presents as 80–90 % once the noise is gone.
     drop_low_conf_words: bool = False
-    #: Soft-rescue layer on top of :attr:`drop_low_conf_words`. Tesseract
-    #: systematically underweights its confidence score on short-form
-    #: tokens — pure-digit runs (ИНН, КПП, amounts, phones, dates) and
-    #: clean all-caps Cyrillic acronyms routinely report at 50–59 %
-    #: on a noisy form even though the read is unambiguous. When
-    #: ``drop_low_conf_words`` is enabled at ``confidence_threshold=60``,
-    #: those tokens get cut along with the stamp / signature garbage
-    #: and the user loses real data to the filter.
-    #:
-    #: With ``soft_rescue_dropped_words=True``, words in the band
-    #: ``[max(threshold-15, 45), threshold)`` are kept when the token
-    #: shape passes a lexical-validity check (length ≥ 3, single-script:
-    #: all Cyrillic letters / all Latin letters / all-digit with
-    #: separators). Mixed-script short tokens (``нe``, ``Taw``) and
-    #: anything below the absolute 45-conf floor still drop — the
-    #: rescue targets the specific failure mode where the OCR read is
-    #: credible but Tesseract underweighted it, not every low-conf
-    #: guess. Off by default; ``universal_accurate`` opts in to pair
-    #: with its ``drop_low_conf_words=True``. No effect when
-    #: ``drop_low_conf_words=False``.
+    #: Soft-rescue layer on top of :attr:`drop_low_conf_words`. Pure-
+    #: digit runs (ИНН, КПП, amounts, phones, dates) and clean all-
+    #: caps Cyrillic acronyms can report at 50–59 % on noisy forms
+    #: even though the read is unambiguous. With soft rescue on,
+    #: words in ``[max(threshold-15, 45), threshold)`` are kept when
+    #: the token shape passes a lexical-validity check. Mixed-script
+    #: short tokens and anything below 45 still drop.
     soft_rescue_dropped_words: bool = False
-    #: When ``drop_low_conf_words`` is on, additionally redact the
-    #: ENTIRE layout block (as identified by Tesseract's ``block_num``
-    #: column) whenever the block is majority-noise. Catches stamp /
-    #: signature / fine-print-template regions where even the individual
-    #: above-threshold words are unreliable because the whole zone was
-    #: mis-analysed by Tesseract's layout stage. Off by default to
-    #: keep behaviour byte-exact for profiles that haven't opted in;
-    #: ``universal_accurate`` enables it.
-    redact_noisy_blocks: bool = False
-    #: When True, :class:`confidence_threshold` becomes a *nominal*
-    #: value that is adapted per page based on that page's mean
-    #: confidence:
-    #:
-    #:   * page mean_conf ≥ 90 % → effective threshold lowered to
-    #:     ``min(nominal, 40)`` — the page is clean, keep borderline
-    #:     words that the user clearly wants surfaced.
-    #:   * page mean_conf < 70 % → effective threshold raised to
-    #:     ``max(nominal, 70)`` — the page is noisy, filter harder so
-    #:     the user-facing text doesn't drown in low-conf guesses.
-    #:   * otherwise → nominal threshold.
-    #:
-    #: Fixes the "I have to re-tune ``confidence_threshold`` in the
-    #: profile for every different document" workflow: the number now
-    #: auto-shifts with the page's actual OCR quality. Off by default
-    #: for backwards-compatibility; profiles that want the behaviour
-    #: opt in explicitly.
+    #: When True, :attr:`confidence_threshold` becomes a *nominal*
+    #: value adapted per page by that page's mean confidence: clean
+    #: pages (≥ 90 %) lower to ``min(nominal, 40)``; noisy pages
+    #: (< 70 %) raise to ``max(nominal, 70)``.
     adaptive_confidence_threshold: bool = False
-    #: Per-word script disambiguation for mixed-script tokens.
-    #:
-    #: After the main OCR pass, every word classified as "mixed"
-    #: script (contains both a Cyrillic-exclusive letter AND a
-    #: Latin-exclusive letter — Tesseract picked the wrong script
-    #: for at least one glyph) is re-OCR'd on its own bounding box
-    #: with ``-l rus`` and ``-l eng`` separately. The version with
-    #: higher mean confidence wins and replaces the original word.
-    #:
-    #: Solves the "ИНV-12345" class of errors where the line-level
-    #: LSTM mixed scripts and neither the paragraph majority nor
-    #: the numeric-context heuristic in the postprocessor can
-    #: untangle it (both run AFTER we've lost the image).
-    #:
-    #: Off by default — the re-OCR path spawns one extra Tesseract
-    #: call per mixed word (typically <3 % of words on Russian
-    #: documents) and adds ~10-20 % to per-page latency. Profiles
-    #: that explicitly prioritise accuracy (``universal_accurate``)
-    #: opt in.
-    per_word_script_disambiguation: bool = False
-    #: Per-word CLAHE + unsharp-mask rescue. For each line-level
-    #: word with ``30 ≤ conf ≤ 70`` (the "faded ink, uncertain but
-    #: not pure noise" band), crop the bbox from the pre-
-    #: binarisation grayscale snapshot, apply aggressive CLAHE
-    #: (clip=8) + Gaussian unsharp-mask (σ=1.2), re-OCR with
-    #: ``--psm 8``, and swap in the result when it clears a 10-point
-    #: confidence lift. Cheap (~5 ms per candidate) and targeted at
-    #: the failure mode where Tesseract's single-pass preprocessing
-    #: was too conservative for a specific word. Off by default;
-    #: ``universal_accurate`` opts in.
-    per_word_clahe_rescue: bool = False
-    #: Per-word 2× bicubic upscale rescue. Same gate (30-70 conf
-    #: band) as the CLAHE rescue, applied independently. Targets
-    #: tiny-glyph text (stamp body lines, printed ticker-tape at
-    #: 10-15 px height) where the LSTM scores poorly because the
-    #: trained regime is 20-40 px per glyph. Costs one extra
-    #: Tesseract call on a 4× pixel crop, typically ~50 ms per
-    #: candidate. Stacks with ``per_word_clahe_rescue`` — CLAHE
-    #: runs first (cheap), upscale runs only on words the CLAHE
-    #: pass didn't lift.
-    per_word_upscale_rescue: bool = False
-    #: Fuzzy-match rescue against ``user-words.rus``. For each
-    #: line-level word in the 30-75 confidence band, find the
-    #: closest dictionary entry within Levenshtein distance 1
-    #: (short words) or 2 (≥ 6 char words) and swap in the
-    #: canonical spelling. No extra Tesseract call — pure
-    #: dict + edit-distance lookup, ~100× cheaper than re-OCR.
-    #: Catches the class of errors where the CROP was readable
-    #: but the LSTM's vocabulary wasn't biased strongly enough
-    #: at primary OCR time (``ИНЦ`` → ``ИНН``, ``Скаnia`` →
-    #: ``Scania``). Depends on ``use_user_dictionaries`` being
-    #: True so the same catalog file the DAWG loaded is
-    #: available at rescue time. Off by default;
-    #: ``universal_accurate`` opts in.
+    #: Fuzzy-match rescue against ``resources/ru_lexicon.txt``. For
+    #: words in the 30–75 confidence band, find the closest
+    #: dictionary entry within Levenshtein distance 1–2 and swap in
+    #: the canonical spelling. Pure dict + edit-distance lookup.
     user_words_fuzzy_rescue: bool = False
-    #: Per-block PSM retry for low-confidence layout regions. After
-    #: the primary ``image_to_data`` pass, groups TSV rows by
-    #: ``block_num``, and for each block whose mean per-word
-    #: confidence sits below 60 % (and contains ≥ 3 words), re-OCRs
-    #: the block crop with ``--psm 6`` (SINGLE_BLOCK). Targets
-    #: invoice / transport-document tables where the default PSM=3
-    #: layout analyser fragments cells into multiple blocks and
-    #: collapses the per-word confidence. On successful recovery
-    #: (≥ 5-point mean-conf lift) the block's TSV entries are
-    #: replaced in-place so the downstream filter / rescue chain
-    #: sees the cleaner readings. Off by default;
-    #: ``universal_accurate`` opts in.
-    per_block_psm_retry: bool = False
-    #: Freeform ``-c key=value`` Tesseract parameters passed through
-    #: OCRmyPDF's ``tesseract_config`` kwarg. Profile authors use this
-    #: to toggle internal Tesseract behaviour that isn't exposed as a
-    #: first-class OCRConfig field. The recommended defaults for this
-    #: app (set by the builtin profile builders) are:
-    #:
-    #:   * ``preserve_interword_spaces=1`` — keeps the spaces between
-    #:     columns in tables and forms; without this Tesseract collapses
-    #:     variable-width gaps, destroying column alignment.
-    #:   * ``tessedit_do_invert=0`` — disables the built-in
-    #:     "maybe the page is white-on-black" detector. It triggers
-    #:     false positives on dark photos / scanner edge shadows and
-    #:     produces garbled output; our preprocessing already hands
-    #:     Tesseract a correctly-polarised binary image.
-    #:
-    #: Profile-specific keys (e.g. ``load_freq_dawg=0`` for contracts
-    #: with lots of ИНН / ОГРН digits, where the frequency dictionary
-    #: mis-corrects them) are set by the relevant builder method.
-    #:
-    #: Stored as ``dict[str, str]`` so every value round-trips through
-    #: JSON unchanged — Tesseract's CLI accepts all values as strings
-    #: anyway ("1" / "0", not ``True`` / ``False``).
-    extra_tesseract_params: dict[str, str] = field(default_factory=dict)
-
-    @property
-    def tesseract_language_string(self) -> str:
-        """Return language string in OCRmyPDF/Tesseract format (e.g. 'rus+eng')."""
-        ordered = [self.primary_language] + [
-            lang for lang in self.languages if lang != self.primary_language
-        ]
-        return "+".join(ordered)
 
 
 # ---------------------------------------------------------------------------
@@ -579,7 +425,7 @@ class ExtractConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 12
+PROFILE_SCHEMA_VERSION: int = 13
 
 
 @dataclass
@@ -782,7 +628,39 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         data["schema_version"] = 12
         version = 12
 
-    # Future migrations go here: `if version < 13: ...`
+    # v12 → v13 (апрель 2026): Tesseract → EasyOCR migration.
+    # Strip Tesseract-specific OCR fields, remap language codes
+    # (rus→ru, eng→en), and switch engine default. Unknown fields in
+    # the remaining ``ocr`` section are tolerated by ``_convert_value``.
+    if version < 13:
+        ocr = data.setdefault("ocr", {})
+        ocr["engine"] = "easyocr"
+        lang_map = {"rus": "ru", "eng": "en"}
+        if "languages" in ocr:
+            ocr["languages"] = [
+                lang_map.get(lang, lang) for lang in ocr["languages"]
+            ]
+        if "primary_language" in ocr:
+            ocr["primary_language"] = lang_map.get(
+                ocr["primary_language"], ocr["primary_language"]
+            )
+        if "char_whitelist" in ocr and "allowlist" not in ocr:
+            ocr["allowlist"] = ocr["char_whitelist"]
+        for dead in (
+            "psm", "oem", "tesseract_timeout", "char_whitelist",
+            "char_blacklist", "use_user_dictionaries",
+            "extra_tesseract_params", "per_word_script_disambiguation",
+            "per_word_clahe_rescue", "per_word_upscale_rescue",
+            "per_block_psm_retry", "redact_noisy_blocks",
+            "optimize_level",
+        ):
+            ocr.pop(dead, None)
+        ocr.setdefault("gpu", False)
+        ocr.setdefault("min_keep_confidence", 0.1)
+        data["schema_version"] = 13
+        version = 13
+
+    # Future migrations go here: `if version < 14: ...`
 
     return data
 

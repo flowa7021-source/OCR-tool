@@ -1,19 +1,9 @@
 """Abstract OCR engine interface.
 
-Engines are responsible for turning a *preprocessed* PDF into a
-searchable PDF and per-page text results. They receive a PDF that has
-already been rasterised, deskewed, denoised, binarised etc. by the
-pipeline — OpenCV preprocessing is intentionally kept outside the
-engine so all engines share it.
-
-Contract:
-    * ``name`` / ``description`` — human-readable labels for UI
-    * ``kind`` — matches the :class:`OCREngineKind` enum value
-    * ``is_available()`` — cheap availability probe (no model download,
-      no heavyweight imports); used by the UI to grey out unavailable
-      entries and explain *why*
-    * ``run()`` — actually do OCR. MUST produce a valid searchable PDF
-      at ``output_pdf`` and return one :class:`PageOCRResult` per page.
+Engines receive a preprocessed PDF (rasterised, deskewed, denoised,
+binarised by :class:`~src.core.image_preprocessor.ImagePreprocessor`)
+and must produce a searchable PDF + one :class:`PageOCRResult` per
+page.
 """
 
 from __future__ import annotations
@@ -36,13 +26,14 @@ ProgressCallback = Callable[[int, int, str], None]
 
 @dataclass
 class PageOCRResult:
-    """One page worth of OCR output returned by an engine."""
+    """One page worth of OCR output."""
 
     page_number: int  # 1-based
     text: str = ""
-    mean_confidence: float = 0.0
-    # Word-level bounding boxes in PDF user-space points (72 DPI).
-    # Each tuple is (x, y, w, h, confidence[0-100], text).
+    mean_confidence: float = 0.0  # 0..100
+    # (x, y, w, h, confidence[0..100], text) in pixel coords at the
+    # engine's rasterisation DPI. Callers that need PDF user-space
+    # convert via ``scale = 72 / dpi``.
     word_boxes: list[tuple[float, float, float, float, float, str]] = field(
         default_factory=list
     )
@@ -50,37 +41,24 @@ class PageOCRResult:
 
 
 class EngineNotAvailableError(RuntimeError):
-    """Raised when an engine is selected but its requirements are missing.
-
-    The string message is shown directly to the user, so it should be in
-    Russian and explain what's missing (model, optional package, etc.).
-    """
+    """Raised when an engine is selected but its requirements are missing."""
 
 
 class OCREngine(ABC):
     """Abstract base class for all OCR engines."""
 
-    #: The :class:`OCREngineKind` this implementation handles.
     kind: OCREngineKind
 
     @property
     @abstractmethod
-    def name(self) -> str:
-        """Short human-readable name (e.g. "Tesseract 5")."""
+    def name(self) -> str: ...
 
     @property
     @abstractmethod
-    def description(self) -> str:
-        """One-line description shown in the engine picker tooltip."""
+    def description(self) -> str: ...
 
     @abstractmethod
-    def is_available(self) -> tuple[bool, str]:
-        """Return ``(ok, message)`` describing current readiness.
-
-        ``ok`` is True only when the engine can run right now (binaries
-        found, model downloaded, optional deps importable). When False,
-        ``message`` MUST tell the user what to do in Russian.
-        """
+    def is_available(self) -> tuple[bool, str]: ...
 
     @abstractmethod
     def run(
@@ -91,41 +69,8 @@ class OCREngine(ABC):
         progress_callback: ProgressCallback | None = None,
         *,
         original_input_pdf: Path | None = None,
-    ) -> list[PageOCRResult]:
-        """Execute OCR on ``preprocessed_pdf`` and write searchable PDF.
-
-        Args:
-            preprocessed_pdf: Path to a PDF already rasterised and
-                preprocessed by the pipeline.
-            output_pdf: Destination path for the searchable PDF.
-                Parent directory will be created if missing.
-            config: User-facing OCR configuration.
-            progress_callback: Optional ``(current, total, stage)``
-                callback; may be called from worker threads.
-            original_input_pdf: Optional path to the ORIGINAL user
-                PDF (before any pipeline preprocessing). Engines use
-                this for retry tiers that need the raw raster — the
-                preprocessed version has already been binarised and
-                is destructive to reapply heavy preprocessing to.
-                ``None`` means "fall back to ``preprocessed_pdf``"
-                for backwards compatibility with existing engines.
-
-        Returns:
-            One :class:`PageOCRResult` per page of the input PDF.
-
-        Raises:
-            EngineNotAvailableError: When the engine cannot run and the
-                caller should surface a user-friendly message.
-            RuntimeError: For unrecoverable internal failures.
-        """
+    ) -> list[PageOCRResult]: ...
 
     def unload(self) -> None:
-        """Release any expensive resources held by the engine.
-
-        Default implementation is a no-op; override when the engine
-        keeps heavy objects around (ML model weights, GPU buffers,
-        opened file handles). Called by the engine registry when the
-        cache is reset and when the user switches to a different
-        engine via the UI.
-        """
+        """Release expensive resources (model weights, GPU buffers)."""
         return
