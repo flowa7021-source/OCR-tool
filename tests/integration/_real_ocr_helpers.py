@@ -232,6 +232,17 @@ def _text_pdf_bytes(
     Returns raw bytes so callers can choose where to put them (pass
     through ``_rasterise_as_image_only_pdf`` or apply image
     manipulations first).
+
+    Font-policy (апрель 2026): если ``cyrillic=True`` — обязательно
+    ищем system Unicode-capable TTF; ``cyrillic=False`` — ТОЖЕ
+    пробуем system TTF (DejaVu/Arial) в первую очередь, и только
+    при его отсутствии падаем на PyMuPDF-built-in ``helv``. Причина:
+    ``helv`` рисует очень тонкие штрихи (< 1 px при 72 DPI до
+    up-sampling'а), и под universal_accurate Sauvola window=25
+    k=0.2 они вычищаются как шум → tesseract возвращает
+    «Empty page!!». System-fonts (DejaVu Sans, Arial) имеют толще
+    штрихи и survive Sauvola стабильно на любом DPI. Если TTF нет
+    (min-режим CI без установленных fonts) — поведение старое.
     """
     import fitz
 
@@ -243,6 +254,13 @@ def _text_pdf_bytes(
                 "Cyrillic text requested but no system font with "
                 "Cyrillic coverage found"
             )
+    else:
+        # Latin-only текст: тоже предпочитаем толстый system-шрифт
+        # (тот же хелпер — DejaVu/Arial Unicode-capable работает и
+        # для Latin), чтобы preprocessing-стек universal_accurate
+        # не вычищал фикстуру. Fallback на ``helv`` только если
+        # system-fonts отсутствуют.
+        font_file = find_cyrillic_font()
 
     doc = fitz.open()
     try:

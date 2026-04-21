@@ -115,18 +115,23 @@ class TestCliCyrillicOutputPath:
     def test_cyrillic_output_path(
         self, tmp_path: Path, real_tesseract_wrapper,
     ) -> None:
-        # Длинный payload-текст: контракт теста — «CLI принимает
-        # Cyrillic output path», а не «OCR читает 4-символьные
-        # фикстуры». Короткое «test» на большой пустой странице
-        # универсальный профиль (Sauvola window=25 + local contrast
-        # CLAHE) местами вычищает как шум — тогда tesseract возвращает
-        # «Empty page!!», OCRmyPDF raises → CLI exit 1. Чуть более
-        # плотная «cyrillic output path smoke test» survives Sauvola
-        # стабильно и проверяет ровно то, для чего тест написан.
+        # ``cyrillic=True`` — принципиально, не косметика. PyMuPDF-
+        # default ``helv`` (built-in Helvetica) рисует очень тонкие
+        # штрихи; Sauvola window=25 k=0.2 в universal_accurate
+        # вычищает их как шум на пустой странице, tesseract возвращает
+        # «Empty page!!», CLI exit 1. Soseidний test_cli_processes_
+        # russian_pdf_with_cyrillic_paths показывает нормальный путь:
+        # `find_cyrillic_font()` → DejaVu/Arial с толстыми штрихами,
+        # survives Sauvola стабильно. Контракт этого теста — «CLI
+        # принимает Cyrillic output path», а не «OCR справляется с
+        # хрупкими фикстурами»; Cyrillic-текст + system-font
+        # устраняет preprocessing-артефакт и оставляет тест
+        # фокусированным на своём сигнале.
         input_pdf = render_clean_text_pdf(
             tmp_path / "in.pdf",
-            "cyrillic output path smoke test",
+            "Тест проверки Cyrillic output path",
             pages=1,
+            cyrillic=True,
             dpi=400, fontsize=72,
         )
         cyr_dir = tmp_path / "Мои документы"

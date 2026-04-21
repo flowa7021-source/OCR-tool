@@ -1256,10 +1256,20 @@ jobs:
               Type = "dir"
             },
             @{
+              # ``src.tn_parser`` — subpackage, не top-level. PyInstaller
+              # в отличие от rapidfuzz/openpyxl НЕ создаёт для него
+              # отдельную директорию в _internal\; модули попадают либо
+              # в ``_internal\src\tn_parser\`` (если пакет не распаковался
+              # в PYZ), либо в ``base_library.zip``. Ищем уникально-
+              # именованный файл ``sections.py`` (принадлежит только
+              # ``src.tn_parser``; других ``sections.py`` в bundle нет),
+              # затем проверяем что его родительская директория
+              # называется именно ``tn_parser`` — иначе мог найтись
+              # одноимённый чужой файл в зависимости.
               Name = "src.tn_parser package"
-              Pattern = "src\tn_parser"
-              Type = "dir"
-              Verify = { param($p) Test-Path (Join-Path $p "fields.py") }
+              Pattern = "sections.py"
+              Type = "file"
+              Verify = { param($p) (Split-Path $p -Parent | Split-Path -Leaf) -eq "tn_parser" }
             },
             @{
               Name = "scripts.run_golden"
