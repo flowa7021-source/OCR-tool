@@ -13,6 +13,7 @@ loading/...). Здесь — лёгкий маппинг к нашим 9 пол�
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import re
 import sys
@@ -20,6 +21,27 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+def _force_utf8_stdio() -> None:
+    """Принудительно переключить sys.stdout/sys.stderr в UTF-8.
+
+    На Windows default codepage — cp1252 / cp866, которые не кодируют
+    наши маркеры '✓'/'✗' (U+2713/U+2717), em-dash'и и кириллицу в
+    verbose-отчёте. Без этого на CI runner'е скрипт падает с
+    UnicodeEncodeError на первом же символе вывода. reconfigure
+    доступен начиная с Python 3.7; отсутствие метода
+    (StringIO в тестах) — silently no-op.
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            with contextlib.suppress(AttributeError, OSError, ValueError):
+                reconfigure(encoding="utf-8", errors="replace")
+
+
+_force_utf8_stdio()
 
 from src.tn_parser.core import extract_raw_text, parse_text  # noqa: E402
 from src.tn_parser.normalize import normalize_for_sections  # noqa: E402

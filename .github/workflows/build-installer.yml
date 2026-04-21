@@ -1034,8 +1034,11 @@ jobs:
           # ``open`` the input PDF, and sits waiting for user input
           # until the workflow step times out.
           #
-          # Uses ``quick_reliable`` (300 DPI, minimal preprocess) so
-          # the smoke-test wall time stays well under ~2 min.
+          # Uses ``universal_accurate`` — единственный builtin после
+          # консолидации декабря 2026 (quick_reliable / default /
+          # low_quality_scan и др. удалены; см. profile_manager).
+          # На SMOKE-входе (1-page English text @ 100 DPI) даже
+          # heavy-preprocessing профиль завершается за < 30 с.
           Write-Host "Running OCR via installed CLI..."
           $sw = [System.Diagnostics.Stopwatch]::StartNew()
           $proc = Start-Process -FilePath $cli `
@@ -1043,7 +1046,7 @@ jobs:
                 "--cli",
                 $smokeIn,
                 "-o", $smokeOut,
-                "--profile", "quick_reliable",
+                "--profile", "universal_accurate",
                 "--workers", "1"
               ) `
               -NoNewWindow -PassThru -Wait `
