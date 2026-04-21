@@ -74,12 +74,63 @@ def is_known_russian_word(word: str) -> bool:
     return any(p.is_known for p in parses[:3])
 
 
+# POS-классы, которые ХАРАКТЕРНЫ для content-слов, т.е. допустимые
+# цели fuzzy-замены:
+#
+#   NOUN — существительное («экземпляр», «организация»)
+#   VERB / INFN — глагол («является», «подписать»)
+#   ADJF / PRTF / GRND — полное прилагательное / причастие / деепричастие
+#   NPRO / NUMR — местоимение / числительное
+#
+# Proper nouns (фамилии, названия деревень типа «Подолино») часто
+# отсутствуют в OpenCorpora — fuzzy_corrector, получив кандидата
+# из 2M-lex, рискует подставить функциональное слово («Подолино»
+# → «Подлинно», ADVB). Эти POS ↓ почти НЕ бывают proper-noun-подстановкой:
+#
+#   ADVB — наречие («подлинно», «тепло»)
+#   PRED — предикатив («надо», «жаль»)
+#   PREP / CONJ / PRCL / INTJ / COMP — предлог/союз/частица/междометие
+#   ADJS / PRTS — КРАТКИЕ прилаг./прич. («красив», «пройден») —
+#     тоже редко имеют capitalized-форму как имя собственное
+#
+# Если ВСЕ parses кандидата — в этом «неконтентном» множестве, а
+# original Capitalized, то это скорее всего proper-noun ложное
+# срабатывание. Reject.
+_CONTENT_POS: frozenset[str] = frozenset({
+    "NOUN", "VERB", "INFN", "ADJF", "PRTF", "GRND", "NPRO", "NUMR",
+})
+
+
+def _has_content_pos_reading(word: str) -> bool:
+    """True если у ``word`` есть хотя бы один parse с POS из
+    ``_CONTENT_POS``. Для unknown words pymorphy3 гадает — если ВСЕ
+    угаданные теги в «некcontent» множестве, возвращаем False.
+    """
+    morph = _get_morph()
+    if morph is None:
+        return True  # no data → не блокируем
+    try:
+        parses = morph.parse(word.strip().lower())[:5]
+    except Exception:  # noqa: BLE001
+        return True
+    for p in parses:
+        pos = p.tag.POS
+        if pos in _CONTENT_POS:
+            return True
+    return False
+
+
 def should_accept_correction(original: str, candidate: str) -> bool:
     """Решить, стоит ли применять fuzzy-correction ``original →
     candidate``.
 
-    Правила (см. module-docstring):
+    Правила:
       * Accept только когда original unknown + candidate known.
+      * Proper-noun guard: если ``original`` капитализирован (первая
+        буква прописная, остальные строчные — типичный proper-noun
+        layout) И все parses кандидата — функциональные/служебные
+        (ADVB/PRED/PREP/…), отклоняем. Это защищает «Подолино» (geo-
+        имя) от превращения в «Подлинно» (ADVB).
       * В остальных случаях — conservative reject.
       * Пустые значения → reject.
     """
@@ -89,7 +140,18 @@ def should_accept_correction(original: str, candidate: str) -> bool:
         return False
     orig_known = is_known_russian_word(original)
     cand_known = is_known_russian_word(candidate)
-    return (not orig_known) and cand_known
+    if not ((not orig_known) and cand_known):
+        return False
+    # Proper-noun guard. Только для токенов с классическим именным
+    # case-pattern: первая заглавная, остальные строчные. ALL-UPPERCASE
+    # и lowercase токены пропускаем (для них guard не нужен — они не
+    # выглядят как proper nouns).
+    looks_proper = (
+        len(original) > 1
+        and original[0].isupper()
+        and original[1:].islower()
+    )
+    return not (looks_proper and not _has_content_pos_reading(candidate))
 
 
 __all__ = ["is_known_russian_word", "should_accept_correction"]

@@ -84,8 +84,8 @@ _RESOURCE_PATH = (
 #   «организаиия» → «организации» (score 94) — нормально принять.
 # Калибровка на inputs/TN_k_UPD_*.txt: 92 ловит 1-edit опечатки
 # и отклоняет любые замены короче 2/3 оригинала.
-_FUZZY_THRESHOLD_SHORT = 92    # tokens 6-8 chars
-_FUZZY_THRESHOLD_LONG = 90     # tokens ≥ 9 chars
+_FUZZY_THRESHOLD_SHORT = 87    # tokens 6-8 chars — 1 edit на 7 chars ≈ 86 %
+_FUZZY_THRESHOLD_LONG = 85     # tokens ≥ 9 chars — 1-2 edit'а на 10-14
 _MIN_TOKEN_LEN = 6             # < 6 символов — слишком двусмысленно
 
 # Минимальное соотношение длин |candidate| / |token|. Без этого
@@ -264,8 +264,15 @@ def _best_match(token_low: str) -> str | None:
         else _FUZZY_THRESHOLD_SHORT
     )
     try:
+        from rapidfuzz import fuzz
+        # ``scorer=fuzz.ratio`` (full-string Levenshtein) обязателен
+        # для расширенного 1.3M-форм lexicon'а (апрель 2026): default
+        # ``fuzz.WRatio`` включает partial_ratio, который на больших
+        # списках находит substring-match'и типа «экземиляр → емиля»
+        # с score 90 — это false-positives. Ratio сравнивает строки
+        # целиком, требуя настоящей edit-close proximity.
         match = process.extractOne(
-            token_low, lex, score_cutoff=threshold,
+            token_low, lex, scorer=fuzz.ratio, score_cutoff=threshold,
         )
     except Exception:  # noqa: BLE001 — rapidfuzz иногда падает на edge-cases
         return None
@@ -324,19 +331,13 @@ def correct(text: str) -> str:
         canonical = _best_match(token_low)
         if canonical is None:
             return token
-        # Proper-noun guard: для Capitalized-token'ов требуем
-        # еще более высокий score, чем для lowercase.
-        # Proper nouns (Иванов, Москва, Петергоф) не в словаре;
-        # fuzzy может найти ~90-score случайность. Повышаем порог
-        # до 95 — только убедительные 1-edit ошибки (Грузоотпрапитель
-        # → Грузоотправитель, score 98) проходят.
-        if token[0].isupper() and not token.isupper():
-            try:
-                from rapidfuzz import fuzz
-                if fuzz.ratio(token_low, canonical) < 95:
-                    return token
-            except ImportError:
-                return token
+        # Proper-noun guard УДАЛЁН (апрель 2026): blanket-требование
+        # score ≥ 95 % для Capitalized токенов блокировало legitimate
+        # OCR-fix'ы типа «Экземиляр → Экземпляр» (score 88.9). Для
+        # protection proper-nouns от случайной коррекции достаточно
+        # pymorphy3-gate ниже — если canonical не известен OpenCorpora,
+        # replace не применяется. Собственные имена не в OpenCorpora
+        # → не будут assigned как candidate.
         # pymorphy3 morphology gate (fix #C): убеждаемся что
         # candidate — реальное русское слово, а original — unknown
         # (= OCR-typo). Это защищает от замены legitimate-form
@@ -346,7 +347,10 @@ def correct(text: str) -> str:
         try:
             from .morphology_validator import should_accept_correction
 
-            if not should_accept_correction(token_low, canonical):
+            # Передаём ОРИГИНАЛ (с сохранённым casing), чтобы guard
+            # смог детектить Capitalized-токены как potentially-
+            # proper-noun. Передача token_low похерила бы всю логику.
+            if not should_accept_correction(token, canonical):
                 return token
         except Exception:  # noqa: BLE001 — validator не должен ронять pipeline
             pass

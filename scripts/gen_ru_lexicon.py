@@ -32,9 +32,12 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Минимальная / максимальная длина формы для inclusion в словарь.
-# Экспериментально подобрано — см. module-docstring rationale.
+# 5-12 — sweet spot: покрывает «организация»/«организации» (11 chars),
+# «предприятие» (11), «документация» (12). Ограничение до 10 оставляло
+# за бортом ключевые business-слова, и rapidfuzz возвращал близкие
+# но неправильные substring'и («организма» вместо «организация»).
 _MIN_LEN = 5
-_MAX_LEN = 10
+_MAX_LEN = 12
 
 
 def generate() -> set[str]:
