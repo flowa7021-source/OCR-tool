@@ -459,7 +459,7 @@ class TestE2ECLI:
         )
         assert result.returncode == 0, result.stderr
         # All built-in profiles should appear
-        for name in ("universal_accurate", "default", "universal_accurate", "universal_accurate", "universal_accurate", "universal_accurate"):
+        for name in ("universal_accurate", "universal_accurate", "universal_accurate", "universal_accurate", "universal_accurate"):
             assert name in result.stdout, f"missing {name} in {result.stdout!r}"
 
     def test_list_profiles_survives_cp1252_stdio(self, tmp_path: Path) -> None:
@@ -489,7 +489,7 @@ class TestE2ECLI:
         )
         # stdout is UTF-8 bytes thanks to the shim.
         out = result.stdout.decode("utf-8", errors="replace")
-        assert "default" in out
+        assert "universal_accurate" in out
 
     def test_version_flag_returns_zero(self) -> None:
         import subprocess

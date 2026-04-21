@@ -81,7 +81,7 @@ class TestContractRu4Page:
 
     @pytest.mark.parametrize(
         "profile_name",
-        ["default", "universal_accurate", "universal_accurate", "universal_accurate"],
+        ["universal_accurate", "universal_accurate", "universal_accurate"],
     )
     def test_every_page_has_text(
         self,
@@ -206,7 +206,6 @@ class TestAllProfilesAllFixtures:
     ])
     @pytest.mark.parametrize("profile_name", [
         "universal_accurate",
-        "default",
         "universal_accurate",
         "universal_accurate",
         "universal_accurate",

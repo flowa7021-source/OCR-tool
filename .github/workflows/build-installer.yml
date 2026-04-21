@@ -1126,10 +1126,19 @@ jobs:
             throw "Installed binary not found — previous smoke step should have established it"
           }
 
-          $tnPdf = "${{ github.workspace }}\TN_k_UPD_36_ot_02.09.2022 ocred.pdf"
-          if (-not (Test-Path $tnPdf)) {
-            throw "Parser smoke input missing: $tnPdf (committed at repo root in PR #1)"
+          $tnPdfOriginal = "${{ github.workspace }}\TN_k_UPD_36_ot_02.09.2022 ocred.pdf"
+          if (-not (Test-Path $tnPdfOriginal)) {
+            throw "Parser smoke input missing: $tnPdfOriginal (committed at repo root in PR #1)"
           }
+          # Имя файла содержит ПРОБЕЛ (« ocred.pdf»). PowerShell
+          # Start-Process -ArgumentList склеивает элементы массива
+          # в единую command-line строку через пробел, и cli'шке
+          # прилетает путь в виде ДВУХ argv'ов: «….2022» и
+          # «ocred.pdf». Копируем в RUNNER_TEMP под именем без
+          # пробелов — unambiguous argv.
+          $tnPdf = Join-Path $env:RUNNER_TEMP "tn_upd_36_ocred.pdf"
+          Copy-Item -Force -LiteralPath $tnPdfOriginal -Destination $tnPdf
+          Write-Host "Copied parser-smoke input → $tnPdf"
 
           $xlsx = Join-Path $env:RUNNER_TEMP "parser-smoke.xlsx"
           $outPdf = Join-Path $env:RUNNER_TEMP "parser-smoke-out.pdf"
@@ -1138,27 +1147,26 @@ jobs:
           $logPath = [System.IO.Path]::ChangeExtension($xlsx, ".log")
           if (Test-Path $logPath) { Remove-Item $logPath -Force }
 
-          Write-Host "Running tn_upd + Excel export via installed CLI..."
+          Write-Host "Running universal_accurate + Excel export via installed CLI..."
           $sw = [System.Diagnostics.Stopwatch]::StartNew()
-          # ``--profile tn_upd`` activates ``extract.enabled=True`` in
-          # the bundled profile (PR #2). ``--excel`` tells the CLI to
-          # delegate to ExportManager.export_excel, which in turn
-          # calls tn_parser.excel.write_excel_safe — the same code
-          # path GUI export uses. The xlsx path is derived from ``-o``
-          # by swapping the ``.pdf`` suffix for ``.xlsx``. Two sidecars
-          # appear next to it:
+          # ``--profile universal_accurate`` — единственный builtin
+          # после декабрьской 2026 консолидации. extract.enabled=True
+          # и extract.kind=tn_upd слиты в него (см. profile_manager).
+          # ``--excel`` делегирует в ExportManager.export_excel →
+          # tn_parser.excel.write_excel_safe. Xlsx path выводится
+          # из ``-o`` заменой .pdf → .xlsx. Рядом создаются
+          # sidecar'ы:
           #   * ``<stem>.log``               — human-readable report
           #   * ``<stem>.xlsx.snapshot.json`` — feedback-loop snapshot
           #
-          # We pass --workers 1 to keep the smoke deterministic and
-          # to sidestep ProcessPool-on-Windows quirks that don't
-          # belong in a pipeline-verification test.
+          # --workers 1: детерминистично и без ProcessPool-Windows
+          # quirks, чужды pipeline-verification тесту.
           $proc = Start-Process -FilePath $cli `
               -ArgumentList @(
                 "--cli",
                 $tnPdf,
                 "-o", $outPdf,
-                "--profile", "tn_upd",
+                "--profile", "universal_accurate",
                 "--excel",
                 "--workers", "1"
               ) `

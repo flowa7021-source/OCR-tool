@@ -39,6 +39,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import io
 import json
 import shutil
@@ -52,6 +53,17 @@ from typing import Any
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+
+# Windows default codepage (cp1252 / cp866) не кодирует кириллицу и
+# маркеры ✓/✗ — выводим в UTF-8 принудительно. reconfigure
+# доступен с Python 3.7; отсутствие (StringIO) — silent no-op.
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if callable(_reconfigure):
+        with contextlib.suppress(AttributeError, OSError, ValueError):
+            _reconfigure(encoding="utf-8", errors="replace")
 
 
 # ---------------------------------------------------------------------------

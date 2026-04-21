@@ -194,7 +194,7 @@ class TestProfileManagementGUI:
     ) -> None:
         combo = main_window.profile_combo
         for i in range(combo.count()):
-            if combo.itemData(i) == "default":
+            if combo.itemData(i) == "universal_accurate":
                 combo.setCurrentIndex(i)
                 break
         qtbot.wait(50)
@@ -253,7 +253,7 @@ class TestQueuePanelSignals:
             config=OCRJobConfig(
                 input_path="/tmp/x.pdf",
                 output_path="/tmp/x_ocr.pdf",
-                profile=ProfileData(name="default"),
+                profile=ProfileData(name="universal_accurate"),
             ),
         )
         main_window._queue_manager.add(item)

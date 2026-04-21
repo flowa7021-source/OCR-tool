@@ -370,14 +370,12 @@ def main() -> int:
     parser.add_argument(
         "--profiles",
         nargs="+",
-        default=[
-            "universal_accurate",
-            "default",
-            "quick_reliable",
-            "low_quality_scan",
-            "contracts_ru",
-        ],
-        help="Built-in profiles to sweep (space-separated).",
+        default=["universal_accurate"],
+        help=(
+            "Built-in profiles to sweep (space-separated). "
+            "С декабря 2026 единственный builtin — universal_accurate; "
+            "пользовательские копии передавайте через --profiles."
+        ),
     )
     parser.add_argument(
         "--dpis",

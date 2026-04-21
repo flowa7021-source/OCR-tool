@@ -492,7 +492,7 @@ def test_remove_artifacts_flag_drops_pure_punctuation_lines(tmp_path: Path) -> N
     "profile_name",
     # Skip universal_accurate (only built in code, no JSON in repo).
     # The five below ship as JSON in /profiles/.
-    ["default", "universal_accurate", "universal_accurate", "universal_accurate", "universal_accurate"],
+    ["universal_accurate", "universal_accurate", "universal_accurate", "universal_accurate"],
 )
 def test_bundled_builtin_profile_loads_and_runs_through_pipeline(
     profile_name: str, tmp_path: Path

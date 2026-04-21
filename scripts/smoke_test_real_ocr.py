@@ -221,14 +221,11 @@ def _run_pipeline(
 
 
 # All Tesseract-engine profiles that must produce recognised text.
-# ``handwritten_mixed`` is GOT-OCR 2.0 → needs the model download → skipped.
-# ``universal_accurate`` uses 600 DPI → capped at 300 for speed.
+# Декабрь 2026: builtin профили консолидированы в единственный
+# ``universal_accurate`` (см. profile_manager). ``quick_reliable``,
+# ``default``, ``contracts_ru``, ``low_quality_scan``, ``english_text``
+# удалены. Smoke-test проверяет единственный оставшийся profile.
 _ALL_TESSERACT_PROFILES: list[str] = [
-    "quick_reliable",
-    "default",
-    "contracts_ru",
-    "low_quality_scan",
-    "english_text",
     "universal_accurate",
 ]
 

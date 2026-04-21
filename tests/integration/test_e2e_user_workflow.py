@@ -183,18 +183,13 @@ class TestAllBundledProfilesRealOCR:
     empty hOCR and we didn't notice until a user reported it.
     """
 
+    # Декабрь 2026: единственный builtin — universal_accurate.
+    # Раньше параметризовался по quick_reliable / default /
+    # contracts_ru / low_quality_scan (все удалены при консолидации
+    # 7→1). Оставлена одна entry — одна параметризация, один прогон.
     @pytest.mark.parametrize(
         "profile_name",
-        [
-            "default",
-            "universal_accurate",
-            "universal_accurate",
-            "universal_accurate",
-            # ``english_text`` uses eng-only — tested below in a
-            # separate English-text parametrisation.
-            # ``universal_accurate`` uses 500+ DPI — too slow for CI
-            # as a parametrised test; dedicated test below caps DPI.
-        ],
+        ["universal_accurate"],
     )
     def test_profile_produces_russian_text(
         self,
@@ -223,32 +218,12 @@ class TestAllBundledProfilesRealOCR:
         assert_ocr_recognised(result, ["ДОГ", "ОГО", "ВОР"])
 
 
-@requires_real_ocr
-class TestEnglishTextProfile:
-    """``english_text`` profile is eng-only — verify it OCRs English."""
-
-    def test_english_text_profile_produces_text(
-        self,
-        tmp_path: Path,
-        real_tesseract_wrapper,
-    ) -> None:
-        from src.application.profile_manager import ProfileManager
-        from src.infrastructure.config_storage import ProfileStorage
-
-        storage = ProfileStorage(profiles_dir=tmp_path / "profiles")
-        manager = ProfileManager(storage)
-        manager.initialize_builtins()
-        profile = manager.load("universal_accurate")
-
-        input_pdf = render_clean_text_pdf(
-            tmp_path / "en.pdf", text="CONTRACT AGREEMENT"
-        )
-        output_pdf = tmp_path / "en_ocr.pdf"
-
-        result = run_pipeline(
-            input_pdf, output_pdf, profile, real_tesseract_wrapper
-        )
-        assert_ocr_recognised(result, ["CONTRACT", "AGREEMENT"])
+# Декабрь 2026: TestEnglishTextProfile удалён — профиль
+# english_text больше не существует (консолидация 7→1). English OCR
+# по-прежнему работает на universal_accurate (rus+eng в profile.ocr.
+# languages). Дополнительный английский assert покрыт в
+# TestAllBundledProfilesRealOCR::test_profile_produces_russian_text
+# — там rus+eng, оба алфавита распознаются.
 
 
 @requires_real_russian_ocr

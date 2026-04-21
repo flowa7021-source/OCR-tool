@@ -71,7 +71,7 @@ class TestCliSingleFile:
         result = _run_cli(
             str(input_pdf),
             "-o", str(output_pdf),
-            "--profile", "default",
+            "--profile", "universal_accurate",
             cwd=tmp_path,
         )
 
@@ -92,8 +92,8 @@ class TestCliListProfiles:
         )
         # Output should include at least a couple of built-ins
         combined = result.stdout + result.stderr
-        assert "default" in combined, (
-            f"--list-profiles didn't show 'default':\n{combined}"
+        assert "universal_accurate" in combined, (
+            f"--list-profiles did not show universal_accurate:\n{combined}"
         )
 
 
@@ -120,7 +120,7 @@ class TestCliCyrillicOutputPath:
         result = _run_cli(
             str(input_pdf),
             "-o", str(output_pdf),
-            "--profile", "default",
+            "--profile", "universal_accurate",
             cwd=tmp_path,
         )
         assert result.returncode == 0, (

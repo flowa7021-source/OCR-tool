@@ -49,6 +49,7 @@ Exit codes (идентичны быстрому варианту e2e_tn_pipeline
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
@@ -63,6 +64,15 @@ from typing import Any
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+
+# Windows cp1252/cp866 не кодируют кириллицу / ✓/✗ — forced UTF-8.
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if callable(_reconfigure):
+        with contextlib.suppress(AttributeError, OSError, ValueError):
+            _reconfigure(encoding="utf-8", errors="replace")
 
 
 # ---------------------------------------------------------------------------
