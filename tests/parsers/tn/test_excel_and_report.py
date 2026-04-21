@@ -44,7 +44,8 @@ def _sample_rows():
 
 
 class TestExcel:
-    def test_has_13_columns_including_confidence(self, tmp_path):
+    def test_has_19_columns_including_confidence(self, tmp_path):
+        # 19 колонок: base 12 + 6 ИНН/КПП/ОГРН (апрель 2026) + 1 conf.
         rows = list(_sample_rows())
         out = tmp_path / "out.xlsx"
         write_excel(rows, str(out))
@@ -52,8 +53,14 @@ class TestExcel:
         wb = load_workbook(out)
         ws = wb.active
         headers = [ws.cell(row=1, column=i + 1).value for i in range(len(COLUMNS))]
-        assert len(headers) == 13
+        assert len(headers) == 19
         assert headers[-1] == "Уверенность, %"
+        # Реквизиты отправителя — сразу после «Грузоотправитель».
+        assert "ИНН отправителя" in headers
+        assert (
+            headers.index("ИНН отправителя")
+            == headers.index("Грузоотправитель") + 1
+        )
         # Объём — между «Груз» и «Водитель».
         assert "Объём" in headers
         assert headers.index("Объём") == headers.index("Груз") + 1
@@ -66,8 +73,7 @@ class TestExcel:
 
         wb = load_workbook(out)
         ws = wb.active
-        # Колонка confidence — 13-я.
-        conf_col = len(COLUMNS)
+        conf_col = len(COLUMNS)  # последняя колонка
         assert ws.cell(row=2, column=conf_col).value == 92  # high ≈ 0.92 → 92%
         assert ws.cell(row=3, column=conf_col).value == 0   # low
         assert ws.cell(row=4, column=conf_col).value == 0   # err
@@ -90,8 +96,9 @@ class TestExcel:
         write_excel([high], str(out))
         wb = load_workbook(out)
         ws = wb.active
-        # Объём — 7-я колонка.
-        assert ws.cell(row=2, column=7).value == "500 шт"
+        # Объём — 13-я колонка (после добавления 6 реквизитов).
+        volume_idx = [c[0] for c in COLUMNS].index("Объём") + 1
+        assert ws.cell(row=2, column=volume_idx).value == "500 шт"
 
     def test_vehicle_cell_wraps_on_newline(self, tmp_path):
         high, _, _ = _sample_rows()
@@ -99,8 +106,10 @@ class TestExcel:
         write_excel([high], str(out))
         wb = load_workbook(out)
         ws = wb.active
-        # ТС — 9-я колонка, значение с переносом строки.
-        cell = ws.cell(row=2, column=9)
+        # ТС: ищем колонку по заголовку — после добавления 6
+        # реквизитов её позиция сместилась с 9 на 15.
+        vehicle_idx = [c[0] for c in COLUMNS].index("Транспортное средство") + 1
+        cell = ws.cell(row=2, column=vehicle_idx)
         assert "\n" in (cell.value or "")
         assert cell.alignment.wrap_text  # перенос внутри ячейки включён
 

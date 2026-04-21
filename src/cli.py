@@ -123,6 +123,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Увеличить детализацию логов (-v = INFO, -vv = DEBUG)",
     )
     p.add_argument(
+        "--no-cache",
+        action="store_true",
+        help=(
+            "Отключить OCR-кэш (эквивалент env OCR_DISABLE_CACHE=1). "
+            "Использовать при отладке / тестах когда нужно гарантировать "
+            "что результат произведён текущим кодом, а не взят из "
+            "предыдущего прогона на том же входе."
+        ),
+    )
+    p.add_argument(
         "--version",
         action="version",
         version=f"{APP_NAME} {APP_VERSION}",
@@ -646,6 +656,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(raw_argv)
     _configure_logging(args.verbose)
+
+    # ``--no-cache`` прокидывается в pipeline через env (чтобы
+    # дочерние multiprocess-воркеры, если задействованы, тоже
+    # увидели настройку — argparse args не переносятся через
+    # ProcessPoolExecutor).
+    if getattr(args, "no_cache", False):
+        import os as _os
+        _os.environ["OCR_DISABLE_CACHE"] = "1"
 
     if args.list_profiles:
         return list_profiles()

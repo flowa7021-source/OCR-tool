@@ -184,7 +184,24 @@ class OCRPipeline:
         # rebuild the JobResult from the stored metadata — skipping
         # rasterisation, OCR, and post-processing entirely. This is the
         # single biggest win for the "tune a profile, re-run" workflow.
-        cached = self._try_cache_hit(input_path, job.profile, output_path, job_id)
+        #
+        # Escape-hatch: env var ``OCR_DISABLE_CACHE=1`` отключает и
+        # lookup, и последующий store. Нужно для тестов / отладки,
+        # чтобы точно знать что видишь результат текущего кода, а не
+        # удачный хит с прошлого прогона (классическая ошибка
+        # "fix работает" когда на самом деле просто cache-hit).
+        import os as _os
+        cache_disabled = _os.environ.get("OCR_DISABLE_CACHE", "").lower() in (
+            "1", "true", "yes",
+        )
+        if cache_disabled:
+            logger.info(
+                "OCR cache disabled via OCR_DISABLE_CACHE env var; "
+                "skipping lookup for job %s", job_id,
+            )
+        cached = None if cache_disabled else self._try_cache_hit(
+            input_path, job.profile, output_path, job_id,
+        )
         if cached is not None:
             self._report(cached.page_count or 1, cached.page_count or 1, "cache-hit")
             # Profile may have flipped ``extract.enabled=True`` since
@@ -817,6 +834,13 @@ class OCRPipeline:
                         mean_conf, min_conf,
                     )
                     return
+
+            import os as _os
+            if _os.environ.get("OCR_DISABLE_CACHE", "").lower() in (
+                "1", "true", "yes",
+            ):
+                logger.debug("OCR cache disabled via env; skipping store")
+                return
 
             ocr_cache.store(
                 input_path,

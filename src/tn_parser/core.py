@@ -16,12 +16,18 @@ import tempfile
 
 from .fields import extract_all
 from .layout import extract_best_text
-from .models import GARBAGE, MISSING, FieldConfidence, ParsedRow
+from .models import (
+    GARBAGE,
+    MISSING,
+    FieldConfidence,
+    ParsedRow,
+    normalise_handwritten,
+)
 from .normalize import normalize_for_sections
 from .org_lookup import lookup_by_inn
 from .sections import split_sections
 from .splitter import split_documents
-from .validators import is_valid_inn
+from .validators import find_inn, is_valid_inn
 
 LOW_TEXT_THRESHOLD = 200  # символов
 CACHE_VERSION = 10  # ↑ при изменении логики парсинга
@@ -282,6 +288,15 @@ def _build_row(text: str, source: str, global_fallback: str = "") -> ParsedRow:
     row.vehicle = fields["vehicle"][0]
     row.reception = fields["reception"][0]
 
+    # Нормализация маркера рукописи: поле целиком «⟨рукописный
+    # текст⟩» (OCR-postproc-метка на handwritten-блок) заменяется на
+    # «Рукописный текст» — человекочитаемо для Excel-пользователя.
+    # Смешанные значения (часть печатной + часть рукописной)
+    # сохраняются как есть: печатная часть ценна.
+    for fname in ("shipper", "consignee", "cargo", "volume",
+                  "driver", "vehicle", "reception"):
+        setattr(row, fname, normalise_handwritten(getattr(row, fname)))
+
     # Cross-validate ORG-поля через ИНН-каталог: если извлечённая
     # строка содержит валидный ИНН и он есть в каталоге, добавляем
     # canonical-name как аннотацию (для shipper/reception) и
@@ -309,12 +324,60 @@ def _build_row(text: str, source: str, global_fallback: str = "") -> ParsedRow:
     # validation на следующих.
     _auto_learn_from_row(row)
 
+    # Derived реквизиты: ИНН/КПП/ОГРН из уже извлечённых shipper /
+    # consignee строк. Для бухучёта это главная цель парсинга — эти
+    # поля дают однозначный match на контрагента в ERP, тогда как
+    # free-text ``shipper`` / ``consignee`` требуют ручной сверки.
+    # Если регекс валидаторов (с checksum для ИНН/ОГРН и
+    # позиционной проверкой для КПП) нашёл значение — выставляем
+    # confidence=1.0. Если нет — оставляем поле пустым с conf=0.0.
+    from .validators import find_kpp as _find_kpp
+    from .validators import find_ogrn as _find_ogrn
+
+    sh_text = row.shipper if row.shipper not in (MISSING, GARBAGE) else ""
+    cn_text = row.consignee if row.consignee not in (MISSING, GARBAGE) else ""
+    rc_text = row.reception if row.reception not in (MISSING, GARBAGE) else ""
+
+    row.shipper_inn = find_inn(sh_text) or ""
+    row.shipper_kpp = _find_kpp(sh_text) or ""
+    row.shipper_ogrn = _find_ogrn(sh_text) or ""
+    row.consignee_inn = find_inn(cn_text) or ""
+    row.consignee_kpp = _find_kpp(cn_text) or ""
+    row.consignee_ogrn = _find_ogrn(cn_text) or ""
+
+    # Fallback: если section-detector ``1. Грузоотправитель`` ошибся и
+    # взял соседнюю ячейку ``1а Заказчик услуг`` (часто встречается —
+    # OCR на multi-page ТН смешивает якоря), реквизиты отправителя
+    # мы можем достать из секции ``8. Приём груза`` / ``9. Сдача
+    # груза``, где по форме Постановления № 2200 повторно указано
+    # ``ООО … ИНН …``. Приоритет отдаём primary-extraction (shipper),
+    # fallback трогаем только пустые слоты.
+    if rc_text:
+        if not row.shipper_inn:
+            fallback_inn = find_inn(rc_text)
+            if fallback_inn:
+                row.shipper_inn = fallback_inn
+        if not row.shipper_kpp:
+            fallback_kpp = _find_kpp(rc_text)
+            if fallback_kpp:
+                row.shipper_kpp = fallback_kpp
+        if not row.shipper_ogrn:
+            fallback_ogrn = _find_ogrn(rc_text)
+            if fallback_ogrn:
+                row.shipper_ogrn = fallback_ogrn
+
     row.confidence = FieldConfidence(
         date=fields["date"][1],
         number=fields["number"][1],
         # min(1.0, ...) — confidence не может превышать 1.0 после boost
         shipper=min(1.0, fields["shipper"][1] + sh_delta),
+        shipper_inn=1.0 if row.shipper_inn else 0.0,
+        shipper_kpp=1.0 if row.shipper_kpp else 0.0,
+        shipper_ogrn=1.0 if row.shipper_ogrn else 0.0,
         consignee=min(1.0, fields["consignee"][1] + cn_delta),
+        consignee_inn=1.0 if row.consignee_inn else 0.0,
+        consignee_kpp=1.0 if row.consignee_kpp else 0.0,
+        consignee_ogrn=1.0 if row.consignee_ogrn else 0.0,
         cargo=fields["cargo"][1],
         volume=fields["volume"][1],
         driver=fields["driver"][1],
