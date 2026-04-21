@@ -407,14 +407,40 @@ def _invoke_ocrmypdf_with_timeout_retry(
     # ``use_threads`` value (``True``) avoids the crash; the timeout
     # increase alone is sufficient for the retry to succeed on the
     # vast majority of timed-out pages.
-    logger.warning(
+    #
+    # Tier-lowered до INFO: на per-page parallel-путь тестовая ТН/УПД
+    # часто попадает через тот же escalation-chain и успешно
+    # восстанавливается retry'ем. Раньше WARNING-сообщение на
+    # normal-path сбивало пользователя — выглядело как ошибка, хотя
+    # на деле retry легитимно срабатывал и страница OCR'лась в
+    # итоговом PDF. Настоящая регрессия — когда retry ТОЖЕ не
+    # восстанавливает: для этого логируется отдельный WARNING после
+    # успешного/неуспешного retry'а ниже.
+    logger.info(
         "OCRmyPDF first attempt unusable (%s) at tesseract_timeout=%ds — "
-        "retrying once with tesseract_timeout=%ds. "
-        "If this retry also fails the user will need to lower DPI or "
-        "raise tesseract_timeout in the profile.",
+        "escalating to tesseract_timeout=%ds. This is normal for dense/"
+        "heavily-bordered pages; second attempt usually succeeds.",
         retry_reason, base_timeout, retry_timeout,
     )
-    ocrmypdf.ocr(input_file, output_file, **retry_kwargs)
+    try:
+        ocrmypdf.ocr(input_file, output_file, **retry_kwargs)
+    except Exception:
+        logger.warning(
+            "OCRmyPDF retry (tesseract_timeout=%ds) ALSO failed after "
+            "first-attempt reason %r. User should lower DPI or raise "
+            "tesseract_timeout in the profile.",
+            retry_timeout, retry_reason,
+        )
+        raise
+    # Post-retry sanity: если и вторая попытка вернула empty-output —
+    # это настоящая проблема, не спам.
+    if not _output_pdf_has_any_text(output_file):
+        logger.warning(
+            "OCRmyPDF retry (tesseract_timeout=%ds) completed but output "
+            "still has no text (reason: %s). User should lower DPI or raise "
+            "tesseract_timeout in the profile.",
+            retry_timeout, retry_reason,
+        )
 
 
 def run_ocrmypdf(options: OCRmyPDFOptions) -> None:
