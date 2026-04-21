@@ -493,43 +493,40 @@ class OCRPipeline:
             if all_empty:
                 logger.warning(
                     "Job %s COMPLETED but NO text was recognised on any "
-                    "page. Likely causes: wrong DPI for this scan, "
-                    "Tesseract timed out silently, or preprocessing "
-                    "destroyed the glyphs. Try the 'quick_reliable' "
-                    "profile or lower DPI.",
+                    "page. Likely causes: damaged scan, Tesseract timed "
+                    "out, или preprocessing уничтожил глифы. Создайте "
+                    "копию профиля и понизьте DPI / включите более "
+                    "агрессивный denoise (CLAHE clip 4.0, NLM h=15).",
                     job_id,
                 )
                 result.error = (
                     "Документ обработан, но текст не был распознан "
-                    "ни на одной странице. Попробуйте профиль "
-                    "«quick_reliable» или уменьшите DPI."
+                    "ни на одной странице. Создайте копию профиля "
+                    "universal_accurate и снизьте DPI или включите "
+                    "более агрессивный денойз."
                 )
 
-            # Wrong-profile hint — when the job finished but mean
-            # confidence is low the user almost certainly picked the
-            # wrong profile for the document (high-DPI profile on a
-            # blurry phone snap; contracts_ru on an invoice with
-            # table rules; English profile on Russian text). Surface
-            # the suggestion via both the logger and a structured
-            # ``profile_recommendation`` progress event so the UI can
-            # show a non-blocking toast instead of burying the hint
-            # in the log viewer.
+            # Wrong-profile hint — после удаления fast/slow профилей
+            # (декабрь 2026) рекомендация переключиться на специальный
+            # builtin больше не релевантна: единственный builtin
+            # ``universal_accurate`` уже включает все best-of-all
+            # настройки. Если confidence остался низким, проблема
+            # либо в самом скане (низкое DPI / artefacts), либо в
+            # пользовательской копии профиля с урезанным препроцессингом.
+            # Предлагаем — но не предписываем — пересохранить копию
+            # профиля или вернуться на builtin.
             if not all_empty and result.pages:
                 avg_conf = result.average_confidence
                 if 0.0 < avg_conf < 60.0:
                     current_profile = job.profile.name
-                    recommended: list[str] = []
-                    if current_profile != "low_quality_scan":
-                        recommended.append("low_quality_scan")
-                    if current_profile != "quick_reliable":
-                        recommended.append("quick_reliable")
-                    if recommended:
+                    if current_profile != "universal_accurate":
                         logger.warning(
-                            "Job %s finished at %.1f%% mean confidence — "
-                            "current profile %r may not be the best "
-                            "match. Consider trying: %s",
+                            "Job %s finished at %.1f%% mean confidence "
+                            "with custom profile %r. Try the builtin "
+                            "'universal_accurate' to compare — оно "
+                            "включает Sauvola + полный postprocessing + "
+                            "адаптивный confidence threshold.",
                             job_id, avg_conf, current_profile,
-                            " / ".join(recommended),
                         )
                         import contextlib
 
@@ -537,9 +534,19 @@ class OCRPipeline:
                             self._report(
                                 total_pages,
                                 total_pages,
-                                f"profile_recommendation:{avg_conf:.0f}:"
-                                + ",".join(recommended),
+                                (
+                                    f"profile_recommendation:{avg_conf:.0f}:"
+                                    "universal_accurate"
+                                ),
                             )
+                    else:
+                        logger.warning(
+                            "Job %s finished at %.1f%% mean confidence on "
+                            "the canonical builtin profile. Это указывает "
+                            "на качество скана (low DPI / artefacts), а не "
+                            "на конфигурацию OCR.",
+                            job_id, avg_conf,
+                        )
 
             logger.info(
                 "Job %s COMPLETED in %.2fs (avg conf=%.1f, pages=%d, out=%s)",
@@ -594,10 +601,11 @@ class OCRPipeline:
             return
         if dpi >= 600 and timeout < 300:
             logger.warning(
-                "Job %s: DPI=%d + tesseract_timeout=%ds is a known risky "
-                "combination. Expect to hit the auto-retry path. "
-                "Recommendation: use the 'quick_reliable' profile, or "
-                "raise tesseract_timeout to 300+ in the active profile.",
+                "Job %s: DPI=%d + tesseract_timeout=%ds — рискованная "
+                "комбинация, ожидайте auto-retry. Поднимите "
+                "tesseract_timeout до 300+ в активном профиле, либо "
+                "вернитесь на builtin 'universal_accurate' (DPI=400, "
+                "timeout=360 — проверенный sweet spot для LSTM).",
                 job_id, dpi, timeout,
             )
 

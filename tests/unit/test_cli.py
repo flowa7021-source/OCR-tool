@@ -20,7 +20,10 @@ class TestArgumentParsing:
     def test_parser_accepts_single_pdf(self) -> None:
         args = cli.build_parser().parse_args(["file.pdf"])
         assert args.inputs == [Path("file.pdf")]
-        assert args.profile == "default"
+        # С декабря 2026 единственный builtin — universal_accurate
+        # (default / quick_reliable / contracts_ru / english_text /
+        # low_quality_scan / tn_upd удалены, см. profile_manager).
+        assert args.profile == "universal_accurate"
         assert args.workers == 1
         assert args.txt is False
         assert args.docx is False

@@ -36,7 +36,6 @@ on:
       - "src/core/image_preprocessor.py"
       - "scripts/e2e_tn_pipeline.py"
       - "scripts/run_golden.py"
-      - "profiles/tn_upd.json"
       - "profiles/universal_accurate.json"
       - "inputs/**"
       - "expected/**"
@@ -157,7 +156,7 @@ jobs:
       # ----- Шаг B: rus + eng + osd tessdata_best
       # Chocolatey пакет tesseract ставит только eng.traineddata.
       # Без rus.traineddata OCR-пайплайн валится с «Отсутствуют
-      # языки: rus» при preflight-проверке профиля tn_upd.
+      # языки: rus» при preflight-проверке профиля universal_accurate.
       - name: Download rus + eng + osd traineddata
         shell: pwsh
         run: |
@@ -298,22 +297,27 @@ jobs:
 
       # ----- Шаг E2: полный production pipeline
       # Это тот же путь, который работает у пользователя в GUI и
-      # в ``ocr-cli input.pdf --profile tn_upd --excel``:
-      # ImagePreprocessor (Sauvola/OTSU/adaptive, deskew, CLAHE,
-      # border_removal) + Tesseract + TextPostprocessor
-      # (autocorrect_russian, fix_cyrillic_latin_confusion,
-      # validate_entities) + tn_parser orchestrator. Именно этот
-      # путь достигает максимального combined confidence; в локальных
-      # замерах на inputs/TN_k_UPD_36: OCR 47% / parser 54% / comb 51%
-      # / acc 67%. На продакшен-чистых сканах (не наши inputs/) —
-      # выше, т.к. preprocessing там эффективнее.
+      # в ``ocr-cli input.pdf --excel`` (профиль выбирается дефолтным
+      # builtin'ом — universal_accurate, единственный с декабря 2026):
+      # ImagePreprocessor (Sauvola, deskew, CLAHE, border_removal,
+      # 400 DPI) + Tesseract (drop_low_conf_words + soft_rescue +
+      # adaptive_threshold + per_word_script_disambiguation +
+      # per_word_clahe_rescue + per_word_upscale_rescue +
+      # user_words_fuzzy_rescue + per_block_psm_retry +
+      # load_freq_dawg=0) + TextPostprocessor (autocorrect_russian,
+      # fix_cyrillic_latin_confusion, validate_identifiers,
+      # validate_entities) + tn_parser orchestrator
+      # (extract.kind=tn_upd, multi_document=True). На наших scan-
+      # корпусе из inputs/ accuracy 67%, combined ≈ 50% — реалистично
+      # для серого скана 2022 года. На clean scans производственных
+      # ТН — combined вырастает до 80-95%.
       - name: Run full E2E (production OCRPipeline + parser)
         shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
           python scripts/e2e_tn_pipeline_full.py `
-              --profile tn_upd `
+              --profile universal_accurate `
               --min-accuracy 0.50 `
               --min-conf 0.45 `
               --verbose `

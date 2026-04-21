@@ -5,11 +5,14 @@ starting Qt. Useful for batch scripting, CI smoke tests, and headless
 servers.
 
 Examples:
-    # Process a single file with defaults (bundled "default" profile)
+    # Process a single file (uses bundled "universal_accurate" profile —
+    # единственный builtin с декабря 2026, собрал best-of-all из ранее
+    # удалённых default / quick_reliable / low_quality_scan / contracts_ru /
+    # english_text / tn_upd).
     python -m src.cli document.pdf
 
-    # Pick a profile and write the searchable PDF to a custom path
-    python -m src.cli --profile low_quality_scan -o out.pdf in.pdf
+    # Pick a custom user profile and write the PDF to a chosen path
+    python -m src.cli --profile my_custom -o out.pdf in.pdf
 
     # Also dump TXT and DOCX next to the PDF
     python -m src.cli --txt --docx in.pdf
@@ -65,8 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "-p",
         "--profile",
-        default="default",
-        help="Имя профиля OCR (по умолчанию: default)",
+        default="universal_accurate",
+        help=(
+            "Имя профиля OCR (по умолчанию: universal_accurate — "
+            "единственный builtin со всеми лучшими настройками)"
+        ),
     )
     p.add_argument(
         "--workers",
@@ -89,9 +95,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Дополнительно выгрузить Excel рядом с PDF. Требует "
-            "профиль с включённым ``extract.enabled`` (например, "
-            "встроенный ``tn_upd``); иначе парсер не найдёт строк "
-            "и экспорт завершится ошибкой."
+            "профиль с включённым ``extract.enabled`` (по умолчанию "
+            "это так — у встроенного ``universal_accurate`` парсер ТН/УПД "
+            "включён через extract.kind=tn_upd)."
         ),
     )
     p.add_argument(

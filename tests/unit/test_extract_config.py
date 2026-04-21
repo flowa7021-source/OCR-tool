@@ -113,33 +113,36 @@ def test_migration_preserves_existing_extract_section() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Round-trip for the new tn_upd builtin
+# Round-trip for the merged universal_accurate builtin
+# (с декабря 2026 — единственный builtin, парсер ТН/УПД встроен через
+# extract.kind="tn_upd"; см. ProfileManager._build_universal_accurate)
 # ---------------------------------------------------------------------------
 
 
-def test_tn_upd_builder_enables_extract(tmp_path: Path) -> None:
-    """``_build_tn_upd`` produces a profile with extract.enabled=True."""
+def test_universal_accurate_builder_enables_extract(tmp_path: Path) -> None:
+    """``_build_universal_accurate`` produces extract.enabled=True
+    с kind="tn_upd" — парсер ТН/УПД встроен в единственный builtin."""
     mgr = ProfileManager(ProfileStorage(profiles_dir=tmp_path))
-    profile = mgr._build_tn_upd()
-    assert profile.name == "tn_upd"
+    profile = mgr._build_universal_accurate()
+    assert profile.name == "universal_accurate"
     assert profile.extract.enabled is True
     assert profile.extract.kind == "tn_upd"
     assert profile.extract.multi_document is True
-    # LLM fallback stays opt-in even on the "parser-first" profile —
-    # user must explicitly turn it on in settings.
+    # LLM fallback остаётся opt-in: пользователь явно включает в
+    # настройках (ANTHROPIC_API_KEY в settings.json).
     assert profile.extract.llm_fallback.enabled is False
 
 
-def test_tn_upd_profile_round_trips(tmp_path: Path) -> None:
+def test_universal_accurate_profile_round_trips(tmp_path: Path) -> None:
     """Serialising and reloading the builder output is byte-stable."""
     mgr = ProfileManager(ProfileStorage(profiles_dir=tmp_path))
-    original = mgr._build_tn_upd()
+    original = mgr._build_universal_accurate()
     rebuilt = ProfileData.from_dict(original.to_dict())
     assert rebuilt.to_dict() == original.to_dict()
 
 
 # ---------------------------------------------------------------------------
-# Bundled profiles on disk
+# Bundled profile on disk
 # ---------------------------------------------------------------------------
 
 
@@ -147,15 +150,19 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _BUNDLED_PROFILES_DIR = _REPO_ROOT / "profiles"
 
 
-def test_bundled_tn_upd_profile_exists_and_loads() -> None:
-    """``profiles/tn_upd.json`` must ship and load under the current schema."""
-    path = _BUNDLED_PROFILES_DIR / "tn_upd.json"
+def test_bundled_universal_accurate_profile_exists_and_loads() -> None:
+    """``profiles/universal_accurate.json`` ships и загружается под текущей
+    схемой. С декабря 2026 — единственный bundled профиль (default /
+    quick_reliable / low_quality_scan / contracts_ru / english_text /
+    tn_upd удалены и слиты в universal_accurate)."""
+    path = _BUNDLED_PROFILES_DIR / "universal_accurate.json"
     assert path.exists(), f"Missing bundled profile: {path}"
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["schema_version"] == PROFILE_SCHEMA_VERSION
     profile = ProfileData.from_dict(data)
-    assert profile.name == "tn_upd"
+    assert profile.name == "universal_accurate"
     assert profile.extract.enabled is True
+    assert profile.extract.kind == "tn_upd"
 
 
 def test_all_bundled_v9_profiles_migrate_cleanly() -> None:

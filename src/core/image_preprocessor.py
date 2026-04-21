@@ -837,8 +837,9 @@ def build_universal_preprocess_config() -> PreprocessConfig:
       amplification.
     * Background removal is **off** — at 600 DPI the large-kernel blur
       pass costs more than all other preprocessing steps combined with
-      only a marginal accuracy gain. Pick ``low_quality_scan`` if the
-      input has heavy page tint.
+      only a marginal accuracy gain. Создайте копию профиля
+      ``universal_accurate`` и включите ``preprocess.background.enabled=True``,
+      если на сканах много фоновой грязи.
     * Denoise chain: median ksize=3 → morphological close ksize=3.
       Removes salt-and-pepper artefacts and closes sub-pixel breaks
       in thin glyphs. Larger ksizes would start eating dots of

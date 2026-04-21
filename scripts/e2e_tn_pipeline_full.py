@@ -353,9 +353,13 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p.add_argument(
-        "--profile", default="tn_upd",
-        choices=["tn_upd", "universal_accurate", "contracts_ru", "default"],
-        help="Builtin профиль (default: tn_upd — табличный ТН + парсер)",
+        "--profile", default="universal_accurate",
+        help=(
+            "Имя профиля (по умолчанию: universal_accurate — "
+            "единственный builtin со всеми лучшими настройками; "
+            "пользовательские профили загружаются по имени из "
+            "ProfileStorage)"
+        ),
     )
     p.add_argument(
         "--min-accuracy", type=float, default=0.70,
