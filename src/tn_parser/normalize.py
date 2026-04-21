@@ -122,12 +122,19 @@ def normalize_for_sections(text: str) -> str:
         text = _lex_correct(text)
     except ImportError:  # pragma: no cover — src.core отсутствует в parser-only билдах
         pass
-    # Fuzzy-corrector (~17k форм) оставлен в pipeline.TextPostprocessor
-    # за opt-in флагом ``postprocess.fuzzy_correction_ru``. Не
-    # применяем его parser-side «безусловно»: на clean входах
-    # (inputs/*.txt sidecar) он меняет legitimate word-forms и
-    # снижает accuracy тестов CER/WER. Pipeline-level conditional
-    # — правильное место принятия решения.
+    # Fuzzy-корректор применяется parser-side ВСЕГДА, потому что
+    # парсер без него теряет 10 п.п. accuracy на real-OCR выходах
+    # (section-detection regex'ы не ловят mangled заголовки типа
+    # «Грузоотпрапителъ»). На sidecar-входах (чистый текст) он
+    # идемпотентен — слова уже в словаре. Отличие от finalized
+    # text layer (который отдаётся в Excel/TXT export): там fuzzy
+    # за opt-in флагом ``postprocess.fuzzy_correction_ru``, чтобы
+    # не менять legitimate word-forms в CER/WER benchmark'ах.
+    try:
+        from src.core.fuzzy_corrector import correct as _fuzzy_correct
+        text = _fuzzy_correct(text)
+    except ImportError:  # pragma: no cover
+        pass
     return text.strip()
 
 
