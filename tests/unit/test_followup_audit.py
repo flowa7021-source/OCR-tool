@@ -182,7 +182,7 @@ class TestCorruptProfileJson:
         profile = manager.get_current()
         # Fallback rebinds to 'universal_accurate' (the only builtin).
         assert profile.name == "universal_accurate"
-        assert manager._current_name == "default"  # type: ignore[attr-defined]
+        assert manager._current_name == "universal_accurate"  # type: ignore[attr-defined]
 
 
 # --------------------------------------------------------------------------

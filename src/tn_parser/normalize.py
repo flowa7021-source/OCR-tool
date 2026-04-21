@@ -115,20 +115,19 @@ def normalize_for_sections(text: str) -> str:
     text = _fix_confusables(text)
     # Lex-коррекция — импортируем лениво, чтобы src.tn_parser остался
     # независимым от src.core при отсутствии последнего (минимальные
-    # инсталляции парсерного CLI без OCR-стека).
+    # инсталляции парсерного CLI без OCR-стека). Точечный словарь
+    # (122 exact variants) — low-risk и on-by-default.
     try:
         from src.core.lexicon_corrector import correct as _lex_correct
         text = _lex_correct(text)
     except ImportError:  # pragma: no cover — src.core отсутствует в parser-only билдах
         pass
-    # Широкий fuzzy-корректор (по ~17k словоформ русского языка).
-    # Тоже ленивый; не требует pymorphy3 в runtime (словарь
-    # сгенерирован build-time в resources/ru_lexicon.txt).
-    try:
-        from src.core.fuzzy_corrector import correct as _fuzzy_correct
-        text = _fuzzy_correct(text)
-    except ImportError:  # pragma: no cover
-        pass
+    # Fuzzy-corrector (~17k форм) оставлен в pipeline.TextPostprocessor
+    # за opt-in флагом ``postprocess.fuzzy_correction_ru``. Не
+    # применяем его parser-side «безусловно»: на clean входах
+    # (inputs/*.txt sidecar) он меняет legitimate word-forms и
+    # снижает accuracy тестов CER/WER. Pipeline-level conditional
+    # — правильное место принятия решения.
     return text.strip()
 
 

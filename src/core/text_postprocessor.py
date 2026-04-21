@@ -618,8 +618,10 @@ class TextPostprocessor:
             # dict-lookup (23 canonical × 122 OCR-варианта): сначала
             # быстро и гарантированно чиним Грузоотправитель /
             # Грузополучатель / Перевозчик / идентифицировать /
-            # реквизиты / TENSAR /... — потом fuzzy-корректор
-            # не трогает уже-исправленные слова.
+            # реквизиты / TENSAR /... Lexicon содержит только
+            # exact-match варианты из реальных OCR-выходов —
+            # false-positive риск минимальный, поэтому on-by-default
+            # вместе с autocorrect_russian.
             from src.core.lexicon_corrector import correct as _lex_correct
             current = _lex_correct(current)
             logger.debug(
@@ -627,17 +629,22 @@ class TextPostprocessor:
             )
 
             # Широкий fuzzy-корректор через reference-словарь
-            # ~17 000 русских словоформ (resources/ru_lexicon.txt,
-            # сгенерирован через pymorphy3 из ~890 базовых слов).
-            # Работает на всех русских токенах длиной ≥ 5 не-
-            # кириллических / уже-correct словах. Ловит OCR-опечатки
-            # за пределами TN-vocab: «организаиия» → «организация»,
-            # «постановпения» → «постановления» и т.п.
-            from src.core.fuzzy_corrector import correct as _fuzzy_correct
-            current = _fuzzy_correct(current)
-            logger.debug(
-                "Postprocess: fuzzy-corrector applied (~17k ref dict)"
-            )
+            # ~17 000 русских словоформ (resources/ru_lexicon.txt).
+            # Opt-in через ``postprocess.fuzzy_correction_ru`` —
+            # применяется к ВСЕМ русским токенам ≥ 6 chars и может
+            # менять legitimate word-forms (организация↔организации,
+            # оформил↔оформи). Полезно на heavy-mangled OCR-выходах
+            # типичных ТН-сканов, но на clean synthetic corpus'е
+            # снижает CER/WER из-за form-mismatch с ground-truth.
+            # Включайте явно в профиле только для scan-corpus'а.
+            if getattr(config, "fuzzy_correction_ru", False):
+                from src.core.fuzzy_corrector import (
+                    correct as _fuzzy_correct,
+                )
+                current = _fuzzy_correct(current)
+                logger.debug(
+                    "Postprocess: fuzzy-corrector applied (~17k ref dict)"
+                )
 
         if config.autocorrect_english:
             current = self._autocorrect_english(current)
