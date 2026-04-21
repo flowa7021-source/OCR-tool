@@ -490,9 +490,11 @@ def test_remove_artifacts_flag_drops_pure_punctuation_lines(tmp_path: Path) -> N
 
 @pytest.mark.parametrize(
     "profile_name",
-    # Skip universal_accurate (only built in code, no JSON in repo).
-    # The five below ship as JSON in /profiles/.
-    ["universal_accurate", "universal_accurate", "universal_accurate", "universal_accurate"],
+    # Декабрь 2026: консолидация 7 → 1 builtin. ``universal_accurate``
+    # теперь единственный параметр — старые пять (default, quick_reliable,
+    # contracts_ru, low_quality_scan, english_text) были удалены со
+    # слитыми в него best-of-all настройками.
+    ["universal_accurate"],
 )
 def test_bundled_builtin_profile_loads_and_runs_through_pipeline(
     profile_name: str, tmp_path: Path

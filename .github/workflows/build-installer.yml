@@ -1111,7 +1111,15 @@ jobs:
       # Tesseract / Ghostscript regression.
       - name: Smoke-test the parser (tn_upd profile → Excel)
         shell: pwsh
-        timeout-minutes: 10
+        # 25 минут — универсальный профиль с extract.kind=tn_upd
+        # прогоняет уже OCR'нутый ТН через text-layer bypass +
+        # полный парсер (ORG-catalog lookup, fuzzy-нормализация,
+        # multi-row voting, auto-learn). На 8-страничном UPD_36
+        # это ~3-5 мин в среднем, но Windows-CI runner медленнее
+        # локального ПК, и installer-смоук запускается ПОСЛЕ
+        # двух других OCR-смоуков, которые уже прогрели диск и
+        # sometimes share CPU time. Старые 10 мин впритык.
+        timeout-minutes: 25
         run: |
           $ErrorActionPreference = "Stop"
           $installDir = "${{ github.workspace }}\smoke_install"

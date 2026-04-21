@@ -230,8 +230,12 @@ class TestUniversalAccurateProfile:
         # Cap DPI so the test finishes in CI (<30 s instead of 2+ min).
         profile.ocr.dpi = 300
 
+        # Render fixture at 300 DPI to match the capped profile DPI
+        # (no up-sample blur → Sauvola gets a crisp input) + 72pt
+        # font to survive aggressive preprocessing.
         input_pdf = render_clean_text_pdf(
-            tmp_path / "ua.pdf", text="ДОГОВОР", cyrillic=True
+            tmp_path / "ua.pdf", text="ДОГОВОР", cyrillic=True,
+            dpi=300, fontsize=72,
         )
         output_pdf = tmp_path / "ua_ocr.pdf"
 
@@ -286,8 +290,13 @@ class TestCLIEndToEnd:
     def test_cli_processes_english_pdf_end_to_end(
         self, tmp_path: Path
     ) -> None:
+        # Render fixture at 400 DPI + 72pt font to match
+        # universal_accurate profile DPI (400) — без этого
+        # pipeline up-sample'ит 200 DPI embed → 400 DPI blur,
+        # Sauvola binarization убивает тонкие штрихи, tesseract
+        # видит пустую страницу, OCRmyPDFError → CLI exit 1.
         input_pdf = render_clean_text_pdf(
-            tmp_path / "in.pdf", text="CLI SMOKE"
+            tmp_path / "in.pdf", text="CLI SMOKE", dpi=400, fontsize=72,
         )
         output_pdf = tmp_path / "out.pdf"
 
@@ -332,7 +341,7 @@ class TestCLIEndToEnd:
         input_pdf = cyrillic_dir / "акт.pdf"
         output_pdf = cyrillic_dir / "акт_ocr.pdf"
         render_clean_text_pdf(
-            input_pdf, text="АКТ", cyrillic=True
+            input_pdf, text="АКТ", cyrillic=True, dpi=400, fontsize=72,
         )
 
         env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
@@ -370,7 +379,7 @@ class TestCLIEndToEnd:
         and non-zero size, which is what downstream tooling keys off.
         """
         input_pdf = render_clean_text_pdf(
-            tmp_path / "in.pdf", text="EXPORT TEST 2026"
+            tmp_path / "in.pdf", text="EXPORT TEST 2026", dpi=400, fontsize=72,
         )
         output_pdf = tmp_path / "out.pdf"
 

@@ -458,9 +458,10 @@ class TestE2ECLI:
             timeout=30,
         )
         assert result.returncode == 0, result.stderr
-        # All built-in profiles should appear
-        for name in ("universal_accurate", "universal_accurate", "universal_accurate", "universal_accurate", "universal_accurate"):
-            assert name in result.stdout, f"missing {name} in {result.stdout!r}"
+        # Декабрь 2026: единственный builtin — ``universal_accurate``.
+        assert "universal_accurate" in result.stdout, (
+            f"missing universal_accurate in {result.stdout!r}"
+        )
 
     def test_list_profiles_survives_cp1252_stdio(self, tmp_path: Path) -> None:
         """Regression: Windows CI crashed on Cyrillic ``print()`` with cp1252.

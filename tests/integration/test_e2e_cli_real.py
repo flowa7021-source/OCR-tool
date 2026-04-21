@@ -63,8 +63,13 @@ class TestCliSingleFile:
     def test_single_pdf_end_to_end(
         self, tmp_path: Path, real_tesseract_wrapper,
     ) -> None:
+        # 400 DPI + 72pt: match universal_accurate profile DPI
+        # so Sauvola binarisation sees crisp strokes. At default
+        # 200 DPI embed the 400 DPI rasterize upsampled blurs,
+        # Sauvola kills text, tesseract returns empty → CLI exit 1.
         input_pdf = render_clean_text_pdf(
             tmp_path / "in.pdf", "cli test", pages=1,
+            dpi=400, fontsize=72,
         )
         output_pdf = tmp_path / "out.pdf"
 
@@ -112,6 +117,7 @@ class TestCliCyrillicOutputPath:
     ) -> None:
         input_pdf = render_clean_text_pdf(
             tmp_path / "in.pdf", "test", pages=1,
+            dpi=400, fontsize=72,
         )
         cyr_dir = tmp_path / "Мои документы"
         cyr_dir.mkdir()
