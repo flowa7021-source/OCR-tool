@@ -1,8 +1,7 @@
 """Multi-process OCR job runner.
 
 The pipeline itself is not picklable (it references OpenCV / PyMuPDF handles
-lazily imported inside worker methods, and the Tesseract wrapper holds
-process-local caches). We therefore serialize just the
+lazily imported inside worker methods). We therefore serialize just the
 :class:`~src.core.models.OCRJobConfig` to a ``dict`` and let each worker
 process rebuild its own pipeline.
 
@@ -273,9 +272,9 @@ def _worker_run_job(
     worker_logger = _setup_worker_logging()
     _enable_worker_faulthandler(worker_logger)
 
-    # Silence the brief console windows Tesseract/Ghostscript flash
-    # on Windows. Must land before OCRmyPDF spawns its first child.
-    # No-op on POSIX and on already-patched processes.
+    # Silence transient console windows that any child subprocess
+    # might flash on Windows. No-op on POSIX and on already-patched
+    # processes.
     try:
         from src.infrastructure.subprocess_hygiene import (
             install_windows_console_hide,
@@ -301,73 +300,28 @@ def _worker_run_job(
 
     try:
         current_stage = "imports"
-        worker_logger.info("[1/6] Importing pipeline modules…")
+        worker_logger.info("[1/4] Importing pipeline modules…")
         t_imports = time.time()
         from src.application.pipeline import OCRPipeline
         from src.core.image_preprocessor import ImagePreprocessor
         from src.core.text_postprocessor import TextPostprocessor
-        from src.infrastructure.tesseract_wrapper import TesseractWrapper
 
         worker_logger.info(
-            "[1/6] Imports OK in %.2fs", time.time() - t_imports
+            "[1/4] Imports OK in %.2fs", time.time() - t_imports
         )
 
         current_stage = "deserialize_job"
         job = job_from_dict(job_dict)
         worker_logger.info(
-            "[2/6] Job deserialized: profile=%s engine=%s dpi=%s langs=%s",
+            "[2/4] Job deserialized: profile=%s engine=%s dpi=%s langs=%s",
             job.profile.name,
             getattr(job.profile.ocr, "engine", "?"),
             getattr(job.profile.ocr, "dpi", "?"),
-            getattr(job.profile.ocr, "tesseract_language_string", "?"),
+            ",".join(job.profile.ocr.languages),
         )
-
-        current_stage = "register_external_tools"
-        worker_logger.info(
-            "[3a/6] Registering bundled external binaries on PATH…"
-        )
-        try:
-            from src.infrastructure.external_tools import (
-                ensure_on_path,
-                verify_required_for_ocrmypdf,
-            )
-
-            resolved = ensure_on_path()
-            for name, path in resolved.items():
-                worker_logger.info(
-                    "[3a/6]   %s -> %s", name, path or "NOT FOUND",
-                )
-            missing = verify_required_for_ocrmypdf()
-            if missing:
-                worker_logger.error(
-                    "[3a/6] Required external tools missing: %s — OCRmyPDF "
-                    "will fail. Pipeline will short-circuit with a clear "
-                    "error.",
-                    ", ".join(missing),
-                )
-        except Exception as exc:  # noqa: BLE001
-            worker_logger.warning(
-                "[3a/6] ensure_on_path raised (continuing): %s",
-                exc, exc_info=True,
-            )
-
-        current_stage = "configure_tesseract"
-        worker_logger.info("[3b/6] Configuring Tesseract…")
-        tess = TesseractWrapper()
-        try:
-            tess.configure_pytesseract()
-            worker_logger.info(
-                "[3b/6] Tesseract OK: bin=%s tessdata=%s",
-                getattr(tess, "_binary_path", "?"),
-                getattr(tess, "_tessdata_path", "?"),
-            )
-        except Exception as exc:  # noqa: BLE001
-            worker_logger.warning(
-                "[3b/6] configure_pytesseract failed: %s", exc, exc_info=True
-            )
 
         current_stage = "build_pipeline"
-        worker_logger.info("[4/6] Building pipeline (preprocess + postprocess)…")
+        worker_logger.info("[3/4] Building pipeline (preprocess + postprocess)…")
         preprocessor = ImagePreprocessor()
         # Load the ground-truth ИНН/ОГРН catalog ONCE per worker and hand
         # it to every TextPostprocessor constructed in this process. An
@@ -380,13 +334,13 @@ def _worker_run_job(
 
             catalog = load_default_catalog()
             worker_logger.info(
-                "[4/6] DocCatalog: %d inn, %d ogrn, %d kpp, %d name(s)",
+                "[3/4] DocCatalog: %d inn, %d ogrn, %d kpp, %d name(s)",
                 len(catalog.inns), len(catalog.ogrns),
                 len(catalog.kpps), len(catalog.names),
             )
         except Exception as exc:  # noqa: BLE001
             worker_logger.warning(
-                "[4/6] DocCatalog load failed (continuing without): %s",
+                "[3/4] DocCatalog load failed (continuing without): %s",
                 exc,
             )
             catalog = None
@@ -416,20 +370,19 @@ def _worker_run_job(
         pipeline = OCRPipeline(
             preprocessor=preprocessor,
             postprocessor=postprocessor,
-            tesseract=tess,
             progress_callback=_progress if progress_queue is not None else None,
             autosave_interval_pages=autosave_interval,
         )
 
         current_stage = "pipeline.run"
         worker_logger.info(
-            "[5/6] Starting pipeline.run(job) — this performs analyze → "
+            "[4/4] Starting pipeline.run(job) — this performs analyze → "
             "preprocess → assemble → OCR → postprocess"
         )
         t_run = time.time()
         result = pipeline.run(job)
         worker_logger.info(
-            "[5/6] pipeline.run finished in %.2fs  status=%s  pages=%d  "
+            "[4/4] pipeline.run finished in %.2fs  status=%s  pages=%d  "
             "avg_conf=%.1f  error=%s",
             time.time() - t_run,
             result.status.value,
@@ -439,10 +392,9 @@ def _worker_run_job(
         )
 
         current_stage = "serialize_result"
-        worker_logger.info("[6/6] Serializing result for host handoff…")
         result_dict = job_result_to_dict(result)
         worker_logger.info(
-            "[6/6] Done. Returning to host. Output file: %s", output_path
+            "Done. Returning to host. Output file: %s", output_path
         )
         return result_dict
 

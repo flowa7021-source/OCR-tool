@@ -1,22 +1,9 @@
-"""Тесты per-field OCR retry (idea #6 top-10).
+"""Tests for per-field OCR retry via EasyOCR.
 
-Pipeline retry работает на СТРАНИЦЕ целиком. Но часто проблема
-локализована: раздел «6. Водитель» OCR'улся в мусор, а остальные
-поля OK. Тогда нужна targeted rescue: re-run tesseract только на
-bbox раздела 6 с specialized настройками — PSM=7 (single line),
-whitelist=Cyrillic+digits, user-words=ФИО-лексикон.
-
-Контракт:
-
-  * ``rescue_field(raster, bbox, psm=7, whitelist=None,
-    user_words=None) → (text, conf)``.
-  * raster — ndarray preprocessed страницы.
-  * bbox — (x, y, w, h) в пикселях raster'а.
-  * При ошибке (tesseract недоступен / bbox выходит за границы)
-    возвращает ('', 0.0) без exception'а.
-
-Mocking: в unit-тестах заменяем pytesseract-call на stub чтобы
-не требовать tesseract на test-машине.
+Pipeline retry works at the PAGE level. When a specific field is
+empty / garbage the rescue re-runs OCR on a targeted bbox via
+EasyOCR. We monkeypatch ``_easyocr_readtext`` so the suite runs
+without the real ``easyocr.Reader``.
 """
 
 from __future__ import annotations
@@ -25,7 +12,7 @@ import numpy as np
 
 
 class TestRescueFieldCrop:
-    """``_crop_bbox(raster, bbox)`` — безопасный crop."""
+    """``_crop_bbox(raster, bbox)`` — safe crop."""
 
     def _call(self, raster, bbox):
         from src.tn_parser.field_rescue import _crop_bbox
@@ -37,59 +24,49 @@ class TestRescueFieldCrop:
         assert cropped.shape == (30, 50, 3)
 
     def test_bbox_clipped_to_raster_bounds(self):
-        """bbox выходит за края — обрезается до raster size."""
         raster = np.ones((50, 50), dtype=np.uint8) * 100
         cropped = self._call(raster, (40, 40, 100, 100))
-        # Фактически (40..50, 40..50) = 10×10.
         assert cropped.shape == (10, 10)
 
     def test_invalid_bbox_returns_none(self):
-        """bbox вне raster bounds совсем → None."""
         raster = np.ones((50, 50), dtype=np.uint8)
         assert self._call(raster, (100, 100, 50, 50)) is None
         assert self._call(raster, (-10, -10, 5, 5)) is None
 
 
 class TestRescueField:
-    """``rescue_field(raster, bbox, psm, whitelist, user_words)``
-    — high-level entry. Вызывает pytesseract и возвращает (text,
-    conf 0..1)."""
+    """``rescue_field(raster, bbox, ...)`` — calls EasyOCR and returns
+    ``(text, conf 0..1)``."""
 
     def test_rescue_returns_text_and_conf(self, monkeypatch):
-        """Stub pytesseract: возвращаем гарантированный text."""
         from src.tn_parser import field_rescue
 
-        def fake_image_to_data(img, **kwargs):
-            return {
-                "text": ["Беляев", "А.Н."],
-                "conf": [85.0, 90.0],
-                "level": [5, 5],
-            }
+        def fake_readtext(img, *, reader=None, allowlist=None):
+            return [
+                ([(0, 0), (50, 0), (50, 20), (0, 20)], "Беляев", 0.85),
+                ([(60, 0), (110, 0), (110, 20), (60, 20)], "А.Н.", 0.90),
+            ]
 
-        # Применяем monkeypatch к модулю rescue:
         monkeypatch.setattr(
-            field_rescue, "_pytesseract_image_to_data", fake_image_to_data,
+            field_rescue, "_easyocr_readtext", fake_readtext,
         )
 
         raster = np.ones((200, 300, 3), dtype=np.uint8) * 128
         text, conf = field_rescue.rescue_field(
-            raster, bbox=(10, 10, 200, 40), psm=7,
+            raster, bbox=(10, 10, 200, 40),
         )
         assert "Беляев" in text
         assert "А.Н." in text
-        # (85 + 90) / 2 / 100 = 0.875
         assert abs(conf - 0.875) < 0.01
 
-    def test_rescue_handles_pytesseract_error(self, monkeypatch):
-        """pytesseract падает — rescue возвращает ('', 0.0),
-        НЕ пропагирует exception."""
+    def test_rescue_handles_easyocr_error(self, monkeypatch):
         from src.tn_parser import field_rescue
 
         def broken(*args, **kwargs):
-            raise RuntimeError("tesseract crashed")
+            raise RuntimeError("easyocr crashed")
 
         monkeypatch.setattr(
-            field_rescue, "_pytesseract_image_to_data", broken,
+            field_rescue, "_easyocr_readtext", broken,
         )
 
         raster = np.ones((100, 100), dtype=np.uint8)
@@ -100,17 +77,16 @@ class TestRescueField:
         assert conf == 0.0
 
     def test_rescue_with_invalid_bbox_returns_empty(self, monkeypatch):
-        """Bbox вне raster → empty, no call to tesseract."""
         from src.tn_parser import field_rescue
 
         call_count = {"n": 0}
 
         def sentinel(*args, **kwargs):
             call_count["n"] += 1
-            return {"text": [], "conf": [], "level": []}
+            return []
 
         monkeypatch.setattr(
-            field_rescue, "_pytesseract_image_to_data", sentinel,
+            field_rescue, "_easyocr_readtext", sentinel,
         )
 
         raster = np.ones((50, 50), dtype=np.uint8)
@@ -119,36 +95,33 @@ class TestRescueField:
         )
         assert text == ""
         assert conf == 0.0
-        # tesseract вообще не вызывался — crop вернул None.
+        # EasyOCR не вызывался — crop вернул None.
         assert call_count["n"] == 0
 
 
 class TestRescueFilters:
-    """Low-conf tokens в output'е фильтруются (tesseract иногда
-    даёт conf=-1 для placeholder-токенов; они должны не попадать
-    в итоговый text)."""
+    """Low-conf tokens are filtered out of the final text."""
 
     def test_low_conf_tokens_skipped(self, monkeypatch):
         from src.tn_parser import field_rescue
 
-        def stub(img, **kwargs):
-            return {
-                "text": ["real", "", "LOWCONF", "another"],
-                "conf": [90, -1, 20, 85],
-                "level": [5, 5, 5, 5],
-            }
+        def stub(img, *, reader=None, allowlist=None):
+            return [
+                ([(0, 0), (10, 0), (10, 10), (0, 10)], "real", 0.90),
+                ([(20, 0), (30, 0), (30, 10), (20, 10)], "", 0.0),
+                ([(40, 0), (60, 0), (60, 10), (40, 10)], "LOWCONF", 0.20),
+                ([(70, 0), (90, 0), (90, 10), (70, 10)], "another", 0.85),
+            ]
 
         monkeypatch.setattr(
-            field_rescue, "_pytesseract_image_to_data", stub,
+            field_rescue, "_easyocr_readtext", stub,
         )
 
         raster = np.ones((100, 100), dtype=np.uint8)
         text, conf = field_rescue.rescue_field(
-            raster, bbox=(0, 0, 50, 50), min_token_conf=40,
+            raster, bbox=(0, 0, 50, 50), min_token_conf=0.4,
         )
-        # "" с conf=-1 skipped; "LOWCONF" с conf=20 < 40 skipped.
         assert "real" in text
         assert "another" in text
         assert "LOWCONF" not in text
-        # Conf — среднее по двум прошедшим fil'ра токенам.
-        assert abs(conf - (90 + 85) / 200) < 0.01
+        assert abs(conf - (0.90 + 0.85) / 2) < 0.01

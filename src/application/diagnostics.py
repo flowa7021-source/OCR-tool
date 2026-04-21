@@ -7,7 +7,7 @@ state:
     * rotating log file and any existing backups
     * ``settings.json`` (personal preferences, no credentials)
     * Python / OS / Qt version strings
-    * engine availability (Tesseract binary + language packs)
+    * engine availability (EasyOCR import + torch / CUDA status)
     * installed package versions for our declared dependencies
 
 User profiles live one directory over; since they may contain user
@@ -62,8 +62,7 @@ def _collect_environment() -> dict[str, str]:
     for package in (
         "opencv-python",
         "PyMuPDF",
-        "ocrmypdf",
-        "pytesseract",
+        "easyocr",
         "numpy",
         "scikit-image",
         "Pillow",
@@ -99,28 +98,44 @@ def _collect_engine_status() -> dict[str, dict[str, object]]:
     return status
 
 
-def _collect_tesseract_details() -> dict[str, object]:
-    try:
-        from src.infrastructure.tesseract_wrapper import TesseractWrapper
+def _collect_engine_details() -> dict[str, object]:
+    """Probe the EasyOCR engine: torch + CUDA + bundled-models dir."""
+    from src.application.engines.registry import get_engine
+    from src.shared.constants import EASYOCR_MODELS_DIR
+    from src.shared.types import OCREngineKind
 
-        wrapper = TesseractWrapper()
-        # We call get_version() unconditionally — it either returns
-        # something useful or "" if Tesseract is not installed.
-        details: dict[str, object] = {
-            "version": wrapper.get_version(),
-        }
-        try:
-            details["binary"] = str(wrapper.find_tesseract_binary())
-        except Exception as exc:  # noqa: BLE001
-            details["binary"] = f"(not found: {exc})"
-        try:
-            details["tessdata"] = str(wrapper.find_tessdata_dir())
-            details["languages"] = sorted(wrapper.available_languages())
-        except Exception as exc:  # noqa: BLE001
-            details["tessdata"] = f"(not found: {exc})"
-        return details
+    details: dict[str, object] = {}
+    try:
+        engine = get_engine(OCREngineKind.EASYOCR)
+        ok, msg = engine.is_available()
+        details["available"] = bool(ok)
+        details["message"] = msg
     except Exception as exc:  # noqa: BLE001
-        return {"error": str(exc)}
+        details["available"] = False
+        details["message"] = f"(probe failed: {exc})"
+
+    try:
+        import torch
+
+        details["torch_version"] = torch.__version__
+        details["cuda_available"] = bool(torch.cuda.is_available())
+        if torch.cuda.is_available():
+            details["cuda_device"] = torch.cuda.get_device_name(0)
+    except Exception as exc:  # noqa: BLE001
+        details["torch_version"] = f"(not installed: {exc})"
+        details["cuda_available"] = False
+
+    details["models_dir"] = str(EASYOCR_MODELS_DIR)
+    try:
+        if EASYOCR_MODELS_DIR.is_dir():
+            details["models_files"] = sorted(
+                p.name for p in EASYOCR_MODELS_DIR.iterdir()
+            )
+        else:
+            details["models_files"] = "(directory missing)"
+    except Exception as exc:  # noqa: BLE001
+        details["models_files"] = f"(scan failed: {exc})"
+    return details
 
 
 def build_diagnostics_zip(
@@ -155,7 +170,7 @@ def build_diagnostics_zip(
             {
                 "environment": _collect_environment(),
                 "engines": _collect_engine_status(),
-                "tesseract": _collect_tesseract_details(),
+                "engine_details": _collect_engine_details(),
             },
             ensure_ascii=False,
             indent=2,
@@ -193,7 +208,7 @@ def build_diagnostics_zip(
                 f"Generated: {datetime.now(UTC).isoformat()}\n\n"
                 "Contents:\n"
                 "  environment.json   — Python / OS / package versions,\n"
-                "                        Tesseract binary + language-pack availability\n"
+                "                        EasyOCR + torch / CUDA availability\n"
                 "  settings.json      — application preferences\n"
                 "  logs/*.log*        — rotating application log + backups\n"
                 "  logs/worker-*.log  — per-worker pipeline trace (PID-keyed)\n"
@@ -201,7 +216,7 @@ def build_diagnostics_zip(
                 "NOT included (for privacy):\n"
                 "  * Input PDFs and OCR results\n"
                 "  * User profiles (custom regex rules may be sensitive)\n"
-                "  * Tesseract language data\n"
+                "  * EasyOCR model weights\n"
             ).encode()
         )
         zf.writestr("README.txt", readme.getvalue())

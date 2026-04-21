@@ -1,4 +1,0 @@
-Place tesseract.exe and the required DLLs here before running build.py.
-They will be picked up automatically by `--add-data=resources/tesseract`.
-The CI workflow downloads them from UB Mannheim. For local builds,
-either unpack Tesseract 5.5.0 here or rely on system PATH.

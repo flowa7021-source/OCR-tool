@@ -108,8 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--check-engine",
         metavar="KIND",
+        nargs="?",
+        const="easyocr",
         help=(
-            "Проверить доступность OCR-движка (``tesseract``) и "
+            "Проверить доступность OCR-движка (``easyocr``) и "
             "завершить работу. Exit 0 — движок готов, exit 1 — "
             "недоступен (причина выводится в stderr). Используется "
             "CI-smoke тестом, чтобы поймать сломанный бандл до релиза."
@@ -199,7 +201,6 @@ def process_single(
     from src.core.models import OCRJobConfig
     from src.core.text_postprocessor import TextPostprocessor
     from src.infrastructure.config_storage import ProfileStorage
-    from src.infrastructure.tesseract_wrapper import TesseractWrapper
     from src.shared.types import ExportFormat, JobStatus
 
     storage = ProfileStorage()
@@ -213,12 +214,6 @@ def process_single(
                      profile_name,
                      ", ".join(p.name for p in manager.list_profiles()))
         return 2
-
-    tesseract = TesseractWrapper()
-    try:
-        tesseract.configure_pytesseract()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Tesseract не сконфигурирован корректно: %s", exc)
 
     job = OCRJobConfig(
         input_path=str(input_path),
@@ -251,7 +246,6 @@ def process_single(
     pipeline = OCRPipeline(
         preprocessor=ImagePreprocessor(),
         postprocessor=TextPostprocessor(catalog=_catalog),
-        tesseract=tesseract,
         progress_callback=_progress,
         autosave_interval_pages=autosave_interval,
     )
@@ -260,16 +254,15 @@ def process_single(
     logger.info(
         "Обработка: %s → %s\n"
         "  Профиль: %s | Движок: %s | DPI: %s | Языки: %s\n"
-        "  Бинаризация: %s | Deskew: %s | CLAHE: %s | Timeout: %s с",
+        "  Бинаризация: %s | Deskew: %s | CLAHE: %s",
         input_path, output_path,
         profile.name,
         profile.ocr.engine.value,
         profile.ocr.dpi,
-        profile.ocr.tesseract_language_string,
+        ",".join(profile.ocr.languages),
         profile.preprocess.binarization.method.value,
         "вкл" if profile.preprocess.deskew.enabled else "выкл",
         "вкл" if profile.preprocess.contrast.clahe_enabled else "выкл",
-        profile.ocr.tesseract_timeout,
     )
     result = pipeline.run(job)
     elapsed = time.time() - t0

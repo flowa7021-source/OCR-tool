@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 
-from src.application.ocrmypdf_integration import OCRmyPDFError
+from src.application.engines.base import EngineNotAvailableError
 from src.core.image_preprocessor import ImagePreprocessor
 from src.core.models import (
     JobResult,
@@ -33,7 +33,6 @@ from src.core.models import (
 )
 from src.core.text_postprocessor import TextPostprocessor
 from src.infrastructure.file_utils import create_temp_workdir
-from src.infrastructure.tesseract_wrapper import TesseractWrapper
 from src.shared.types import JobStatus
 
 logger = logging.getLogger(__name__)
@@ -56,8 +55,8 @@ def _resolve_stage_parallelism(
       * ``OCR_PREPROCESS_WORKERS`` — default 10
       * ``OCR_POSTPROCESS_WORKERS`` — default 10
       * per-page OCR workers are capped separately in
-        :mod:`src.application.engines.tesseract_engine` via
-        ``OCR_PER_PAGE_WORKERS`` (also default 10 after this change)
+        :mod:`src.application.engines.easyocr_engine` via
+        ``OCR_PER_PAGE_WORKERS`` (default 4 on CPU)
     """
     import os
 
@@ -107,40 +106,22 @@ class OCRPipeline:
         preprocessor: Image preprocessing engine.
         postprocessor: Text post-processing engine (duck-typed:
             ``process(text, cfg) -> str``).
-        tesseract: Tesseract wrapper used for binary/tessdata discovery.
         progress_callback: Optional ``(current, total, stage)`` callback.
-        compute_confidence: If True, compute per-page mean confidence via
-            :func:`pytesseract.image_to_data` (slower).
+        compute_confidence: If True, compute per-page mean confidence
+            from the engine's word_boxes output (near-free).
     """
 
     def __init__(
         self,
         preprocessor: ImagePreprocessor,
         postprocessor: TextPostprocessor | None,
-        tesseract: TesseractWrapper,
         progress_callback: ProgressCallback | None = None,
         compute_confidence: bool = True,
         autosave_interval_pages: int = 0,
         autosave_path: Path | None = None,
     ) -> None:
-        """Initialize the pipeline.
-
-        Args:
-            preprocessor: :class:`ImagePreprocessor` instance.
-            postprocessor: Object exposing ``process(text, cfg) -> str``.
-            tesseract: :class:`TesseractWrapper` (already or lazily configured).
-            progress_callback: Optional progress reporter.
-            compute_confidence: Whether to compute per-page confidence.
-            autosave_interval_pages: Dump the partial TXT every N OCR'd
-                pages. ``0`` disables partial autosave. Useful for very long
-                jobs: if the process crashes between autosaves the previous
-                dump is still on disk.
-            autosave_path: Destination for partial TXT dumps. Defaults to the
-                job output path with the ``.partial.txt`` suffix.
-        """
         self.preprocessor = preprocessor
         self.postprocessor = postprocessor
-        self.tesseract = tesseract
         self.progress_callback = progress_callback
         self.compute_confidence = compute_confidence
         self.autosave_interval_pages = max(0, int(autosave_interval_pages))
@@ -212,9 +193,6 @@ class OCRPipeline:
 
         workdir: Path | None = None
         try:
-            logger.info("Job %s stage=init: configuring Tesseract", job_id)
-            self._ensure_tesseract_configured()
-
             # 0. Pre-flight. Runs in ~1 second and fails fast if the
             #    selected engine is not actually usable — missing
             #    Tesseract binary or an incomplete tessdata directory.
@@ -250,14 +228,6 @@ class OCRPipeline:
                 result.error = str(exc)
                 result.total_time_sec = time.time() - started
                 return result
-
-            # Advisory: DPI × tesseract_timeout sanity. At 600 DPI a
-            # complex Russian-contract page legitimately takes 2-3 min;
-            # if the user pinned a sub-300s timeout they're almost
-            # certainly about to hit the auto-retry path. Log a
-            # WARNING so the field-support log makes the root cause
-            # visible before the failure happens.
-            self._check_dpi_timeout_sanity(job, job_id)
 
             workdir = create_temp_workdir(prefix="ocrjob_")
             logger.info("Job %s workdir: %s", job_id, workdir)
@@ -361,56 +331,14 @@ class OCRPipeline:
 
             # 4. OCR — dispatch to the engine selected by profile.ocr.engine.
             from src.application.engines import get_engine
-            from src.application.engines.base import EngineNotAvailableError
 
-            # Pre-flight: verify every external binary OCRmyPDF spawns
-            # actually exists. Without this, failure surfaces as a long
-            # OCRmyPDF traceback with a cryptic line like "Could not
-            # find program 'tesseract' on the PATH" — even when
-            # tesseract.exe is sitting right there in our bundle
-            # (OCRmyPDF doesn't know about ``pytesseract.tesseract_cmd``,
-            # it uses shutil.which only). We've already called
-            # ``ensure_on_path`` in worker startup, so if a tool is
-            # still missing here it really is absent from the install.
             engine_kind = job.profile.ocr.engine
-            try:
-                from src.shared.types import OCREngineKind
-
-                if engine_kind is OCREngineKind.TESSERACT:
-                    from src.infrastructure.external_tools import (
-                        verify_required_for_ocrmypdf,
-                    )
-
-                    missing = verify_required_for_ocrmypdf()
-                    if missing:
-                        msg = (
-                            "Не найдены внешние программы, необходимые "
-                            "для OCRmyPDF: "
-                            + ", ".join(missing)
-                            + ". Переустановите OCR Studio — в сборке "
-                            "отсутствуют бандленные бинарники "
-                            "(tesseract / ghostscript)."
-                        )
-                        logger.error(
-                            "Job %s stage=ocr pre-flight FAILED: %s",
-                            job_id, msg,
-                        )
-                        result.status = JobStatus.FAILED
-                        result.error = msg
-                        result.pages = page_results
-                        result.total_time_sec = time.time() - started
-                        return result
-            except Exception as exc:  # noqa: BLE001 - pre-flight is advisory
-                logger.debug("Pre-flight check raised, continuing: %s", exc)
-
             output_path.parent.mkdir(parents=True, exist_ok=True)
             logger.info(
-                "Job %s stage=ocr: engine=%s lang=%s psm=%s oem=%s optimize=%s",
+                "Job %s stage=ocr: engine=%s lang=%s dpi=%d",
                 job_id, engine_kind,
-                job.profile.ocr.tesseract_language_string,
-                job.profile.ocr.psm,
-                job.profile.ocr.oem,
-                job.profile.ocr.optimize_level,
+                "+".join(job.profile.ocr.languages),
+                int(job.profile.ocr.dpi),
             )
             t_stage = time.time()
             try:
@@ -449,7 +377,7 @@ class OCRPipeline:
                         config=job.profile.ocr,
                         progress_callback=progress_fn,
                     )
-            except (OCRmyPDFError, EngineNotAvailableError, KeyError) as exc:
+            except (EngineNotAvailableError, KeyError, RuntimeError) as exc:
                 result.status = JobStatus.FAILED
                 result.error = str(exc)
                 result.pages = page_results
@@ -597,42 +525,6 @@ class OCRPipeline:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _check_dpi_timeout_sanity(self, job: OCRJobConfig, job_id: str) -> None:
-        """Warn when DPI is high AND tesseract_timeout is below the safe floor.
-
-        At 600 DPI, complex Russian-contract pages routinely take
-        2-3 minutes in Tesseract. The default timeout is now 300s
-        and the wrapper auto-retries once with 600s + single-threaded,
-        so sub-300 configurations very likely fall through to the
-        (user-visible) "не успели распознаться" error. Log a WARNING
-        so a technician looking at the log sees the root cause up
-        front rather than piecing it together from timestamps.
-        """
-        try:
-            dpi = int(getattr(job.profile.ocr, "dpi", 300) or 300)
-            timeout = int(
-                getattr(job.profile.ocr, "tesseract_timeout", 300) or 300
-            )
-        except (TypeError, ValueError):
-            return
-        if dpi >= 600 and timeout < 300:
-            logger.warning(
-                "Job %s: DPI=%d + tesseract_timeout=%ds — рискованная "
-                "комбинация, ожидайте auto-retry. Поднимите "
-                "tesseract_timeout до 300+ в активном профиле, либо "
-                "вернитесь на builtin 'universal_accurate' (DPI=400, "
-                "timeout=360 — проверенный sweet spot для LSTM).",
-                job_id, dpi, timeout,
-            )
-
-    def _ensure_tesseract_configured(self) -> None:
-        """Configure pytesseract if not already configured."""
-        try:
-            if not TesseractWrapper._configured:
-                self.tesseract.configure_pytesseract()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Tesseract configuration failed: %s", exc)
 
     def _report(self, current: int, total: int, stage: str) -> None:
         """Invoke the progress callback, swallowing any errors."""
@@ -1046,25 +938,10 @@ class OCRPipeline:
         slots: list[PageResult | None] = [None] * page_count
         png_slots: list[Path | None] = [None] * page_count
 
-        # When the profile's per-word script disambiguator is on, also
-        # save a pre-binarisation grayscale alongside the final binary
-        # PNG. ``_compute_confidences`` passes this to
-        # :func:`disambiguate_word` so the ``-l eng`` re-OCR sees the
-        # surviving thin-stroke evidence instead of a binary mask.
-        # Concretely: ``TENSAR`` at 35-50 % confidence on faded ink
-        # survives in grayscale long enough for the Latin pass to
-        # pick it up; after Sauvola / OTSU that same token dissolves
-        # into Cyrillic look-alikes Tesseract reports with high
-        # confidence (``ТЕМЗАК``) that the disambiguator can't
-        # break at the binary layer.
-        # Persist pre-binarisation grayscale when ANY per-word re-OCR
-        # rescue is on (script disambiguator, CLAHE, upscale). All
-        # three need the tonal range OTSU / Sauvola destroyed.
-        want_gray = bool(
-            getattr(profile.ocr, "per_word_script_disambiguation", False)
-            or getattr(profile.ocr, "per_word_clahe_rescue", False)
-            or getattr(profile.ocr, "per_word_upscale_rescue", False)
-        )
+        # No per-word re-OCR rescues in the EasyOCR pipeline — the
+        # detector+recognizer is end-to-end neural, so a pre-binarised
+        # grayscale is unnecessary.
+        want_gray = False
 
         def _worker(idx: int) -> None:
             page_num = idx + 1
@@ -1359,13 +1236,11 @@ class OCRPipeline:
                             page_results[:completed], job,
                         )
 
-        # Only run pytesseract-based confidence scoring when the OCR engine
-        # was Tesseract. Any future engine should populate mean_confidence
-        # itself; re-scoring with pytesseract would
-        # overwrite that with a number derived from a different model.
-        from src.shared.types import OCREngineKind
-
-        if self.compute_confidence and job.profile.ocr.engine is OCREngineKind.TESSERACT:
+        # The engine populates ``mean_confidence`` and ``word_boxes``
+        # natively; ``_compute_confidences`` consumes those word_boxes
+        # to apply adaptive threshold, drop-low-conf filtering, fuzzy
+        # rescue and PDF text-layer redaction.
+        if self.compute_confidence:
             self._compute_confidences(
                 page_results, job, png_paths, output_pdf=ocrd_pdf,
             )
@@ -1473,535 +1348,163 @@ class OCRPipeline:
         *,
         output_pdf: Path | None = None,
     ) -> None:
-        """Compute per-page confidence using ``pytesseract.image_to_data``.
+        """Apply confidence-based filtering on engine-produced word_boxes.
 
-        When ``output_pdf`` is supplied AND ``drop_low_conf_words`` is
-        enabled, the PDF's invisible text layer is also filtered (low-
-        conf word regions are redacted in place). Passing ``None`` keeps
-        the behaviour backwards-compatible for any caller that still
-        invokes this method on PageResults alone.
+        The OCR engine has already populated each PageResult with
+        ``word_boxes: [(x, y, w, h, conf_0_100, text)]`` and
+        ``mean_confidence``. We synthesise a TSV-compatible dict so
+        existing helpers (confidence_filter, pdf_text_filter,
+        tn_parser.layout_anchor) keep working unchanged.
         """
-        try:
-            import cv2
-            import pytesseract
-        except ImportError as exc:
-            logger.warning("pytesseract unavailable, skipping confidence: %s", exc)
-            return
-
-        lang = job.profile.ocr.tesseract_language_string
-        cfg_parts = [
-            f"--psm {int(job.profile.ocr.psm)}",
-            f"--oem {int(job.profile.ocr.oem)}",
-        ]
-        if job.profile.ocr.char_whitelist:
-            cfg_parts.append(
-                f"-c tessedit_char_whitelist={job.profile.ocr.char_whitelist}"
-            )
-        if job.profile.ocr.char_blacklist:
-            cfg_parts.append(
-                f"-c tessedit_char_blacklist={job.profile.ocr.char_blacklist}"
-            )
-        tess_cfg = " ".join(cfg_parts)
+        from src.core.confidence_filter import (
+            detect_handwritten_blocks,
+            reconstruct_text_from_tsv,
+        )
 
         threshold = float(job.profile.ocr.confidence_threshold)
-        # Collected per-page, used by the PDF text-layer filter at the
-        # end of the loop (if enabled). Parallel lists keep the page
-        # index intact even if a page errors out mid-loop.
-        tsv_per_page: list[dict[str, Any]] = []
+        ocr = job.profile.ocr
+        tsv_per_page: list[dict] = []
         image_sizes_px: list[tuple[int, int]] = []
 
         for pr, png_path in zip(page_results, png_paths, strict=False):
-            # Pre-seed placeholders for THIS page so the PDF-filter
-            # pass below keeps page-index alignment even when the
-            # image read or the Tesseract call below bails out. An
-            # empty-dict entry redacts nothing, which is the safe
-            # no-op we want for unavailable-data pages.
-            tsv_per_page.append({})
-            image_sizes_px.append((0, 0))
-            if pr.error is not None:
-                continue
+            data = _word_boxes_to_tsv(pr.word_boxes)
+            tsv_per_page.append(data)
             try:
-                # Unicode-safe read — ``cv2.imread`` fails on non-ASCII
-                # Windows paths the same way ``cv2.imwrite`` does (see
-                # :meth:`_save_png`). Read the bytes via Python and let
-                # ``cv2.imdecode`` parse them.
+                import cv2
                 raw = np.frombuffer(png_path.read_bytes(), dtype=np.uint8)
                 img = cv2.imdecode(raw, cv2.IMREAD_UNCHANGED) if raw.size else None
-                if img is None:
-                    continue
-                data = pytesseract.image_to_data(
-                    img,
-                    lang=lang,
-                    config=tess_cfg,
-                    output_type=pytesseract.Output.DICT,
-                )
-                # Populate the page's slot with the real data — the
-                # placeholder appended above is overwritten so the
-                # downstream PDF filter sees the correct TSV + image
-                # dimensions for this page.
-                tsv_per_page[-1] = data
-                image_sizes_px[-1] = (int(img.shape[1]), int(img.shape[0]))
-                confidences: list[float] = []
-                low_words: list[str] = []
-                for conf, word in zip(
-                    data.get("conf", []), data.get("text", []), strict=False
-                ):
-                    try:
-                        c = float(conf)
-                    except (TypeError, ValueError):
-                        continue
-                    if c < 0:
-                        continue
-                    if not word or not word.strip():
-                        continue
-                    confidences.append(c)
-                    if c < threshold:
-                        low_words.append(word)
-                # Source image for any per-word re-OCR rescue
-                # (disambiguator, CLAHE, upscale). The pre-binarisation
-                # grayscale snapshot (saved by the preprocess worker
-                # when any rescue flag is on) preserves faint strokes
-                # that OTSU / Sauvola destroyed — essential for
-                # ``-l eng`` to win confidence races on faded-ink
-                # brands and for CLAHE to have tonal range to boost.
-                # Falls back to the binary ``img`` when the gray
-                # snapshot is missing (older code paths / profile
-                # didn't opt in).
-                rescue_image = img
-                gray_path = png_path.with_name(
-                    png_path.stem + "_gray.png",
-                )
-                if gray_path.exists():
-                    try:
-                        raw_g = np.frombuffer(
-                            gray_path.read_bytes(), dtype=np.uint8,
-                        )
-                        gray_img = (
-                            cv2.imdecode(raw_g, cv2.IMREAD_UNCHANGED)
-                            if raw_g.size else None
-                        )
-                        if gray_img is not None:
-                            rescue_image = gray_img
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug(
-                            "page %d: failed to read pre-binary "
-                            "grayscale (%s) — rescues fall back to binary",
-                            pr.page_number, exc,
-                        )
+                w_px = int(img.shape[1]) if img is not None else 0
+                h_px = int(img.shape[0]) if img is not None else 0
+            except Exception:  # noqa: BLE001
+                w_px = h_px = 0
+            image_sizes_px.append((w_px, h_px))
 
-                # Per-word script disambiguation: for mixed-script
-                # tokens AND short all-caps words that might be Latin
-                # brands mis-recognised as Cyrillic (``TENSAR`` →
-                # ``Тапваг``, ``SCANIA`` → ``СКАНИЯ`` / garbage), re-
-                # OCR each word's bbox with ``-l rus`` and ``-l eng``
-                # separately and pick the higher-confidence result.
-                # Solves the "ИНV-12345" class AND the
-                # brand-name-russified class before the paragraph-
-                # majority / numeric-context heuristics in the text
-                # postprocessor run.
+            if pr.error or not pr.word_boxes:
+                continue
+
+            confidences = [w[4] for w in pr.word_boxes if w[4] >= 0]
+            if not confidences:
+                continue
+
+            page_mean = sum(confidences) / len(confidences)
+            effective = threshold
+            if getattr(ocr, "adaptive_confidence_threshold", False):
+                if page_mean >= 90.0:
+                    effective = min(threshold, 40.0)
+                elif page_mean < 70.0:
+                    effective = max(threshold, 70.0)
+
+            low_words = [w[5] for w in pr.word_boxes if w[4] < effective]
+            pr.mean_confidence = page_mean
+            pr.low_confidence_words = low_words
+            pr.tsv_data = data
+            pr.page_width_px = w_px
+            pr.raster_path = str(png_path) if png_path.exists() else None
+
+            if getattr(ocr, "user_words_fuzzy_rescue", False):
+                self._apply_user_words_rescue(pr, data)
+
+            if ocr.drop_low_conf_words:
+                hw_blocks: set[tuple[int, int]] = set()
                 if getattr(
-                    job.profile.ocr, "per_word_script_disambiguation", False,
+                    job.profile.postprocess,
+                    "mark_suspect_handwritten_blocks", False,
                 ):
-                    from src.core.per_word_script_disambiguator import (
-                        disambiguate_word,
-                        is_latin_brand_suspect,
+                    hw_blocks = detect_handwritten_blocks(
+                        data, max_mean_confidence=40.0, min_words=3,
                     )
-                    from src.core.text_postprocessor import (
-                        _classify_word_script,
-                    )
-
-                    texts = data.get("text", [])
-                    confs_raw = data.get("conf", [])
-                    lefts = data.get("left", [])
-                    tops = data.get("top", [])
-                    widths = data.get("width", [])
-                    heights = data.get("height", [])
-
-                    for i in range(len(texts)):
-                        word = texts[i] if isinstance(texts[i], str) else ""
-                        if not word.strip():
-                            continue
-                        try:
-                            c = float(confs_raw[i])
-                        except (TypeError, ValueError, IndexError):
-                            continue
-                        if c < 0:
-                            continue
-                        klass = _classify_word_script(word)
-                        if klass != "mixed" and not is_latin_brand_suspect(word):
-                            continue
-                        try:
-                            bbox = (
-                                int(lefts[i]), int(tops[i]),
-                                int(widths[i]), int(heights[i]),
-                            )
-                        except (TypeError, ValueError, IndexError):
-                            continue
-                        new_word, new_conf = disambiguate_word(
-                            rescue_image, bbox, word, c, tess_cfg,
-                        )
-                        if new_word != word:
-                            texts[i] = new_word
-                            # Disambiguator wins get a confidence
-                            # floor so the downstream adaptive
-                            # threshold (``70.0`` on noisy pages)
-                            # can't drop a brand token the per-word
-                            # re-OCR recovered with high confidence
-                            # under one specific language. The swap
-                            # happened because eng beat rus by ≥ 5
-                            # lift on the same crop — that's a
-                            # stronger signal than the single-pass
-                            # self-reported confidence of either
-                            # language alone, so the reported conf
-                            # gets bumped to max(new_conf, 80) to
-                            # clear any reasonable adaptive ceiling.
-                            confs_raw[i] = str(max(new_conf, 80.0))
-
-                # Per-word image-enhancement rescue for borderline
-                # words (30-70 conf band). Runs AFTER the script
-                # disambiguator so its swaps are still visible, and
-                # BEFORE the adaptive-threshold decision / drop
-                # filter so the rescued confidences feed into both.
-                # CLAHE rescue runs first (cheap); upscale rescue
-                # fires only on words the CLAHE pass didn't already
-                # lift above the lift threshold.
-                use_clahe_rescue = getattr(
-                    job.profile.ocr, "per_word_clahe_rescue", False,
+                filtered = reconstruct_text_from_tsv(
+                    data,
+                    min_confidence=effective,
+                    soft_rescue=ocr.soft_rescue_dropped_words,
+                    handwritten_blocks=hw_blocks,
                 )
-                use_upscale_rescue = getattr(
-                    job.profile.ocr, "per_word_upscale_rescue", False,
-                )
-                if use_clahe_rescue or use_upscale_rescue:
-                    from src.core.per_word_image_rescue import (
-                        clahe_sharpen_rescue,
-                        upscale_rescue,
+                if filtered.strip():
+                    pr.text = self._postprocess_text(
+                        filtered, job.profile.postprocess,
                     )
+                    kept = [c for c in confidences if c >= effective]
+                    if kept:
+                        pr.mean_confidence = sum(kept) / len(kept)
 
-                    texts = data.get("text", [])
-                    confs_raw = data.get("conf", [])
-                    lefts = data.get("left", [])
-                    tops = data.get("top", [])
-                    widths = data.get("width", [])
-                    heights = data.get("height", [])
-
-                    for i in range(len(texts)):
-                        word = texts[i] if isinstance(texts[i], str) else ""
-                        if not word.strip():
-                            continue
-                        try:
-                            c = float(confs_raw[i])
-                        except (TypeError, ValueError, IndexError):
-                            continue
-                        if c < 0:
-                            continue
-                        try:
-                            bbox = (
-                                int(lefts[i]), int(tops[i]),
-                                int(widths[i]), int(heights[i]),
-                            )
-                        except (TypeError, ValueError, IndexError):
-                            continue
-
-                        cur_word, cur_conf = word, c
-                        if use_clahe_rescue:
-                            cur_word, cur_conf = clahe_sharpen_rescue(
-                                rescue_image, bbox,
-                                cur_word, cur_conf,
-                                lang, tess_cfg,
-                            )
-                        if (
-                            use_upscale_rescue
-                            and cur_conf < 80.0  # skip if already high
-                        ):
-                            cur_word, cur_conf = upscale_rescue(
-                                rescue_image, bbox,
-                                cur_word, cur_conf,
-                                lang, tess_cfg,
-                            )
-                        if cur_word != word or cur_conf != c:
-                            texts[i] = cur_word
-                            confs_raw[i] = str(cur_conf)
-
-                # Block-level PSM retry. Groups the TSV by block_num,
-                # finds blocks whose mean per-word confidence is below
-                # 60 % (with ≥ 3 words), re-OCRs the block crop with
-                # PSM=SINGLE_BLOCK, and replaces the block's TSV
-                # entries in-place when the re-OCR beats the original
-                # by ≥ 5 points. Targets invoice / transport-doc
-                # tables where the AUTO layout analyser fragmented
-                # cells. Runs on the pre-binarisation grayscale when
-                # available — same image_rescue's rationale.
-                use_block_psm_retry = getattr(
-                    job.profile.ocr, "per_block_psm_retry", False,
-                )
-                if use_block_psm_retry:
-                    from src.core.per_block_psm_rescue import (
-                        rescue_low_conf_blocks,
-                    )
-
-                    rescued_count = rescue_low_conf_blocks(
-                        data, rescue_image, lang, tess_cfg,
-                    )
-                    if rescued_count:
-                        logger.info(
-                            "Page %d: per-block PSM rescue replaced "
-                            "%d block(s)",
-                            pr.page_number, rescued_count,
-                        )
-
-                # User-words fuzzy rescue — dictionary-backed post-OCR
-                # correction. Runs LAST so it can fix tokens the image
-                # rescues couldn't (the CROP was readable but the LSTM
-                # output ``ИНЦ`` for ``ИНН`` anyway). Zero extra
-                # Tesseract calls — pure dict + Levenshtein.
-                use_user_words_rescue = getattr(
-                    job.profile.ocr, "user_words_fuzzy_rescue", False,
-                )
-                if use_user_words_rescue:
-                    from src.application.ocrmypdf_integration import (
-                        _resolve_user_dict_paths,
-                    )
-                    from src.core.user_words_rescue import (
-                        load_user_words_catalog,
-                        user_words_fuzzy_rescue,
-                    )
-
-                    words_path, _patterns_path = _resolve_user_dict_paths(
-                        job.profile.ocr.primary_language,
-                    )
-                    catalog = load_user_words_catalog(words_path)
-                    if catalog is not None:
-                        texts = data.get("text", [])
-                        confs_raw = data.get("conf", [])
-                        changed_uw = 0
-                        for i in range(len(texts)):
-                            word = (
-                                texts[i] if isinstance(texts[i], str) else ""
-                            )
-                            if not word.strip():
-                                continue
-                            try:
-                                c = float(confs_raw[i])
-                            except (TypeError, ValueError, IndexError):
-                                continue
-                            if c < 0:
-                                continue
-                            new_word, new_conf = user_words_fuzzy_rescue(
-                                word, c, catalog,
-                            )
-                            if new_word != word or new_conf != c:
-                                texts[i] = new_word
-                                confs_raw[i] = str(new_conf)
-                                changed_uw += 1
-                        if changed_uw:
-                            logger.info(
-                                "Page %d: user-words fuzzy rescue "
-                                "corrected %d token(s)",
-                                pr.page_number, changed_uw,
-                            )
-
-                # Rebuild the confidences list from the possibly-
-                # updated data so the downstream mean / threshold
-                # logic sees the disambiguated / rescued numbers.
-                if (
-                    getattr(
-                        job.profile.ocr,
-                        "per_word_script_disambiguation", False,
-                    )
-                    or use_clahe_rescue
-                    or use_upscale_rescue
-                    or use_user_words_rescue
-                    or use_block_psm_retry
-                ):
-                    confidences = []
-                    for val in confs_raw:
-                        try:
-                            cv = float(val)
-                        except (TypeError, ValueError):
-                            continue
-                        if cv >= 0:
-                            confidences.append(cv)
-
-                # Per-page adaptive threshold: clean pages use a lower
-                # threshold (keep borderline words), noisy pages use
-                # a higher threshold (filter harder). See
-                # ``OCRConfig.adaptive_confidence_threshold`` for the
-                # exact rules.
-                page_mean = (
-                    sum(confidences) / len(confidences) if confidences else 0.0
-                )
-                effective_threshold = threshold
-                if (
-                    getattr(
-                        job.profile.ocr, "adaptive_confidence_threshold", False,
-                    )
-                    and confidences
-                ):
-                    if page_mean >= 90.0:
-                        effective_threshold = min(threshold, 40.0)
-                    elif page_mean < 70.0:
-                        effective_threshold = max(threshold, 70.0)
-                    if effective_threshold != threshold:
-                        logger.info(
-                            "Page %d: adaptive threshold %.1f → %.1f "
-                            "(page mean_conf=%.1f)",
-                            pr.page_number,
-                            threshold,
-                            effective_threshold,
-                            page_mean,
-                        )
-                # Recompute low-conf words against the effective
-                # threshold so the exported ``low_confidence_words``
-                # matches the filter that actually ran below.
-                if effective_threshold != threshold:
-                    low_words = []
-                    for conf, word in zip(
-                        data.get("conf", []),
-                        data.get("text", []),
-                        strict=False,
-                    ):
-                        try:
-                            c = float(conf)
-                        except (TypeError, ValueError):
-                            continue
-                        if c < 0 or not isinstance(word, str) or not word.strip():
-                            continue
-                        if c < effective_threshold:
-                            low_words.append(word)
-                if confidences:
-                    pr.mean_confidence = sum(confidences) / len(confidences)
-                    pr.low_confidence_words = low_words
-
-                # Layout-aware parser (idea #1 top-10) + token-level
-                # confidence propagation (idea #5) нуждаются в raw
-                # TSV + размерах raster'а. Сохраняем на result — оно
-                # optional, ноль overhead для callers которые не
-                # используют парсер.
-                pr.tsv_data = data
-                try:
-                    pr.page_width_px = int(img.shape[1])
-                except Exception:  # noqa: BLE001
-                    pr.page_width_px = 0
-                # Сохраняем путь к preprocessed PNG — field_rescue
-                # (idea #6) его использует для targeted re-OCR.
-                pr.raster_path = str(png_path) if png_path.exists() else None
-
-                # Word-level drop: rebuild pr.text from the same TSV,
-                # dropping every word below ``confidence_threshold``. The
-                # searchable-PDF text layer is still the OCRmyPDF union
-                # (see :mod:`src.core.confidence_filter` module docstring),
-                # but the user-facing text — results panel, TXT/DOCX
-                # export — is now the cleaner filtered version. Empty
-                # reconstructions leave ``pr.text`` untouched so we never
-                # blank out a result just because confidence scoring
-                # itself was noisy. Mean-conf is also recomputed over
-                # the KEPT words so the UI doesn't flash a lower number
-                # than what the user is actually looking at.
-                if job.profile.ocr.drop_low_conf_words:
-                    from src.core.confidence_filter import (
-                        detect_handwritten_blocks,
-                        reconstruct_text_from_tsv,
-                    )
-
-                    # Handwritten-block detection is layered on top of
-                    # the word-conf filter: entire blocks whose mean
-                    # per-word confidence is below 40 % (and contain
-                    # ≥ 3 words) are replaced with the
-                    # ``⟨рукописный текст⟩`` marker. Tesseract's
-                    # Russian LSTM wasn't trained on handwriting, so
-                    # those blocks would otherwise show up as silent
-                    # gaps (individual low-conf words dropped by the
-                    # per-word filter) and the user wouldn't know
-                    # there was content to transcribe manually.
-                    hw_blocks: set[tuple[int, int]] = set()
-                    if getattr(
-                        job.profile.postprocess,
-                        "mark_suspect_handwritten_blocks",
-                        False,
-                    ):
-                        hw_blocks = detect_handwritten_blocks(
-                            data,
-                            max_mean_confidence=40.0,
-                            min_words=3,
-                        )
-                        if hw_blocks:
-                            logger.info(
-                                "Page %d: %d handwritten-looking "
-                                "block(s) detected, inserting marker",
-                                pr.page_number, len(hw_blocks),
-                            )
-
-                    filtered = reconstruct_text_from_tsv(
-                        data,
-                        min_confidence=effective_threshold,
-                        soft_rescue=job.profile.ocr.soft_rescue_dropped_words,
-                        handwritten_blocks=hw_blocks,
-                    )
-                    if filtered.strip():
-                        pr.text = self._postprocess_text(
-                            filtered, job.profile.postprocess,
-                        )
-                        kept = [
-                            c for c in confidences if c >= effective_threshold
-                        ]
-                        if kept:
-                            pr.mean_confidence = sum(kept) / len(kept)
-                        logger.info(
-                            "Page %d: word-conf filter dropped %d/%d "
-                            "words (threshold=%.1f), kept mean_conf=%.1f",
-                            pr.page_number,
-                            len(confidences) - len(kept),
-                            len(confidences),
-                            effective_threshold,
-                            pr.mean_confidence,
-                        )
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    "Confidence computation failed for page %d: %s",
-                    pr.page_number,
-                    exc,
-                )
-
-        # PDF text-layer filter (Step C). After every page's TSV is
-        # collected, redact low-conf word regions from the searchable
-        # PDF so Ctrl-F / copy-paste / downstream DMS ingestion only
-        # hit the same high-conf words the results panel shows. Gated
-        # on ``drop_low_conf_words`` so profiles that haven't opted in
-        # keep the old full-union text layer. Best-effort: any error
-        # inside the filter is logged but doesn't fail the job — the
-        # searchable PDF still exists, it just has the original
-        # (unfiltered) text layer.
         if (
-            job.profile.ocr.drop_low_conf_words
+            ocr.drop_low_conf_words
             and output_pdf is not None
             and output_pdf.exists()
             and tsv_per_page
         ):
             try:
                 from src.core.pdf_text_filter import filter_pdf_text_layer
-
                 redacted = filter_pdf_text_layer(
                     output_pdf,
                     tsv_per_page=tsv_per_page,
                     image_sizes_px=image_sizes_px,
                     min_confidence=threshold,
-                    redact_noisy_blocks=(
-                        job.profile.ocr.redact_noisy_blocks
-                    ),
                 )
                 logger.info(
-                    "PDF text-layer filter: redacted %d word region(s) "
-                    "across %d page(s) of %s",
-                    redacted, len(tsv_per_page), output_pdf,
+                    "PDF text-layer filter: redacted %d region(s) on %s",
+                    redacted, output_pdf,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "PDF text-layer filter failed on %s: %s — the "
-                    "searchable PDF is still usable but its text "
-                    "layer may contain low-conf words the UI filter "
-                    "hid.",
-                    output_pdf, exc, exc_info=True,
-                )
+                logger.warning("PDF text-layer filter failed: %s", exc)
+
+    def _apply_user_words_rescue(
+        self, pr: PageResult, data: dict,
+    ) -> None:
+        """Fuzzy-correct mid-confidence words against the bundled lexicon."""
+        try:
+            from src.core.user_words_rescue import (
+                load_user_words_catalog,
+                user_words_fuzzy_rescue,
+            )
+            from src.shared.constants import RESOURCES_DIR
+            catalog = load_user_words_catalog(RESOURCES_DIR / "ru_lexicon.txt")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("user-words rescue unavailable: %s", exc)
+            return
+        if catalog is None:
+            return
+        texts = data.get("text", [])
+        confs = data.get("conf", [])
+        for i in range(len(texts)):
+            word = texts[i] if isinstance(texts[i], str) else ""
+            if not word.strip():
+                continue
+            try:
+                c = float(confs[i])
+            except (TypeError, ValueError, IndexError):
+                continue
+            new_word, new_conf = user_words_fuzzy_rescue(word, c, catalog)
+            if new_word != word or new_conf != c:
+                texts[i] = new_word
+                confs[i] = str(new_conf)
+
+
+def _word_boxes_to_tsv(
+    word_boxes: list[tuple[float, float, float, float, float, str]],
+) -> dict:
+    """Build a Tesseract-TSV-compatible dict from engine word_boxes.
+
+    All words land in block_num=1, line_num=1 (EasyOCR has no layout-
+    block analysis); word_num increments. ``level=5`` marks word rows
+    so callers can filter just-words.
+    """
+    n = len(word_boxes)
+    return {
+        "level": [5] * n,
+        "page_num": [1] * n,
+        "block_num": [1] * n,
+        "par_num": [1] * n,
+        "line_num": [1] * n,
+        "word_num": list(range(1, n + 1)),
+        "left": [int(w[0]) for w in word_boxes],
+        "top": [int(w[1]) for w in word_boxes],
+        "width": [int(w[2]) for w in word_boxes],
+        "height": [int(w[3]) for w in word_boxes],
+        "conf": [str(w[4]) for w in word_boxes],
+        "text": [w[5] for w in word_boxes],
+    }
+
 
     def _cleanup(self, workdir: Path) -> None:
         """Remove the temporary workdir, logging but not raising on error."""

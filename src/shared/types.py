@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from enum import IntEnum, StrEnum
+from enum import StrEnum
 from typing import TypeAlias
 
 import numpy as np
@@ -10,17 +10,6 @@ import numpy as np
 ImageArray: TypeAlias = np.ndarray
 AngleDegrees: TypeAlias = float
 FilePath: TypeAlias = str
-
-
-class Language(StrEnum):
-    """Supported OCR languages (EasyOCR codes)."""
-
-    RUSSIAN = "ru"
-    ENGLISH = "en"
-
-    @property
-    def label(self) -> str:
-        return {"ru": "Русский", "en": "English"}[self.value]
 
 
 class BinarizationMethod(StrEnum):

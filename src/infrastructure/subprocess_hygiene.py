@@ -3,27 +3,16 @@
 On Windows, the PyInstaller ``--windowed`` build launches OCR Studio
 from a GUI-subsystem ``OCRStudio.exe`` with no console attached. When
 any library inside the app calls :class:`subprocess.Popen` to spawn a
-*console-subsystem* child — Tesseract (``tesseract.exe``), Ghostscript
-(``gswin64c.exe``), ``pdftoppm``, ``unpaper``, ``pngquant`` — Windows
-gives that child a **fresh console window**. The window appears for
-the duration of the subprocess, then closes when it exits. A single
-OCR job with ``use_threads=True`` spawns 4 Tesseract workers in
-parallel plus one Ghostscript pass: that's the 2-4 blank consoles
-users see flash in and out during a run.
+console-subsystem child, Windows gives that child a fresh console
+window that flashes for the duration of the subprocess.
 
 The fix is a targeted monkey-patch of :class:`subprocess.Popen` that
 defaults ``creationflags`` to ``CREATE_NO_WINDOW`` (``0x08000000``)
 whenever the caller did not pass explicit creation flags or a
-``startupinfo`` object. ``CREATE_NO_WINDOW`` tells the Windows loader
-"do not allocate a console for this child" — which is exactly what we
-want for every console binary OCRmyPDF drives.
+``startupinfo`` object.
 
-The monkey-patch is scoped to the current process only. It must be
-installed both on the GUI main process (for any subprocess.Popen the
-host UI spawns) and on each ProcessPoolExecutor worker (which is the
-one that actually runs OCRmyPDF). Non-Windows platforms and
-non-``--windowed`` builds are a no-op so unit tests see no
-observable change.
+The monkey-patch is scoped to the current process only. Non-Windows
+platforms are a no-op.
 """
 
 from __future__ import annotations

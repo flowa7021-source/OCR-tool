@@ -1,0 +1,68 @@
+name: real-ocr-metrics
+
+# Runs the full test suite + real-OCR accuracy metrics on the golden
+# corpus. Produces a CER / WER / mean-confidence table per document
+# so a regression in preprocessing / postprocessing is caught before
+# release.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * *"  # nightly
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install (CPU torch)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+          pip install -r requirements.txt
+          pip install pytest pytest-cov ruff jiwer
+      - run: ruff check src tests scripts
+      - run: pytest tests/unit -q
+
+  real-ocr-golden:
+    name: Real OCR accuracy (golden corpus)
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install (CPU torch + easyocr)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+          pip install -r requirements.txt jiwer
+
+      - name: Cache EasyOCR models
+        uses: actions/cache@v4
+        with:
+          path: ~/.EasyOCR/model
+          key: easyocr-models-v1
+
+      - name: Run accuracy metrics
+        run: python scripts/real_ocr_metrics.py --fail-above 180
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ocr-metrics-report
+          path: reports/ocr_metrics.json
+          retention-days: 30
