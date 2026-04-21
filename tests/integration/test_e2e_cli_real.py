@@ -115,8 +115,18 @@ class TestCliCyrillicOutputPath:
     def test_cyrillic_output_path(
         self, tmp_path: Path, real_tesseract_wrapper,
     ) -> None:
+        # Длинный payload-текст: контракт теста — «CLI принимает
+        # Cyrillic output path», а не «OCR читает 4-символьные
+        # фикстуры». Короткое «test» на большой пустой странице
+        # универсальный профиль (Sauvola window=25 + local contrast
+        # CLAHE) местами вычищает как шум — тогда tesseract возвращает
+        # «Empty page!!», OCRmyPDF raises → CLI exit 1. Чуть более
+        # плотная «cyrillic output path smoke test» survives Sauvola
+        # стабильно и проверяет ровно то, для чего тест написан.
         input_pdf = render_clean_text_pdf(
-            tmp_path / "in.pdf", "test", pages=1,
+            tmp_path / "in.pdf",
+            "cyrillic output path smoke test",
+            pages=1,
             dpi=400, fontsize=72,
         )
         cyr_dir = tmp_path / "Мои документы"
