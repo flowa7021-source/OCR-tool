@@ -9,6 +9,9 @@ produced a cleaned, binarised, deskewed PDF by the time we invoke OCRmyPDF.
 from __future__ import annotations
 
 import logging
+import os
+import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -225,7 +228,58 @@ def _build_tesseract_config_file(
     if not lines:
         return None
 
-    config_path = workdir / "extra_tesseract_params.cfg"
+    # Tesseract's read_params_file() on Windows opens paths via the
+    # legacy ANSI ``fopen()`` API, so a Cyrillic ``workdir`` mangles
+    # to ``?`` chars and reports ``Can't open …``. Work around that by
+    # writing the config to an ASCII-safe location — an OS temp dir —
+    # whenever the requested workdir isn't ASCII. On Linux/macOS the
+    # filesystem handles UTF-8 natively, so we only switch on Windows
+    # or when the path genuinely contains non-ASCII bytes.
+    def _is_ascii(p: Path) -> bool:
+        try:
+            str(p).encode("ascii")
+            return True
+        except UnicodeEncodeError:
+            return False
+
+    target_dir = workdir
+    if sys.platform == "win32" and not _is_ascii(workdir):
+        # Prefer GetShortPathNameW to convert workdir itself to 8.3
+        # ASCII form so Tesseract can still resolve relative artefacts
+        # written alongside the config (none currently, but future-proof).
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            GetShortPathNameW = ctypes.windll.kernel32.GetShortPathNameW  # noqa: N806 - Win32 API name
+            GetShortPathNameW.argtypes = [
+                wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD,
+            ]
+            GetShortPathNameW.restype = wintypes.DWORD
+            buf = ctypes.create_unicode_buffer(260)
+            n = GetShortPathNameW(str(workdir), buf, 260)
+            if n and n < 260:
+                short = Path(buf.value)
+                if _is_ascii(short) and short.exists():
+                    target_dir = short
+        except (OSError, AttributeError, ImportError):
+            pass
+        if not _is_ascii(target_dir):
+            # Fall back to an explicit ASCII tempdir. tempfile.gettempdir()
+            # on GitHub Windows runners returns ``D:\a\_temp`` (ASCII);
+            # on user machines with Cyrillic usernames TEMP usually also
+            # resolves to an ASCII short path, but we re-verify just in case.
+            tmp = Path(tempfile.gettempdir())
+            if _is_ascii(tmp):
+                target_dir = tmp / "ocr_tool_tess_cfg"
+                target_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                # Last resort: windows system drive temp.
+                sysdrive = Path(os.environ.get("SYSTEMDRIVE", "C:") + "\\")
+                target_dir = sysdrive / "ocr_tool_tess_cfg"
+                target_dir.mkdir(parents=True, exist_ok=True)
+
+    config_path = target_dir / "extra_tesseract_params.cfg"
     config_path.write_text("\n".join(lines) + "\n", encoding="ascii")
     return config_path
 
