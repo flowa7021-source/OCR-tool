@@ -614,20 +614,29 @@ class TextPostprocessor:
             current = self._autocorrect_russian(current)
             logger.debug("Postprocess: Russian autocorrect applied")
 
-            # Lexicon-based коррекция критичных ТН/УПД терминов
-            # ПОСЛЕ autocorrect_russian: autocorrect чинит мелкие
-            # опечатки, lexicon_corrector закрывает специфические
-            # OCR-мангления типа «Грузаатправитель» →
-            # «Грузоотправитель», «Гручополучателя» →
-            # «Грузополучателя». Регексы парсера дальше уже видят
-            # canonical-headers и матчат секции стандартным путём.
-            #
-            # Связан с autocorrect_russian флагом: оба чинят
-            # русские слова, держим под одним переключателем.
+            # Точечная коррекция критичных ТН/УПД терминов через
+            # dict-lookup (23 canonical × 122 OCR-варианта): сначала
+            # быстро и гарантированно чиним Грузоотправитель /
+            # Грузополучатель / Перевозчик / идентифицировать /
+            # реквизиты / TENSAR /... — потом fuzzy-корректор
+            # не трогает уже-исправленные слова.
             from src.core.lexicon_corrector import correct as _lex_correct
             current = _lex_correct(current)
             logger.debug(
                 "Postprocess: lexicon-corrector applied (TN/УПД vocab)"
+            )
+
+            # Широкий fuzzy-корректор через reference-словарь
+            # ~17 000 русских словоформ (resources/ru_lexicon.txt,
+            # сгенерирован через pymorphy3 из ~890 базовых слов).
+            # Работает на всех русских токенах длиной ≥ 5 не-
+            # кириллических / уже-correct словах. Ловит OCR-опечатки
+            # за пределами TN-vocab: «организаиия» → «организация»,
+            # «постановпения» → «постановления» и т.п.
+            from src.core.fuzzy_corrector import correct as _fuzzy_correct
+            current = _fuzzy_correct(current)
+            logger.debug(
+                "Postprocess: fuzzy-corrector applied (~17k ref dict)"
             )
 
         if config.autocorrect_english:

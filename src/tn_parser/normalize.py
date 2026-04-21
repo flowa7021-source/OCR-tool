@@ -121,6 +121,14 @@ def normalize_for_sections(text: str) -> str:
         text = _lex_correct(text)
     except ImportError:  # pragma: no cover — src.core отсутствует в parser-only билдах
         pass
+    # Широкий fuzzy-корректор (по ~17k словоформ русского языка).
+    # Тоже ленивый; не требует pymorphy3 в runtime (словарь
+    # сгенерирован build-time в resources/ru_lexicon.txt).
+    try:
+        from src.core.fuzzy_corrector import correct as _fuzzy_correct
+        text = _fuzzy_correct(text)
+    except ImportError:  # pragma: no cover
+        pass
     return text.strip()
 
 
