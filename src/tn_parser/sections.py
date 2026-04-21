@@ -403,8 +403,28 @@ def _find_markers(text: str) -> list[tuple[int, str]]:
     return markers
 
 
-def split_sections(text: str) -> dict[str, str]:
-    """Делит нормализованный текст на разделы по ролям."""
+def split_sections(
+    text: str,
+    *,
+    tsv: dict[str, list] | None = None,
+    page_width: int | None = None,
+) -> dict[str, str]:
+    """Делит нормализованный текст на разделы по ролям.
+
+    Args:
+        text: Нормализованный OCR-text (уже после TextPostprocessor).
+        tsv: Опциональный ``pytesseract.image_to_data(DICT)`` — если
+            передан, используется layout-aware extraction для
+            устранения adjacent-cell-leak (idea #1 top-10). См.
+            :mod:`src.tn_parser.layout_anchor`. Fallback на regex
+            сохранён.
+        page_width: Ширина страницы для column-определения. Обязателен
+            если передан ``tsv``.
+
+    Returns:
+        Dict вида ``{role: section_body}`` — role = shipper /
+        consignee / carrier / cargo / driver / vehicle / reception.
+    """
     if not text:
         return {}
 
@@ -446,4 +466,85 @@ def split_sections(text: str) -> dict[str, str]:
         if role not in result:
             result[role] = body
 
+    # Layout-aware disambiguation для ролей из левой колонки ТН-формы
+    # (idea #1 top-10, Bug 1 класс «adjacent-cell leak»). Срабатывает
+    # только когда передан TSV + page_width AND в body присутствуют
+    # маркеры «соседней ячейки» (например ``заказчик услуг`` в теле
+    # shipper). Попытка переоткрыть тело через bbox-колонку; если
+    # layout-ы дали что-то разумное — заменяем.
+    if tsv and page_width and page_width > 0:
+        patterns_in_order = [_LEFT_COLUMN_ANCHORS[r] for r in _LEFT_COLUMN_ROLES]
+        for role in _LEFT_COLUMN_ROLES:
+            body = result.get(role, "")
+            if not body or not _ADJACENT_CELL_MARKERS_RE.search(body):
+                continue
+            idx = _LEFT_COLUMN_ROLES.index(role)
+            layout_body = _layout_extract_left_column_section(
+                tsv, page_width, patterns_in_order, idx,
+            )
+            if layout_body and len(layout_body.strip()) >= 10:
+                result[role] = layout_body.strip()
+
     return result
+
+
+#: Роли, живущие в левой колонке ТН-формы и подверженные adjacent-
+#: cell leak из правой. Для других ролей (cargo / vehicle / driver /
+#: reception) layout-disambig не применяется — они идут через всю
+#: ширину формы.
+_LEFT_COLUMN_ROLES: tuple[str, ...] = ("shipper", "consignee", "carrier")
+
+#: Anchor-patterns для layout_anchor.find_section_region — IGNORECASE
+#: word-stem'ы (поймают падежи «грузоотправителя», «перевозчиком»).
+_LEFT_COLUMN_ANCHORS: dict[str, str] = {
+    "shipper": r"грузоотправ",
+    "consignee": r"грузополуч",
+    "carrier": r"перевозчик",
+}
+
+#: Маркер «body содержит контамину из соседней (правой) ячейки».
+#: «Заказчик услуг» и «является экспедитором» — типичные слова
+#: 1а-ячейки формы ТН.
+_ADJACENT_CELL_MARKERS_RE = re.compile(
+    r"(?i)заказчик\s+услуг|является\s+экспедит"
+)
+
+
+def _layout_extract_left_column_section(
+    tsv: dict[str, list],
+    page_width: int,
+    anchor_patterns: list[str],
+    role_idx: int,
+) -> str | None:
+    """Извлечь текст левой колонки для секции по индексу anchor'а.
+
+    Body секции — от y-позиции её anchor'а до y-позиции следующего
+    left-column anchor'а, либо до низа страницы.
+    """
+    from .layout_anchor import (
+        extract_column_text_between,
+        find_section_region,
+    )
+
+    anchor = anchor_patterns[role_idx]
+    region = find_section_region(
+        tsv, anchor_pattern=anchor,
+        prefer_column="left", page_width=page_width,
+    )
+    if region is None:
+        return None
+    top = region[0]
+    bottom = 999_999  # защитный верх: возьмём всё ниже якоря
+    for next_anchor in anchor_patterns[role_idx + 1:]:
+        next_region = find_section_region(
+            tsv, anchor_pattern=next_anchor,
+            prefer_column="left", page_width=page_width,
+        )
+        if next_region is not None and next_region[0] > top:
+            bottom = next_region[0]
+            break
+
+    return extract_column_text_between(
+        tsv, y_top=top, y_bottom=bottom,
+        column="left", page_width=page_width,
+    )
