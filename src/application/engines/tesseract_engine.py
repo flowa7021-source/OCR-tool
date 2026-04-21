@@ -208,6 +208,13 @@ def _page_pdf_has_text(pdf_path: Path) -> bool:
 # dark=0.3% — типичная пустая обратная сторона доверенности).
 _BLANK_PAGE_DARK_PCT_THRESHOLD = 0.015      # < 1.5 % тёмных пикселей
 _BLANK_PAGE_STDDEV_THRESHOLD = 20.0          # std < 20 = почти uniform
+# Минимум area страницы в растеризованных пикселях. Реальный A4
+# при 150 DPI = 1240 × 1754 ≈ 2.17 M px. Тестовые PDF-фикстуры часто
+# 200 × 200 pt = 417 × 417 px ≈ 170 k px. Не классифицируем blank
+# для маленьких страниц — они почти всегда unit-тесты или postcard-
+# размера документы, где даже тонкий текст занимает большую долю,
+# а blank-эвристика по процентам становится ненадёжной.
+_BLANK_PAGE_MIN_AREA_PX = 500_000
 
 
 def _page_is_blank(page_pdf: Path, dpi: int = 150) -> bool:
@@ -215,11 +222,20 @@ def _page_is_blank(page_pdf: Path, dpi: int = 150) -> bool:
 
     Растеризуем страницу в grayscale на низком DPI (150 — быстро),
     меряем долю тёмных пикселей и стандартное отклонение интенсивности.
-    Если дольки тёмного < 1.5 % И std < 20 — страница содержит максимум
-    тонер-пятна или фоновый шум; OCR retry на ней — burning CPU.
+    Страница считается blank если ВСЕ три условия:
+      1. area ≥ 500 k px (≈ A5 при 150 DPI — реальный документ, не
+         test-fixture);
+      2. dark_pct < 1.5 % (почти нет тёмных пикселей);
+      3. std < 20 (почти uniform grey/white).
 
-    На UPD_36 p4 (служебная обратная сторона) экономит 6 минут aggressive-
-    retry с 900s timeout per page, который всё равно не находит текста.
+    Условие (1) защищает от ложных срабатываний на unit-тестовых
+    фикстурах: 200×200 pt PDF с текстом «page 2» даёт dark_pct 0.3 %
+    и std 11 — формально passes (2) и (3), но это не blank-страница,
+    это просто маленькая фикстура. Реальные документы (ТН/УПД
+    сканированные на A4) всегда ≥ 1.5 M px при 150 DPI.
+
+    На UPD_36 p4 (служебная обратная сторона) экономит 6 минут
+    aggressive-retry с 900s timeout per page.
     """
     try:
         import fitz
@@ -233,6 +249,7 @@ def _page_is_blank(page_pdf: Path, dpi: int = 150) -> bool:
             arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
                 pix.height, pix.width
             )
+            area = pix.width * pix.height
             dark_pct = float((arr < 128).mean())
             stddev = float(arr.std())
     except Exception as exc:  # noqa: BLE001
@@ -242,13 +259,14 @@ def _page_is_blank(page_pdf: Path, dpi: int = 150) -> bool:
         return False
 
     is_blank = (
-        dark_pct < _BLANK_PAGE_DARK_PCT_THRESHOLD
+        area >= _BLANK_PAGE_MIN_AREA_PX
+        and dark_pct < _BLANK_PAGE_DARK_PCT_THRESHOLD
         and stddev < _BLANK_PAGE_STDDEV_THRESHOLD
     )
     if is_blank:
         logger.debug(
-            "_page_is_blank: %s — dark_pct=%.3f stddev=%.1f → BLANK",
-            page_pdf.name, dark_pct, stddev,
+            "_page_is_blank: %s — area=%d dark_pct=%.3f stddev=%.1f → BLANK",
+            page_pdf.name, area, dark_pct, stddev,
         )
     return is_blank
 
