@@ -301,6 +301,14 @@ def _build_row(text: str, source: str, global_fallback: str = "") -> ParsedRow:
     )
     row.consignee = cn_enriched  # consignee prepend не делается внутри
 
+    # Auto-learn: если извлечено non-missing-ORG-поле с валидным ИНН
+    # и он ЕЩЁ НЕ в каталоге — сохраняем. Со временем пользовательский
+    # каталог растёт: каждый новый контрагент запомнен, при следующем
+    # прогоне parser'а его можно cross-validate. Это self-improving
+    # loop: чем больше документов обработано, тем точнее cross-
+    # validation на следующих.
+    _auto_learn_from_row(row)
+
     row.confidence = FieldConfidence(
         date=fields["date"][1],
         number=fields["number"][1],
@@ -358,6 +366,68 @@ def _is_noise_row(row: ParsedRow) -> bool:
         + (row.shipper not in (MISSING, GARBAGE, ""))
     )
     return signals == 0
+
+
+def _auto_learn_from_row(row: ParsedRow) -> None:
+    """Auto-cache новых ORG'ов, обнаруженных в row.
+
+    Логика: для каждого ORG-поля (shipper/consignee/reception)
+    ищем валидный ИНН + извлекаем ORG-name. Если каталог его НЕ
+    знает — ``remember()`` добавит в ``data/org_cache.json``.
+    На последующих прогонах этого документа и других от тех же
+    контрагентов cross-validation получит ground-truth.
+
+    Консервативно: кладём только с high-conf (≥ 0.8), чтобы
+    не «заразить» каталог mangled именами.
+    """
+    import contextlib
+    import re as _re
+
+    from .org_lookup import lookup_by_inn, remember
+
+    fields_to_check = [
+        ("shipper", row.shipper, row.confidence.shipper),
+        ("consignee", row.consignee, row.confidence.consignee),
+        ("reception", row.reception, row.confidence.reception),
+    ]
+    for _fld_name, raw, conf in fields_to_check:
+        if not raw or raw in (MISSING, GARBAGE):
+            continue
+        if conf < 0.8:  # низкая conf = мангленное имя, не учим
+            continue
+        inn_m = _re.search(r"\b(\d{10}|\d{12})\b", raw)
+        if not inn_m:
+            continue
+        inn = inn_m.group(1)
+        if not is_valid_inn(inn):
+            continue
+        if lookup_by_inn(inn):  # уже знаем — не переписываем
+            continue
+        # Вытаскиваем ORG-часть до ИНН. str.rstrip(CHARS) трактует
+        # CHARS как SET — отдельные символы убираются в любом
+        # порядке. noqa B005 — это именно то поведение, которое
+        # нужно: убрать trailing whitespace/запятые и обломки
+        # «ИНН»/«INN» от OCR-шума.
+        prefix = raw[: inn_m.start()].rstrip(" ,ИНнHH").strip()  # noqa: B005
+        m_lf = _re.match(
+            r"\b(ООО|ОАО|АО|ЗАО|ПАО|ИП|ТОО|АНО|ФГУП|ГУП|МУП)\b",
+            prefix, _re.IGNORECASE,
+        )
+        legal_form = m_lf.group(1).upper() if m_lf else ""
+        name_part = (
+            prefix[m_lf.end():].strip(' "«»\',')
+            if m_lf else prefix.strip(' "«»\',')
+        )
+        if not name_part or len(name_part) < 3:
+            continue
+        record = {
+            "name": name_part,
+            "legal_form": legal_form,
+            "inn": inn,
+            "source": "auto-learned",
+        }
+        with contextlib.suppress(Exception):
+            remember(inn, record)
 
 
 def _apply_multi_row_voting(rows: list[ParsedRow]) -> None:

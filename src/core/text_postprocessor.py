@@ -670,6 +670,20 @@ class TextPostprocessor:
             current = self._validate_entities(current)
             logger.debug("Postprocess: dates / amounts / phones normalised")
 
+            # Дополнительный слой entity-нормализации (декабрь 2026):
+            # канонизирует даты / телефоны / адресные префиксы через
+            # regex-based normalizers. _validate_entities уже чинит
+            # opt-пат «12.O1.2O23» → «12.01.2023», но не перестраивает
+            # формат даты (29/08/2022 → 29.08.2022) и не распаковывает
+            # слипшиеся адреса (125212,г.Москва → 125212, г. Москва).
+            # Делает Excel-вывод byte-stable между прогонами одного
+            # документа на разных сканах/DPI.
+            from src.core.entity_normalizers import normalize_all
+            current = normalize_all(current)
+            logger.debug(
+                "Postprocess: entity normalizers applied (dates/phones/addrs)"
+            )
+
         return current
 
     # ------------------------------------------------------------------
