@@ -865,6 +865,21 @@ def _is_validated_cargo(name: str) -> bool:
     return bool(_CARGO_VALIDATION_RE.search(name))
 
 
+def _is_regex_cargo_contaminated(name: str) -> bool:
+    """True если regex-извлечённое имя содержит явные label-слова
+    соседних колонок формы («класс опасности», «упаковка», «бирка»
+    и т.п.) — значит split недочистил, и table-parser даст лучший
+    результат."""
+    if not name:
+        return False
+    low = name.lower()
+    markers = (
+        "класс опасн", "упаковк", "тара", "бирк", "ярлык",
+        "способ погруз", "способ упаков", "штрих",
+    )
+    return any(m in low for m in markers)
+
+
 def extract_cargo(section_body: str, full_text: str) -> tuple[str, float]:
     """Наименование груза. Без 'Кол-во мест', без хвоста 'N шт',
     без 'Класс опасности' / 'Упаковка' / 'Тара'.
@@ -874,14 +889,53 @@ def extract_cargo(section_body: str, full_text: str) -> tuple[str, float]:
               упаковка / типовой грузовой термин).
         0.9 — секция найдена, без structural сигнала.
         0.5 — fallback regex по «наименование груза».
+
+    Табличная extraction (idea #7 top-10): если section_body имеет
+    структуру таблицы (≥ 2 rows с consistent separator'ами),
+    пробуем :mod:`src.tn_parser.cargo_table` в параллель к regex.
+    Если regex-name загрязнён label'ами соседних колонок —
+    table-name побеждает.
     """
+    # Попытка 1: regex-way из секции.
+    regex_name = ""
+    regex_conf = 0.0
     if section_body:
         lines = _meaningful_lines(section_body)
-        name = _first_cargo_name_from_lines(lines)
-        if name:
-            name = _clean_cargo_name(name)
-            if name and not is_garbage(name):
-                return name, (1.0 if _is_validated_cargo(name) else 0.9)
+        candidate = _first_cargo_name_from_lines(lines)
+        if candidate:
+            candidate = _clean_cargo_name(candidate)
+            if candidate and not is_garbage(candidate):
+                regex_name = candidate
+                regex_conf = 1.0 if _is_validated_cargo(candidate) else 0.9
+
+    # Попытка 2: table-way (form-aware, idea #7).
+    table_name = ""
+    if section_body:
+        try:
+            from .cargo_table import (
+                detect_table_structure,
+                extract_name_from_table,
+            )
+
+            if detect_table_structure(section_body):
+                raw_table = extract_name_from_table(section_body)
+                if raw_table:
+                    cleaned = _clean_cargo_name(raw_table)
+                    if cleaned and not is_garbage(cleaned):
+                        table_name = cleaned
+        except ImportError:
+            pass
+
+    # Table-way побеждает когда regex-name отсутствует или содержит
+    # label-контамину соседних колонок. Table-name идёт из bare
+    # «Наименование»-колонки и label'ами не грешит.
+    if table_name and (
+        not regex_name or _is_regex_cargo_contaminated(regex_name)
+    ):
+        return table_name, 1.0 if _is_validated_cargo(table_name) else 0.9
+
+    if regex_name:
+        return regex_name, regex_conf
 
     if full_text:
         for pat in (
