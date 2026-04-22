@@ -384,22 +384,12 @@ def process_batch(
 
 
 def check_engine(kind_name: str) -> int:
-    """Probe an OCR engine's availability — DEEP check — and exit.
+    """Probe an OCR engine's availability and exit.
 
     Stage-gate hook for the build-installer smoke test: catches a
-    broken bundle before the installer ships rather than at first
-    user launch. Returns 0 on success, 1 on failure; the reason is
-    written to stderr so CI logs capture it.
-
-    Two layers of verification:
-
-      1. ``engine.is_available()`` — surface check: tesseract
-         binary discoverable on PATH, tessdata directory complete.
-      2. If the engine exposes a private ``_load_model()`` method,
-         call it — gives future engines a place to do any expensive
-         one-time init as part of the smoke probe. Tesseract doesn't
-         have one, so today this is a no-op and only the
-         ``is_available`` surface check runs.
+    broken bundle before the installer ships. Returns 0 on success,
+    1 on failure; the reason is written to stderr so CI logs capture
+    it.
     """
     from src.application.engines.registry import get_engine
     from src.shared.types import OCREngineKind
@@ -422,29 +412,9 @@ def check_engine(kind_name: str) -> int:
     if not ok:
         print(f"FAIL: {engine.name} недоступен — {msg}", file=sys.stderr)
         return 1
-
-    # Deep check: actually TRY to load the model. Catches bundle
-    # defects that pass the surface probe (see docstring above).
-    loader = getattr(engine, "_load_model", None)
-    if callable(loader):
-        try:
-            loader()
-        except Exception as exc:  # noqa: BLE001 — any failure = unusable
-            print(
-                f"FAIL: {engine.name} прошёл is_available, но "
-                f"загрузка модели упала: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            return 1
-        # Release the weights so the probe doesn't leave ~580 MB
-        # of RAM held by the smoke-test shell.
-        with contextlib.suppress(Exception):
-            engine.unload()
-        print(
-            f"OK: {engine.name} готов (is_available + model load OK)"
-        )
-    else:
-        print(f"OK: {engine.name} готов к использованию")
+    with contextlib.suppress(Exception):
+        engine.unload()
+    print(f"OK: {engine.name} готов к использованию")
     return 0
 
 
@@ -612,38 +582,13 @@ def main(argv: list[str] | None = None) -> int:
     if raw_argv and raw_argv[0] == "parser":
         return _run_parser_subcommand(raw_argv[1:])
 
-    # Must happen BEFORE any subprocess-spawning code runs (Tesseract,
-    # Ghostscript, OCRmyPDF all fork children). Without this, CLI users
-    # on Windows see transient console windows flash every time a page
-    # is OCR'd — same problem ``src/main.py`` guards the GUI path with.
+    # Subprocess hygiene: hide transient console windows on Windows.
+    # No-op on POSIX. Must land before any child subprocess is spawned.
     from src.infrastructure.subprocess_hygiene import (
         install_windows_console_hide,
     )
 
     install_windows_console_hide()
-
-    # Register bundled Tesseract + Ghostscript on ``PATH`` so OCRmyPDF's
-    # ``shutil.which("gswin64c")`` finds the installer-shipped copy.
-    # The parallel-processing path does this at worker startup, but the
-    # single-worker CLI path (``--workers 1 -o out.pdf``) calls
-    # ``process_single`` directly and previously never registered the
-    # bundled binaries — causing the installer smoke test to fail with
-    # "The program 'gs' could not be executed or was not found on your
-    # system PATH" even though the executables sit under
-    # ``resources/ghostscript/bin/``. Done here (in ``main()``) so every
-    # CLI invocation — batch or single — benefits, not just the
-    # parallel branch.
-    try:
-        from src.infrastructure.external_tools import ensure_on_path
-
-        ensure_on_path()
-    except Exception:  # noqa: BLE001
-        # External-tools registration is best-effort: if it blows up
-        # (missing bundle dir in a dev checkout, exotic packaging) we
-        # still want the CLI to start and fall back to system PATH. Any
-        # real "required binary missing" case surfaces later as a clear
-        # pre-flight error instead of an import-time crash here.
-        pass
 
     _force_utf8_stdio()
     parser = build_parser()

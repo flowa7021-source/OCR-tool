@@ -401,6 +401,8 @@ class OCRPipeline:
                         page_result.text = stub.text
                     if stub.mean_confidence and not page_result.mean_confidence:
                         page_result.mean_confidence = stub.mean_confidence
+                    if stub.word_boxes:
+                        page_result.word_boxes = stub.word_boxes
             self._report(total_pages, total_pages, "ocr")
 
             # 5. Extract per-page text, postprocess
@@ -1480,14 +1482,22 @@ class OCRPipeline:
                 confs[i] = str(new_conf)
 
 
+    def _cleanup(self, workdir: Path) -> None:
+        """Remove the temporary workdir, logging but not raising on error."""
+        try:
+            shutil.rmtree(workdir, ignore_errors=True)
+            logger.debug("Removed workdir: %s", workdir)
+        except OSError as exc:  # pragma: no cover - platform-specific
+            logger.warning("Failed to remove workdir %s: %s", workdir, exc)
+
+
 def _word_boxes_to_tsv(
     word_boxes: list[tuple[float, float, float, float, float, str]],
 ) -> dict:
-    """Build a Tesseract-TSV-compatible dict from engine word_boxes.
+    """Build a TSV-compatible dict from engine word_boxes.
 
     All words land in block_num=1, line_num=1 (EasyOCR has no layout-
-    block analysis); word_num increments. ``level=5`` marks word rows
-    so callers can filter just-words.
+    block analysis); word_num increments. ``level=5`` marks word rows.
     """
     n = len(word_boxes)
     return {
@@ -1504,12 +1514,3 @@ def _word_boxes_to_tsv(
         "conf": [str(w[4]) for w in word_boxes],
         "text": [w[5] for w in word_boxes],
     }
-
-
-    def _cleanup(self, workdir: Path) -> None:
-        """Remove the temporary workdir, logging but not raising on error."""
-        try:
-            shutil.rmtree(workdir, ignore_errors=True)
-            logger.debug("Removed workdir: %s", workdir)
-        except OSError as exc:  # pragma: no cover - platform-specific
-            logger.warning("Failed to remove workdir %s: %s", workdir, exc)

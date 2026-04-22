@@ -1,9 +1,4 @@
-"""Editor widget for :class:`OCRConfig`.
-
-Exposes a :class:`SettingsPanel` that renders all Tesseract/OCRmyPDF
-parameters as Qt widgets and emits a debounced ``config_changed`` signal
-whenever the user changes any field.
-"""
+"""Editor widget for :class:`OCRConfig` (EasyOCR back-end)."""
 
 from __future__ import annotations
 
@@ -14,6 +9,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -28,12 +24,14 @@ from PySide6.QtWidgets import (
 
 from src.core.models import OCRConfig
 from src.shared.constants import COLOR_TEXT_SECONDARY, DPI_CHOICES
-from src.shared.types import OEM, PSM, Language, OCREngineKind, OptimizeLevel
+from src.shared.types import OCREngineKind
 from src.ui.accessibility import describe
 
 logger = logging.getLogger(__name__)
 
 _DEBOUNCE_MS: int = 300
+
+_LANG_LABELS: dict[str, str] = {"ru": "Русский", "en": "English"}
 
 
 class SettingsPanel(QWidget):
@@ -42,11 +40,6 @@ class SettingsPanel(QWidget):
     config_changed = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        """Initialize the panel with default :class:`OCRConfig` values.
-
-        Args:
-            parent: Optional parent widget.
-        """
         super().__init__(parent)
         self._updating: bool = False
 
@@ -55,8 +48,6 @@ class SettingsPanel(QWidget):
         self._debounce.setInterval(_DEBOUNCE_MS)
         self._debounce.timeout.connect(self._emit_config)
 
-        # Wrap the whole panel in a QScrollArea so every group is reachable
-        # even when the parent splitter is squeezed.
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self._scroll = QScrollArea(self)
@@ -71,6 +62,8 @@ class SettingsPanel(QWidget):
         root.setSpacing(8)
 
         # --- Engine group --------------------------------------------
+        # Single item today (EasyOCR), but kept as a combo so a future
+        # back-end can slot in without a layout change.
         self._group_engine = QGroupBox("OCR-движок", self)
         engine_layout = QVBoxLayout(self._group_engine)
         self._cmb_engine = QComboBox(self._group_engine)
@@ -83,9 +76,6 @@ class SettingsPanel(QWidget):
             tooltip = kind.description if available else f"{kind.description}\n\n{msg}"
             self._cmb_engine.setItemData(idx, tooltip, Qt.ItemDataRole.ToolTipRole)
             if not available:
-                # Keep the item visible (the user might want to download it)
-                # but show it greyed out by removing the enabled flag.
-
                 self._cmb_engine.model().item(idx).setEnabled(False)
         engine_layout.addWidget(self._cmb_engine)
         self._lbl_engine_hint = QLabel(self._group_engine)
@@ -97,8 +87,8 @@ class SettingsPanel(QWidget):
         # --- Languages group -----------------------------------------
         self._group_langs = QGroupBox("Языки", self)
         langs_layout = QVBoxLayout(self._group_langs)
-        self._chk_rus = QCheckBox("Русский", self._group_langs)
-        self._chk_eng = QCheckBox("English", self._group_langs)
+        self._chk_rus = QCheckBox(_LANG_LABELS["ru"], self._group_langs)
+        self._chk_eng = QCheckBox(_LANG_LABELS["en"], self._group_langs)
         self._chk_rus.setChecked(True)
         self._chk_eng.setChecked(True)
         langs_layout.addWidget(self._chk_rus)
@@ -111,28 +101,6 @@ class SettingsPanel(QWidget):
         langs_layout.addLayout(primary_row)
         root.addWidget(self._group_langs)
 
-        # --- PSM group -----------------------------------------------
-        self._group_psm = QGroupBox("Сегментация страницы (PSM)", self)
-        psm_layout = QVBoxLayout(self._group_psm)
-        self._cmb_psm = QComboBox(self._group_psm)
-        for psm in PSM:
-            self._cmb_psm.addItem(psm.label, psm)
-            idx = self._cmb_psm.count() - 1
-            self._cmb_psm.setItemData(idx, psm.description, Qt.ItemDataRole.ToolTipRole)
-        psm_layout.addWidget(self._cmb_psm)
-        root.addWidget(self._group_psm)
-
-        # --- OEM group -----------------------------------------------
-        self._group_oem = QGroupBox("Движок OCR (OEM)", self)
-        oem_layout = QVBoxLayout(self._group_oem)
-        self._cmb_oem = QComboBox(self._group_oem)
-        for oem in OEM:
-            self._cmb_oem.addItem(oem.label, oem)
-            idx = self._cmb_oem.count() - 1
-            self._cmb_oem.setItemData(idx, oem.description, Qt.ItemDataRole.ToolTipRole)
-        oem_layout.addWidget(self._cmb_oem)
-        root.addWidget(self._group_oem)
-
         # --- Advanced group ------------------------------------------
         self._group_adv = QGroupBox("Дополнительно", self)
         adv_layout = QFormLayout(self._group_adv)
@@ -142,40 +110,17 @@ class SettingsPanel(QWidget):
             self._cmb_dpi.addItem(str(dpi), int(dpi))
         adv_layout.addRow("DPI:", self._cmb_dpi)
 
-        self._edit_whitelist = QLineEdit(self._group_adv)
+        self._edit_allowlist = QLineEdit(self._group_adv)
         describe(
-            self._edit_whitelist,
-            name="Whitelist символов",
+            self._edit_allowlist,
+            name="Allowlist символов",
             description=(
-                "Если задан — Tesseract распознаёт только перечисленные "
+                "Если задан — EasyOCR распознаёт только перечисленные "
                 "символы. Полезно для узких доменов (штрих-коды, номера "
                 "счетов). Пусто = без ограничения."
             ),
         )
-        adv_layout.addRow("Whitelist символов:", self._edit_whitelist)
-
-        self._edit_blacklist = QLineEdit(self._group_adv)
-        describe(
-            self._edit_blacklist,
-            name="Blacklist символов",
-            description=(
-                "Символы, которые Tesseract не будет выдавать. Удобно, чтобы "
-                "убрать постоянные «мусорные» вкрапления."
-            ),
-        )
-        adv_layout.addRow("Blacklist символов:", self._edit_blacklist)
-
-        self._spin_timeout = QSpinBox(self._group_adv)
-        self._spin_timeout.setRange(10, 600)
-        describe(
-            self._spin_timeout,
-            name="Таймаут страницы",
-            description=(
-                "Максимум секунд на распознавание одной страницы. Превышение "
-                "помечает страницу как ошибочную и продолжает работу дальше."
-            ),
-        )
-        adv_layout.addRow("Таймаут страницы (сек):", self._spin_timeout)
+        adv_layout.addRow("Allowlist символов:", self._edit_allowlist)
 
         conf_row = QHBoxLayout()
         self._slider_conf = QSlider(Qt.Orientation.Horizontal, self._group_adv)
@@ -186,25 +131,60 @@ class SettingsPanel(QWidget):
         conf_row.addWidget(self._lbl_conf)
         adv_layout.addRow("Порог confidence:", conf_row)
 
-        self._cmb_optimize = QComboBox(self._group_adv)
-        for lvl in OptimizeLevel:
-            self._cmb_optimize.addItem(f"{int(lvl)} — {lvl.name}", lvl)
-        adv_layout.addRow("Optimize:", self._cmb_optimize)
+        self._spin_min_keep = QDoubleSpinBox(self._group_adv)
+        self._spin_min_keep.setRange(0.0, 1.0)
+        self._spin_min_keep.setDecimals(2)
+        self._spin_min_keep.setSingleStep(0.05)
+        describe(
+            self._spin_min_keep,
+            name="min_keep_confidence",
+            description=(
+                "Engine-side минимум confidence (0..1). Боксы ниже этого "
+                "порога отбрасываются ДО фильтра confidence_threshold. "
+                "Защищает downstream от hallucination-блоков EasyOCR на "
+                "штампах / границах."
+            ),
+        )
+        adv_layout.addRow("min_keep_confidence (engine):", self._spin_min_keep)
+
+        self._chk_gpu = QCheckBox("Использовать GPU (CUDA)", self._group_adv)
+        self._chk_gpu.setToolTip(
+            "Если CUDA недоступна, EasyOCR автоматически откатывается на CPU."
+        )
+        adv_layout.addRow("GPU:", self._chk_gpu)
 
         self._chk_skip_text = QCheckBox("Пропускать страницы с текстом", self._group_adv)
         adv_layout.addRow("Skip text:", self._chk_skip_text)
 
-        # Preview mode: process only the first N pages. 0 = no limit.
         self._spin_max_pages = QSpinBox(self._group_adv)
         self._spin_max_pages.setRange(0, 10000)
         self._spin_max_pages.setSpecialValueText("без ограничения")
         self._spin_max_pages.setSuffix(" стр.")
         self._spin_max_pages.setToolTip(
             "Режим предпросмотра: обработать только первые N страниц "
-            "документа. Удобно для проверки настроек профиля на большом "
-            "PDF перед полным запуском. 0 — без ограничения."
+            "документа. 0 — без ограничения."
         )
         adv_layout.addRow("Ограничение страниц:", self._spin_max_pages)
+
+        self._chk_drop_low_conf = QCheckBox(
+            "Удалять слова ниже порога confidence", self._group_adv,
+        )
+        adv_layout.addRow("drop_low_conf_words:", self._chk_drop_low_conf)
+
+        self._chk_soft_rescue = QCheckBox(
+            "Soft-rescue для shape-credible слов", self._group_adv,
+        )
+        adv_layout.addRow("soft_rescue_dropped_words:", self._chk_soft_rescue)
+
+        self._chk_adaptive_conf = QCheckBox(
+            "Адаптивный порог confidence по странице", self._group_adv,
+        )
+        adv_layout.addRow("adaptive_confidence_threshold:", self._chk_adaptive_conf)
+
+        self._chk_user_words = QCheckBox(
+            "Fuzzy-rescue по словарю ru_lexicon", self._group_adv,
+        )
+        adv_layout.addRow("user_words_fuzzy_rescue:", self._chk_user_words)
 
         root.addWidget(self._group_adv)
         root.addStretch(1)
@@ -217,59 +197,53 @@ class SettingsPanel(QWidget):
         self._chk_eng.toggled.connect(self._on_language_toggled)
         self._cmb_engine.currentIndexChanged.connect(self._on_engine_changed)
         self._cmb_primary.currentIndexChanged.connect(self._schedule_emit)
-        self._cmb_psm.currentIndexChanged.connect(self._schedule_emit)
-        self._cmb_oem.currentIndexChanged.connect(self._schedule_emit)
         self._cmb_dpi.currentIndexChanged.connect(self._schedule_emit)
-        self._edit_whitelist.textChanged.connect(self._schedule_emit)
-        self._edit_blacklist.textChanged.connect(self._schedule_emit)
-        self._spin_timeout.valueChanged.connect(self._schedule_emit)
+        self._edit_allowlist.textChanged.connect(self._schedule_emit)
         self._slider_conf.valueChanged.connect(self._on_conf_changed)
-        self._cmb_optimize.currentIndexChanged.connect(self._schedule_emit)
+        self._spin_min_keep.valueChanged.connect(self._schedule_emit)
+        self._chk_gpu.toggled.connect(self._schedule_emit)
         self._chk_skip_text.toggled.connect(self._schedule_emit)
         self._spin_max_pages.valueChanged.connect(self._schedule_emit)
+        self._chk_drop_low_conf.toggled.connect(self._schedule_emit)
+        self._chk_soft_rescue.toggled.connect(self._schedule_emit)
+        self._chk_adaptive_conf.toggled.connect(self._schedule_emit)
+        self._chk_user_words.toggled.connect(self._schedule_emit)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def set_config(self, cfg: OCRConfig) -> None:
-        """Populate the widgets from a config object without emitting signals.
-
-        Args:
-            cfg: Source :class:`OCRConfig`.
-        """
+        """Populate the widgets from a config object without emitting signals."""
         self._updating = True
         try:
             self._chk_rus.blockSignals(True)
             self._chk_eng.blockSignals(True)
-            self._chk_rus.setChecked(Language.RUSSIAN.value in cfg.languages)
-            self._chk_eng.setChecked(Language.ENGLISH.value in cfg.languages)
+            self._chk_rus.setChecked("ru" in cfg.languages)
+            self._chk_eng.setChecked("en" in cfg.languages)
             self._chk_rus.blockSignals(False)
             self._chk_eng.blockSignals(False)
             self._rebuild_primary_combo(preferred=cfg.primary_language)
 
             self._set_combo_data(self._cmb_engine, cfg.engine)
             self._update_engine_hint()
-            self._set_combo_data(self._cmb_psm, cfg.psm)
-            self._set_combo_data(self._cmb_oem, cfg.oem)
             self._set_combo_data(self._cmb_dpi, int(cfg.dpi))
-            self._set_combo_data(self._cmb_optimize, cfg.optimize_level)
 
-            self._edit_whitelist.blockSignals(True)
-            self._edit_whitelist.setText(cfg.char_whitelist)
-            self._edit_whitelist.blockSignals(False)
-
-            self._edit_blacklist.blockSignals(True)
-            self._edit_blacklist.setText(cfg.char_blacklist)
-            self._edit_blacklist.blockSignals(False)
-
-            self._spin_timeout.blockSignals(True)
-            self._spin_timeout.setValue(int(cfg.tesseract_timeout))
-            self._spin_timeout.blockSignals(False)
+            self._edit_allowlist.blockSignals(True)
+            self._edit_allowlist.setText(cfg.allowlist)
+            self._edit_allowlist.blockSignals(False)
 
             self._slider_conf.blockSignals(True)
             self._slider_conf.setValue(int(cfg.confidence_threshold))
             self._lbl_conf.setText(f"{int(cfg.confidence_threshold)}%")
             self._slider_conf.blockSignals(False)
+
+            self._spin_min_keep.blockSignals(True)
+            self._spin_min_keep.setValue(float(cfg.min_keep_confidence))
+            self._spin_min_keep.blockSignals(False)
+
+            self._chk_gpu.blockSignals(True)
+            self._chk_gpu.setChecked(bool(cfg.gpu))
+            self._chk_gpu.blockSignals(False)
 
             self._chk_skip_text.blockSignals(True)
             self._chk_skip_text.setChecked(cfg.skip_text)
@@ -278,36 +252,36 @@ class SettingsPanel(QWidget):
             self._spin_max_pages.blockSignals(True)
             self._spin_max_pages.setValue(int(getattr(cfg, "max_pages", 0) or 0))
             self._spin_max_pages.blockSignals(False)
+
+            for chk, value in (
+                (self._chk_drop_low_conf, cfg.drop_low_conf_words),
+                (self._chk_soft_rescue, cfg.soft_rescue_dropped_words),
+                (self._chk_adaptive_conf, cfg.adaptive_confidence_threshold),
+                (self._chk_user_words, cfg.user_words_fuzzy_rescue),
+            ):
+                chk.blockSignals(True)
+                chk.setChecked(bool(value))
+                chk.blockSignals(False)
         finally:
             self._updating = False
 
     def get_config(self) -> OCRConfig:
-        """Build an :class:`OCRConfig` from the current widget state.
-
-        Returns:
-            A new :class:`OCRConfig` snapshot.
-        """
+        """Build an :class:`OCRConfig` from the current widget state."""
         languages: list[str] = []
         if self._chk_rus.isChecked():
-            languages.append(Language.RUSSIAN.value)
+            languages.append("ru")
         if self._chk_eng.isChecked():
-            languages.append(Language.ENGLISH.value)
+            languages.append("en")
         if not languages:
-            languages = [Language.RUSSIAN.value]
+            languages = ["ru"]
 
         primary = self._cmb_primary.currentData()
         if not isinstance(primary, str) or primary not in languages:
             primary = languages[0]
 
-        psm = self._cmb_psm.currentData() or PSM.AUTO
-        oem = self._cmb_oem.currentData() or OEM.LSTM_ONLY
         dpi = self._cmb_dpi.currentData() or 300
-        optimize = self._cmb_optimize.currentData() or OptimizeLevel.LOSSLESS
-        engine = self._cmb_engine.currentData() or OCREngineKind.TESSERACT
+        engine = self._cmb_engine.currentData() or OCREngineKind.EASYOCR
 
-        # Defensive validation: every UI widget is bounded, but profile
-        # JSON loads bypass the widgets, so coerce + clamp on the way out
-        # of get_config too.
         from src.shared.validators import (
             ValidationError,
             validate_confidence,
@@ -318,7 +292,7 @@ class SettingsPanel(QWidget):
         try:
             languages = validate_languages(languages)
         except ValidationError:
-            languages = ["rus"]
+            languages = ["ru"]
         try:
             dpi_value = validate_dpi(int(dpi))
         except ValidationError:
@@ -332,25 +306,24 @@ class SettingsPanel(QWidget):
             engine=OCREngineKind(engine) if not isinstance(engine, OCREngineKind) else engine,
             languages=languages,
             primary_language=primary,
-            psm=PSM(psm),
-            oem=OEM(oem),
             dpi=dpi_value,
-            char_whitelist=self._edit_whitelist.text(),
-            char_blacklist=self._edit_blacklist.text(),
+            allowlist=self._edit_allowlist.text(),
             confidence_threshold=confidence,
-            tesseract_timeout=int(self._spin_timeout.value()),
-            optimize_level=OptimizeLevel(int(optimize)),
+            min_keep_confidence=float(self._spin_min_keep.value()),
+            gpu=self._chk_gpu.isChecked(),
             skip_text=self._chk_skip_text.isChecked(),
             max_pages=int(self._spin_max_pages.value()),
+            drop_low_conf_words=self._chk_drop_low_conf.isChecked(),
+            soft_rescue_dropped_words=self._chk_soft_rescue.isChecked(),
+            adaptive_confidence_threshold=self._chk_adaptive_conf.isChecked(),
+            user_words_fuzzy_rescue=self._chk_user_words.isChecked(),
         )
 
     def _on_engine_changed(self, _idx: int) -> None:
-        """Refresh the engine availability hint and re-emit config."""
         self._update_engine_hint()
         self._schedule_emit()
 
     def _update_engine_hint(self) -> None:
-        """Show availability message under the engine dropdown."""
         kind = self._cmb_engine.currentData()
         if not isinstance(kind, OCREngineKind):
             self._lbl_engine_hint.clear()
@@ -371,13 +344,11 @@ class SettingsPanel(QWidget):
     # Internals
     # ------------------------------------------------------------------
     def _schedule_emit(self, *_args: Any) -> None:
-        """Restart the debounce timer so ``config_changed`` is coalesced."""
         if self._updating:
             return
         self._debounce.start()
 
     def _emit_config(self) -> None:
-        """Emit the current config. Called by the debounce timer."""
         try:
             cfg = self.get_config()
         except Exception:
@@ -386,33 +357,24 @@ class SettingsPanel(QWidget):
         self.config_changed.emit(cfg)
 
     def _on_language_toggled(self, _checked: bool) -> None:
-        """Rebuild the primary-language combo when checkboxes change."""
         self._rebuild_primary_combo()
         self._schedule_emit()
 
     def _on_conf_changed(self, value: int) -> None:
-        """Update the confidence label and schedule an emit."""
         self._lbl_conf.setText(f"{int(value)}%")
         self._schedule_emit()
 
     def _rebuild_primary_combo(self, preferred: str | None = None) -> None:
-        """Rebuild the primary-language combo from the checked languages.
-
-        Args:
-            preferred: Optional language code to select if present.
-        """
         self._cmb_primary.blockSignals(True)
         try:
             prev = preferred if preferred is not None else self._cmb_primary.currentData()
             self._cmb_primary.clear()
             if self._chk_rus.isChecked():
-                self._cmb_primary.addItem(Language.RUSSIAN.label, Language.RUSSIAN.value)
+                self._cmb_primary.addItem(_LANG_LABELS["ru"], "ru")
             if self._chk_eng.isChecked():
-                self._cmb_primary.addItem(Language.ENGLISH.label, Language.ENGLISH.value)
+                self._cmb_primary.addItem(_LANG_LABELS["en"], "en")
             if self._cmb_primary.count() == 0:
-                # Always keep at least one option.
-                self._cmb_primary.addItem(Language.RUSSIAN.label, Language.RUSSIAN.value)
-            # Restore prior selection if still available.
+                self._cmb_primary.addItem(_LANG_LABELS["ru"], "ru")
             if prev is not None:
                 idx = self._cmb_primary.findData(prev)
                 if idx >= 0:
@@ -422,12 +384,6 @@ class SettingsPanel(QWidget):
 
     @staticmethod
     def _set_combo_data(combo: QComboBox, value: Any) -> None:
-        """Select the combo entry whose ``data`` equals ``value``.
-
-        Args:
-            combo: Target combo box.
-            value: Value to match against :meth:`QComboBox.itemData`.
-        """
         combo.blockSignals(True)
         try:
             idx = combo.findData(value)

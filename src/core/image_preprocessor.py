@@ -217,7 +217,7 @@ class ImagePreprocessor:
         этого требует. На UPD_36 (mean 230, dark 9.6 %) это
         переключает в ``clean`` режим — ничего лишнего не делаем;
         UPD_36 p4 (mean 254, dark 0.3 %) → ``blank``, OCR
-        пропускается на уровне tesseract_engine.
+        пропускается на уровне OCR-движка.
         """
         gray = (
             image if image.ndim == 2

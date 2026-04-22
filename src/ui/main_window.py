@@ -103,10 +103,6 @@ class _PoolPrewarmRunnable(QRunnable):
             logger.debug("Pool prewarm raised: %s", exc)
 
 
-class _TesseractVerifySignals(QObject):
-    result = Signal(bool, str)  # (ok, message)
-
-
 class _JobBridge(QObject):
     """Marshal ParallelProcessor callbacks onto the GUI thread.
 
@@ -184,37 +180,6 @@ class _RecoverySnapshotRunnable(QRunnable):
             logger.debug("Background recovery snapshot failed: %s", exc)
 
 
-class _TesseractVerifyRunnable(QRunnable):
-    """Run TesseractWrapper.verify() in a thread pool.
-
-    Verification spawns ``tesseract --version`` as a subprocess. On a
-    cold Windows boot that's a 200-800 ms disk read, and if the binary
-    is missing the subprocess may take several seconds to time out.
-    Running it on the GUI thread made the window unresponsive at
-    startup for no good reason — push it into QThreadPool.
-
-    ``parent`` parents the :class:`QObject` signals bridge to the
-    caller so the queued connection is automatically severed when the
-    parent is destroyed (e.g. under pytest teardown). Otherwise
-    Qt dispatches the queued slot to a freed C++ object and aborts
-    the interpreter.
-    """
-
-    def __init__(self, parent: QObject | None = None) -> None:
-        super().__init__()
-        self.signals = _TesseractVerifySignals(parent)
-
-    @Slot()
-    def run(self) -> None:  # noqa: D401
-        try:
-            from src.infrastructure.tesseract_wrapper import TesseractWrapper
-
-            ok, msg = TesseractWrapper().verify()
-        except Exception as exc:  # noqa: BLE001
-            ok, msg = False, str(exc)
-        self.signals.result.emit(ok, msg)
-
-
 class _OverlayExtractorRunnable(QRunnable):
     """Read word boxes from a searchable PDF in a worker thread.
 
@@ -231,9 +196,8 @@ class _OverlayExtractorRunnable(QRunnable):
         parent: QObject | None = None,
     ) -> None:
         super().__init__()
-        # See the analogous note on _TesseractVerifyRunnable — parent
-        # the signal bridge so queued slots can't target a deleted
-        # MainWindow.
+        # Parent the signal bridge so queued slots can't target a
+        # deleted MainWindow when teardown races completion.
         self.signals = _OverlaySignals(parent)
         self._pdf_path = pdf_path
         self._confidences = per_page_confidence
@@ -353,25 +317,16 @@ class MainWindow(QMainWindow):
         self._load_profiles_to_combobox()
         self._restore_window_state()
 
-        # Deferred: verify Tesseract in a background thread AFTER the
-        # window is visible so the user never stares at a blank screen
-        # while `tesseract --version` runs a subprocess.
-        # QTimer with ``self`` as parent is automatically deleted when
-        # the window dies, so the scheduled callback can't fire on a
-        # torn-down widget.
-        #
         # Suppressed under pytest: test fixtures routinely create and
-        # tear down MainWindows inside a single event-loop tick, and a
-        # background-thread result landing after ``deleteLater()`` can
-        # segfault via "double free or corruption". Production runs
-        # never set PYTEST_CURRENT_TEST.
+        # tear down MainWindows inside a single event-loop tick.
         import os as _os
 
         if not _os.environ.get("PYTEST_CURRENT_TEST"):
-            self._verify_timer = QTimer(self)
-            self._verify_timer.setSingleShot(True)
-            self._verify_timer.timeout.connect(self._start_tesseract_verify_async)
-            self._verify_timer.start(100)
+            # EasyOCR availability is checked synchronously — it's
+            # just an import probe (no subprocess spawn) so it costs
+            # ~ms and a missing dependency must surface before the
+            # user clicks "Start OCR".
+            self._check_engine_sync()
 
             # Pre-warm the ProcessPoolExecutor + multiprocessing.Manager
             # in a background thread so the user's FIRST click of
@@ -1359,44 +1314,41 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             logger.debug("Could not schedule pool prewarm: %s", exc)
 
-    def _start_tesseract_verify_async(self) -> None:
-        """Kick Tesseract verification off the GUI thread.
+    def _check_engine_sync(self) -> None:
+        """Probe EasyOCR availability synchronously at startup.
 
-        Called shortly after window-show so a slow or missing Tesseract
-        subprocess doesn't freeze startup. The status-bar message tells
-        the user what we're doing; the result handler (either success
-        or a non-blocking warning) runs on the main thread.
+        ``engine.is_available()`` is a cheap import probe (no
+        subprocess), so doing it on the GUI thread is fine. If it
+        fails, warn the user — OCR will be unavailable until EasyOCR
+        is installed.
         """
-        with contextlib.suppress(Exception):
-            self.statusBar().showMessage("Проверка Tesseract…", 0)
-        runnable = _TesseractVerifyRunnable(parent=self)
-        runnable.signals.result.connect(
-            self._on_tesseract_verify_done,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        QThreadPool.globalInstance().start(runnable)
+        try:
+            from src.application.engines.registry import get_engine
+            from src.shared.types import OCREngineKind
 
-    @Slot(bool, str)
-    def _on_tesseract_verify_done(self, ok: bool, message: str) -> None:
-        """Handle Tesseract verify result back on the GUI thread."""
+            engine = get_engine(OCREngineKind.EASYOCR)
+            ok, message = engine.is_available()
+        except Exception as exc:  # noqa: BLE001
+            ok, message = False, str(exc)
+
         if ok:
-            logger.info("Tesseract verified: %s", message)
-            self.statusBar().showMessage(
-                f"Tesseract готов: {message}", 5000
-            )
+            logger.info("EasyOCR verified: %s", message)
+            with contextlib.suppress(Exception):
+                self.statusBar().showMessage(
+                    f"EasyOCR готов: {message}", 5000,
+                )
             return
-        logger.warning("Tesseract verification reported: %s", message)
-        self.statusBar().showMessage(
-            "Tesseract не прошёл проверку — OCR недоступен", 0
-        )
-        # Non-blocking info; the user can click past without affecting
-        # the app's responsiveness.
+        logger.warning("EasyOCR verification reported: %s", message)
+        with contextlib.suppress(Exception):
+            self.statusBar().showMessage(
+                "EasyOCR не прошёл проверку — OCR недоступен", 0,
+            )
         QMessageBox.warning(
             self,
             APP_NAME,
             (
-                f"Tesseract не прошёл проверку:\n\n{message}\n\n"
-                "OCR будет недоступен до установки Tesseract 5.x."
+                f"EasyOCR не прошёл проверку:\n\n{message}\n\n"
+                "OCR будет недоступен до установки EasyOCR."
             ),
         )
 
@@ -1689,7 +1641,7 @@ class MainWindow(QMainWindow):
             self,
             APP_NAME,
             f"<h3>{APP_NAME} {APP_VERSION}</h3>"
-            "<p>Профессиональное OCR-приложение на базе Tesseract 5.5 и OCRmyPDF.</p>"
+            "<p>Профессиональное OCR-приложение на базе EasyOCR (CRAFT + CRNN, ru/en).</p>"
             "<p>Лицензия: MIT.</p>",
         )
 

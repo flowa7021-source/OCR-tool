@@ -700,12 +700,15 @@ class PageResult:
     processing_time_sec: float = 0.0
     error: str | None = None
     skew_angle: float = 0.0
-    #: Raw ``pytesseract.image_to_data(output_type=DICT)`` на preprocessed
-    #: PNG. Используется парсером для layout-aware section detection
-    #: (src.tn_parser.layout_anchor) и token-level confidence propagation
-    #: (src.tn_parser.token_confidence). Опциональное поле — только если
-    #: pipeline.compute_confidence=True. None не означает «OCR failed»,
-    #: просто means «TSV не был вычислен» (например cache-hit).
+    #: Per-word output from the OCR engine: ``(x, y, w, h, conf_0_100, text)``
+    #: in pixel coordinates at the engine's rasterisation DPI. Empty
+    #: when the engine emitted no boxes (failed page or cache hit).
+    word_boxes: list[tuple[float, float, float, float, float, str]] = field(
+        default_factory=list,
+    )
+    #: TSV-compatible dict synthesised from ``word_boxes`` by the
+    #: pipeline. Used by tn_parser.layout_anchor and token_confidence;
+    #: ``None`` when ``compute_confidence=False`` or on cache hit.
     tsv_data: dict | None = None
     #: Ширина preprocessed страницы в px (того же raster'а что tsv_data).
     #: Нужна для layout_anchor.find_tokens_by_column. 0 = unknown.

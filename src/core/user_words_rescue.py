@@ -246,11 +246,6 @@ def _cached_catalog(path_str: str) -> UserWordsCatalog:
 def load_user_words_catalog(path: Path | None) -> UserWordsCatalog | None:
     """Return a catalog for ``path`` or ``None`` when the file is
     missing / unreadable.
-
-    The pipeline passes the resolved path from
-    :mod:`src.application.ocrmypdf_integration._resolve_user_dict_paths`
-    so the rescue vocabulary tracks whatever the primary OCR pass's
-    DAWG was biased with.
     """
     if path is None:
         return None

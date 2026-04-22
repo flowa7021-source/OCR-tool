@@ -89,12 +89,11 @@ def create_application(argv: list[str]) -> tuple[QApplication, MainWindow]:
     except Exception as exc:  # noqa: BLE001
         logger.debug("Could not set app icon: %s", exc)
 
-    # Tesseract verification is deferred to a background thread — see
-    # ``MainWindow._start_tesseract_verify_async`` below. Running it
-    # synchronously here (as a subprocess that reads tesseract.exe off
-    # disk) used to delay window-show by 200-800 ms on cold boot and
-    # froze the UI entirely when Tesseract was missing, waiting for the
-    # user to dismiss a modal dialog before the window could paint.
+    # EasyOCR availability is verified by ``MainWindow._check_engine_sync``
+    # right after the window is built — it's just an import probe (no
+    # subprocess), so a few ms on the GUI thread is fine and a missing
+    # torch/easyocr install must surface BEFORE the user clicks "Start
+    # OCR".
 
     # Services
     from src.application.export_manager import ExportManager

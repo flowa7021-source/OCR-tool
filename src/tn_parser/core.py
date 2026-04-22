@@ -326,7 +326,7 @@ def _try_field_rescue(
 
 
 def _build_token_conf_map(tsv: dict):
-    """Из pytesseract TSV в ``TokenConfMap``: char-ranges в
+    """Из per-word output OCR-движка в ``TokenConfMap``: char-ranges в
     восстановленной flat-text + OCR-conf каждого токена.
 
     Восстановленный text — space-separated token text'ы (тот формат
