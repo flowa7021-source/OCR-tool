@@ -48,21 +48,11 @@ tmp/
 temp/
 *.tmp
 
-# Tessdata binary files (too large for repo)
-resources/tessdata/*.traineddata
-resources/tessdata/*.bin
-
-# Tesseract binary (bundled at build time)
-resources/tesseract/*
-!resources/tesseract/.gitkeep
-
-# GOT-OCR 2.0 model weights + trust_remote_code scripts. Downloaded
-# to ``resources/models/got_ocr2/`` by ``.github/scripts/download_got_ocr2.py``
-# in the CI installer workflow and by the in-app "Download GOT-OCR 2.0"
-# action at runtime. Too big for git (~1.4 GB for model.safetensors
-# alone). The manifest + download script is the single source of truth;
-# regeneration is a one-command operation.
-resources/models/
+# EasyOCR model weights — downloaded by scripts/prefetch_easyocr_models.py
+# before ``python build.py`` runs. Too large for git (~100 MB total); the
+# prefetch step is a single command and the CI installer workflow does it
+# automatically before PyInstaller packaging.
+resources/easyocr_models/*.pth
 
 # Generated Windows icon
 resources/icons/app.ico
