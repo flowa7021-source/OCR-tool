@@ -257,6 +257,20 @@ class OCRConfig:
     #: default 0.5 lifts mid-tones enough to recover faded ink without
     #: blowing out already-saturated regions.
     easyocr_adjust_contrast: float = 0.5
+    # --- Post-OCR quality boosters (opt-in) ------------------------------
+    #: Re-run OCR on word crops with confidence below
+    #: ``low_conf_retry_threshold`` using alternative preprocessing
+    #: (upscale, contrast stretch, CLAHE, stroke thickening). See
+    #: :mod:`src.application.low_conf_retry`. Cost: ~50% extra OCR time
+    #: on low-conf-heavy pages, hence opt-in.
+    low_conf_retry_enabled: bool = False
+    low_conf_retry_threshold: float = 0.5
+    #: Post-correct word outputs against a domain n-gram vocabulary
+    #: built from ``inputs/*.txt`` + ``expected/*.json``. Fuzzy-matches
+    #: low-conf OCR to the nearest vocab word within a length-adaptive
+    #: Levenshtein budget. See :mod:`src.shared.domain_lm`.
+    domain_lm_correction_enabled: bool = False
+    domain_lm_skip_conf: float = 0.85
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +469,7 @@ class ExtractConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 13
+PROFILE_SCHEMA_VERSION: int = 14
 
 
 @dataclass
@@ -690,7 +704,20 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         data["schema_version"] = 13
         version = 13
 
-    # Future migrations go here: `if version < 14: ...`
+    # v13 → v14: add post-OCR quality boosters (low-conf retry, domain
+    # LM correction). Default-off — profiles that want them must opt in,
+    # so existing ``universal_*`` profiles preserve current behaviour
+    # until their builders explicitly enable the flags.
+    if version < 14:
+        ocr = data.setdefault("ocr", {})
+        ocr.setdefault("low_conf_retry_enabled", False)
+        ocr.setdefault("low_conf_retry_threshold", 0.5)
+        ocr.setdefault("domain_lm_correction_enabled", False)
+        ocr.setdefault("domain_lm_skip_conf", 0.85)
+        data["schema_version"] = 14
+        version = 14
+
+    # Future migrations go here: `if version < 15: ...`
 
     return data
 

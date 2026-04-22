@@ -1,7 +1,7 @@
 {
   "name": "universal_accurate",
-  "description": "Универсальный default (апрель 2026, EasyOCR): CLAHE без бинаризации + EasyOCR CRAFT+CRNN ru+en на 300 DPI. CRAFT text_threshold=0.75 для подавления шума форм. drop_low_conf_words + adaptive threshold + soft_rescue + user_words_fuzzy_rescue — полный postprocess и tn_upd парсер.",
-  "schema_version": 13,
+  "description": "Универсальный default (апрель 2026, EasyOCR): CLAHE без бинаризации + EasyOCR CRAFT+CRNN ru+en на 300 DPI. CRAFT text_threshold=0.75 для подавления шума форм. drop_low_conf_words + adaptive threshold + soft_rescue + user_words_fuzzy_rescue + domain-LM post-correction — полный postprocess и tn_upd парсер.",
+  "schema_version": 14,
   "preprocess": {
     "auto_rotate": {"enabled": true, "min_confidence": 1.0},
     "deskew": {"enabled": true, "auto_detect": true, "manual_angle": 0.0, "max_angle": 45.0},
@@ -32,7 +32,11 @@
     "craft_link_threshold": 0.4,
     "craft_canvas_size": 2560,
     "easyocr_contrast_ths": 0.15,
-    "easyocr_adjust_contrast": 0.5
+    "easyocr_adjust_contrast": 0.5,
+    "low_conf_retry_enabled": false,
+    "low_conf_retry_threshold": 0.5,
+    "domain_lm_correction_enabled": true,
+    "domain_lm_skip_conf": 0.85
   },
   "postprocess": {
     "autocorrect_russian": true,

@@ -1,7 +1,7 @@
 {
   "name": "universal_hardscan",
   "description": "Для сложных сканов: неровная экспозиция, тени от сгибов, пыль/грязь, просвечивающая оборотная сторона. Sauvola adaptive binarization вместо OTSU — window-based threshold ловит локальный контраст, не ломается на градиентах. Агрессивный denoise + CLAHE. Рекомендуется когда native DPI < 200 или universal_accurate даёт mean_conf < 70%.",
-  "schema_version": 13,
+  "schema_version": 14,
   "preprocess": {
     "auto_rotate": {"enabled": true, "min_confidence": 1.0},
     "deskew": {"enabled": true, "auto_detect": true, "manual_angle": 0.0, "max_angle": 45.0},
@@ -32,7 +32,11 @@
     "craft_link_threshold": 0.35,
     "craft_canvas_size": 3200,
     "easyocr_contrast_ths": 0.1,
-    "easyocr_adjust_contrast": 0.7
+    "easyocr_adjust_contrast": 0.7,
+    "low_conf_retry_enabled": true,
+    "low_conf_retry_threshold": 0.6,
+    "domain_lm_correction_enabled": true,
+    "domain_lm_skip_conf": 0.85
   },
   "postprocess": {
     "autocorrect_russian": true,

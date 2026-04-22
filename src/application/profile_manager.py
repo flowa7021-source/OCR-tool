@@ -179,6 +179,10 @@ class ProfileManager:
             soft_rescue_dropped_words=True,
             adaptive_confidence_threshold=True,
             user_words_fuzzy_rescue=True,
+            # Domain-LM correction on by default: it's cheap (built once
+            # from inputs/*.txt + expected/*.json), rescues fuzzy
+            # low-conf OCR words against the project's known vocab.
+            domain_lm_correction_enabled=True,
         )
         postprocess = PostprocessConfig(
             autocorrect_russian=True,

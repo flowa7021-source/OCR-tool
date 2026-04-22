@@ -143,6 +143,29 @@ class EasyOCREngine(OCREngine):
             "contrast_ths": float(getattr(config, "easyocr_contrast_ths", 0.1)),
             "adjust_contrast": float(getattr(config, "easyocr_adjust_contrast", 0.5)),
         }
+        # Optional post-OCR quality boosters.
+        retry_enabled = bool(getattr(config, "low_conf_retry_enabled", False))
+        retry_threshold = float(
+            getattr(config, "low_conf_retry_threshold", 0.5),
+        )
+        lm_enabled = bool(
+            getattr(config, "domain_lm_correction_enabled", False),
+        )
+        lm_skip_conf = float(getattr(config, "domain_lm_skip_conf", 0.85))
+        lm_instance = None
+        if lm_enabled:
+            try:
+                from src.shared.domain_lm import DomainLM
+                lm_instance = DomainLM.from_default_corpus()
+                logger.info(
+                    "EasyOCR: domain LM loaded, %d vocab tokens",
+                    len(lm_instance),
+                )
+                if len(lm_instance) == 0:
+                    lm_instance = None  # empty → no-op
+            except (ImportError, OSError) as e:
+                logger.warning("EasyOCR: domain LM unavailable (%s)", e)
+                lm_instance = None
 
         doc = fitz.open(str(preprocessed_pdf))
         try:
@@ -175,6 +198,49 @@ class EasyOCREngine(OCREngine):
                 allowlist=allowlist,
                 **craft_kwargs,
             )
+            # Post-OCR boosters (opt-in via OCRConfig).
+            if retry_enabled:
+                from src.application.low_conf_retry import retry_low_confidence
+
+                def _recognise(crop_arr):
+                    return reader.readtext(
+                        crop_arr, detail=1, paragraph=False,
+                        allowlist=allowlist,
+                        **craft_kwargs,
+                    )
+
+                raw, retry_stats = retry_low_confidence(
+                    arr, raw, _recognise, threshold=retry_threshold,
+                )
+                if retry_stats.improved:
+                    logger.info(
+                        "EasyOCR page %d: low-conf retry improved "
+                        "%d/%d words (unchanged=%d, failed=%d)",
+                        idx, retry_stats.improved, retry_stats.attempted,
+                        retry_stats.unchanged, retry_stats.failed,
+                    )
+            if lm_instance is not None:
+                corrected_raw = []
+                lm_changed = 0
+                for bbox, text, conf in raw:
+                    if not text.strip():
+                        corrected_raw.append((bbox, text, conf))
+                        continue
+                    result = lm_instance.correct(
+                        text, ocr_conf=float(conf),
+                        min_ocr_conf_to_skip=lm_skip_conf,
+                    )
+                    if result.was_corrected:
+                        corrected_raw.append((bbox, result.word, conf))
+                        lm_changed += 1
+                    else:
+                        corrected_raw.append((bbox, text, conf))
+                raw = corrected_raw
+                if lm_changed:
+                    logger.info(
+                        "EasyOCR page %d: domain-LM corrected %d words",
+                        idx, lm_changed,
+                    )
             words: list[tuple[float, float, float, float, float, str]] = []
             texts: list[str] = []
             confs: list[float] = []
