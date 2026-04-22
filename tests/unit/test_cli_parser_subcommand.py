@@ -13,9 +13,9 @@ The dispatcher's contract is simple and stable:
   mentioning the missing dependency.
 
 Crucially the dispatch MUST NOT touch the OCR pipeline's imports —
-``ocr-cli parser feedback-stats`` on a machine without Tesseract /
-OCRmyPDF installed should still work. We verify that by patching the
-OCR-path imports to explode: the dispatcher never reaches them.
+``ocr-cli parser feedback-stats`` on a machine without EasyOCR / torch
+installed should still work. We verify that by patching the OCR-path
+imports to explode: the dispatcher never reaches them.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ def test_module_without_main_returns_3(
 def test_parser_subcommand_does_not_import_pipeline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``ocr-cli parser feedback-stats`` must not pull in ocrmypdf / cv2.
+    """``ocr-cli parser feedback-stats`` must not pull in easyocr / torch / cv2.
 
     Guarantees that a Windows dev without the OCR engine installed
     can still run the parser-dev subcommands from a fresh checkout.
@@ -185,7 +185,8 @@ def test_parser_subcommand_does_not_import_pipeline(
         "src.application.pipeline",
         "src.application.engines",
         "src.core.image_preprocessor",
-        "ocrmypdf",
+        "easyocr",
+        "torch",
     )
 
     class _BlockFinder(importlib.abc.MetaPathFinder):

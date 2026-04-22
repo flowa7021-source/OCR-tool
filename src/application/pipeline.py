@@ -5,11 +5,13 @@ Stages per job:
     2. For every page, rasterize via PyMuPDF and preprocess via
        :class:`ImagePreprocessor`. Save preprocessed PNGs to a temp workdir.
     3. Reassemble a "preprocessed" PDF from the PNGs with PyMuPDF.
-    4. Run OCRmyPDF on the preprocessed PDF to produce the final searchable PDF.
+    4. Dispatch to the OCR engine (EasyOCR by default) which returns
+       per-page word boxes and assembles a searchable PDF via
+       :mod:`src.infrastructure.searchable_pdf_builder`.
     5. Extract per-page text from the OCR'd PDF and run
        :class:`TextPostprocessor` on it.
-    6. Optionally compute per-page confidence via ``pytesseract.image_to_data``
-       on the preprocessed image.
+    6. Optionally apply confidence-based filtering on the engine's
+       per-word output (drop-low-conf, soft rescue, adaptive threshold).
 """
 
 from __future__ import annotations
@@ -1074,16 +1076,12 @@ class OCRPipeline:
         """Assemble a PDF from a list of PNGs (one page per image).
 
         PDF page dimensions are stored in **points** (1/72 inch), not
-        pixels. A 300 DPI scan of an A4 page is ~2480x3508 pixels but
-        the page must be 595x842 points (A4 in points) so downstream
-        tooling — most importantly OCRmyPDF's rasterisation-for-Tesseract
-        step — infers the correct DPI. If we use the pixel dimensions
-        directly as points, the page claims to be 34×48 inches at
-        72 DPI, and Tesseract's layout analysis decides the text is
-        sub-glyph-size and silently recognises nothing.
-
-        Convert from pixels to points using the DPI that was used to
-        rasterise from the original PDF (``profile.ocr.dpi``).
+        pixels. Use the same DPI the pages were rasterised at so the
+        embedded images land at the correct physical size (595×842 pt
+        for A4 from a 300 DPI scan, not 34×48 inch at 72 DPI). The
+        EasyOCR engine re-rasterises this intermediate PDF at the
+        profile DPI, so a wrong size silently halves / doubles the
+        effective DPI seen by the model.
 
         Args:
             png_paths: Ordered list of PNG files.

@@ -55,8 +55,53 @@ jobs:
           if ($models.Count -lt 2) {
               throw "EasyOCR model weights missing from installer (found $($models.Count), need 2)"
           }
-          Write-Host "Installer validated: $($models.Count) model files bundled"
+          foreach ($required in @("craft_mlt_25k.pth", "cyrillic_g2.pth")) {
+              $hit = $models | Where-Object { $_.Name -eq $required }
+              if (-not $hit) {
+                  throw "Required EasyOCR weight $required missing from installer"
+              }
+          }
+          $lex = Get-ChildItem -Recurse -Path $installRoot -Filter "ru_lexicon.txt"
+          if (-not $lex) {
+              throw "ru_lexicon.txt missing from installer"
+          }
+          $profiles = Get-ChildItem -Recurse -Path $installRoot -Filter "*.json" `
+              | Where-Object { $_.FullName -like "*profiles*" }
+          if ($profiles.Count -lt 1) {
+              throw "Bundled profile JSONs missing from installer"
+          }
+          Write-Host "Installer layout validated: $($models.Count) model files, lexicon + profiles bundled"
           Get-ChildItem -Recurse -Path $installRoot/resources | Select-Object Name,Length
+
+      - name: Smoke-test engine availability (offline)
+        shell: pwsh
+        # Exercise the frozen OCRStudio.exe via its CLI ``--check-engine``
+        # hook. This catches bundle-level wiring bugs (missing torch
+        # submodule, broken easyocr import path, bad --add-data layout)
+        # before the installer ships. Uses HOME=tmp to forbid network
+        # model downloads and ensure we're serving from the bundle.
+        run: |
+          $env:HOME = (New-Item -ItemType Directory -Path "tmp-home").FullName
+          & "dist/OCRStudio/OCRStudio.exe" --check-engine easyocr
+          if ($LASTEXITCODE -ne 0) {
+              throw "OCRStudio.exe --check-engine easyocr failed ($LASTEXITCODE)"
+          }
+
+      - name: Smoke-test real OCR on bundled EasyOCR
+        shell: pwsh
+        # Per CLAUDE.md: "CI-шаг не только собирается, но и запускается
+        # на реальных данных". We render a tiny synthetic PDF and run
+        # the full pipeline through the frozen exe to prove the bundle
+        # actually works end-to-end on a fresh Windows runner.
+        run: |
+          python -c "import fitz; d=fitz.open(); p=d.new_page(width=612,height=792); p.insert_text((72,200),'HELLO OCR 2026',fontsize=48); rb=d.tobytes(); d.close(); s=fitz.open(); src=fitz.open(stream=rb,filetype='pdf'); pix=src[0].get_pixmap(dpi=200,alpha=False); np=s.new_page(width=src[0].rect.width,height=src[0].rect.height); np.insert_image(np.rect,stream=pix.tobytes('png')); s.save('smoke.pdf')"
+          & "dist/OCRStudio/OCRStudio.exe" --cli -p universal_clean -o smoke_out.pdf smoke.pdf -vv
+          if ($LASTEXITCODE -ne 0) {
+              throw "OCRStudio.exe --cli failed ($LASTEXITCODE)"
+          }
+          if (-not (Test-Path "smoke_out.pdf")) {
+              throw "Smoke CLI produced no output PDF"
+          }
 
       - uses: actions/upload-artifact@v4
         with:

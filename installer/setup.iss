@@ -88,18 +88,22 @@ begin
 end;
 
 [Files]
-; Copy everything from PyInstaller output EXCEPT the Tesseract LSTM
-; ``*.traineddata`` blobs — those are already compressed internally,
-; so piping them through LZMA2 gains <5% for several minutes of
-; single-threaded CPU on the ~60 MB total. Storing them raw
-; (``nocompression``, below) cuts compile time without inflating the
-; installer meaningfully; installed size is unchanged either way.
+; Copy everything from PyInstaller output EXCEPT the EasyOCR ``.pth``
+; model weights (CRAFT detector + cyrillic_g2 recognizer, ~100 MB).
+; Those are already internally compressed PyTorch checkpoints, so
+; piping them through LZMA2 spends minutes of single-threaded CPU
+; for <5% size gain. Storing them raw (``nocompression``, below)
+; cuts installer-compile time by 5-10 minutes on the CI Windows
+; runner. Installed size is unchanged either way.
 Source: "..\dist\OCRStudio\*"; DestDir: "{app}"; \
-    Excludes: "*.traineddata"; \
+    Excludes: "*.pth"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
-; Tesseract LSTM traineddata (rus/eng/osd, ~60 MB total).
-Source: "..\dist\OCRStudio\*.traineddata"; DestDir: "{app}"; \
+; EasyOCR weights — bundled verbatim so offline first-run works on
+; a fresh machine without the 400 MB HuggingFace download. PyInstaller
+; places them under ``_internal/resources/easyocr_models/`` via
+; ``--add-data=resources/easyocr_models`` in ``build.py``.
+Source: "..\dist\OCRStudio\*.pth"; DestDir: "{app}"; \
     Flags: ignoreversion recursesubdirs createallsubdirs nocompression
 
 [Icons]

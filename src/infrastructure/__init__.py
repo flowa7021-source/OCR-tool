@@ -1,1 +1,1 @@
-"""Infrastructure layer: logging, Tesseract wrapper, file utilities, storage."""
+"""Infrastructure layer: logging, file utilities, OCR cache, searchable PDF builder, storage."""

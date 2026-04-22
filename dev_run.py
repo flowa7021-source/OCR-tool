@@ -1,6 +1,6 @@
 """Quick launcher for UI development without real OCR dependencies.
 
-This script stubs out the Tesseract / OCRmyPDF pipeline so the full UI can be
+This script stubs out the EasyOCR pipeline so the full UI can be
 exercised on any machine (including Linux CI) without installing the OCR
 toolchain. Useful for reviewing layout, theming, and panel behavior.
 
@@ -10,7 +10,7 @@ Usage:
 
 Notes:
     * Submitted jobs instantly "complete" with placeholder PageResult text.
-    * No real Tesseract binary is invoked.
+    * No real EasyOCR reader is loaded (PyTorch import cost is skipped).
     * Recovery snapshots are still written to RECOVERY_DIR.
 """
 
@@ -26,11 +26,12 @@ logger = logging.getLogger(__name__)
 
 
 def _install_stubs() -> None:
-    """Replace ParallelProcessor and TesseractWrapper with no-op dev stubs."""
+    """Replace ParallelProcessor and the EasyOCR engine with dev stubs."""
     from src.application import parallel_processor as pp_module
+    from src.application.engines import registry as engines_registry
+    from src.application.engines.base import OCREngine, PageOCRResult
     from src.core.models import JobResult, PageResult
-    from src.infrastructure import tesseract_wrapper as tw_module
-    from src.shared.types import JobStatus
+    from src.shared.types import JobStatus, OCREngineKind
 
     class _DevParallelProcessor:
         """Fake processor: reports progress + completion on the main thread."""
@@ -46,7 +47,6 @@ def _install_stubs() -> None:
             on_error: Any = None,
             job_id: str = "dev",
         ) -> Any:
-            # Emit a couple of fake progress ticks
             total = 3
             for current in range(1, total + 1):
                 if on_progress is not None:
@@ -82,24 +82,39 @@ def _install_stubs() -> None:
         def shutdown(self, wait: bool = True) -> None:  # noqa: ARG002
             pass
 
-    class _DevTesseract:
-        def verify(self) -> tuple[bool, str]:
-            return True, "DEV STUB — Tesseract not actually checked"
+    class _DevEasyOCREngine(OCREngine):
+        kind = OCREngineKind.EASYOCR
 
-        def configure_pytesseract(self) -> None:
-            pass
+        @property
+        def name(self) -> str:
+            return "EasyOCR (DEV STUB)"
 
-        def find_tesseract_binary(self) -> Path:
-            return Path("/usr/bin/true")
+        @property
+        def description(self) -> str:
+            return "DEV STUB — EasyOCR is not actually loaded."
 
-        def find_tessdata_dir(self) -> Path:
-            return Path("/tmp")
+        def is_available(self) -> tuple[bool, str]:
+            return True, "DEV STUB — EasyOCR not actually checked"
 
-        def available_languages(self) -> list[str]:
-            return ["rus", "eng"]
+        def run(
+            self,
+            preprocessed_pdf: Path,
+            output_pdf: Path,
+            config: Any,
+            progress_callback: Any = None,
+            *,
+            original_input_pdf: Path | None = None,
+        ) -> list[PageOCRResult]:
+            output_pdf.parent.mkdir(parents=True, exist_ok=True)
+            output_pdf.write_bytes(preprocessed_pdf.read_bytes())
+            return [PageOCRResult(
+                page_number=1,
+                text="[DEV STUB] EasyOCR не выполнялся.",
+                mean_confidence=50.0,
+            )]
 
     pp_module.ParallelProcessor = _DevParallelProcessor  # type: ignore[assignment]
-    tw_module.TesseractWrapper = _DevTesseract  # type: ignore[assignment]
+    engines_registry._CACHE[OCREngineKind.EASYOCR] = _DevEasyOCREngine()
 
 
 def main() -> int:
@@ -109,13 +124,13 @@ def main() -> int:
     )
     _install_stubs()
 
-    from src.app import create_application
     from PySide6.QtCore import QTimer
+
+    from src.app import create_application
 
     app, window = create_application(sys.argv)
     window.show()
 
-    # If a PDF path was passed on the CLI, open it automatically
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     if args:
         pdf = Path(args[0]).expanduser().resolve()
