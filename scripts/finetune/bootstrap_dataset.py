@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import sys
 from pathlib import Path
@@ -41,19 +42,55 @@ from rapidfuzz.distance import Levenshtein
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 INPUTS_DIR = REPO_ROOT / "inputs"
+EXPECTED_DIR = REPO_ROOT / "expected"
 DEFAULT_OUT = REPO_ROOT / "datasets" / "finetune_ru"
 MIN_CROP_H = 8
 MIN_CROP_W = 8
 
+_TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9\-./,]{0,}")
 
-def _load_gt_tokens(stem: str, inputs_dir: Path = INPUTS_DIR) -> set[str]:
-    """Return the set of word-like tokens from the ground-truth transcript."""
+
+def _tokenize(text: str) -> set[str]:
+    """Extract lowercase word-like tokens (letters/digits, len ≥ 2)."""
+    return {t.strip(".,").lower() for t in _TOKEN_RE.findall(text) if len(t) >= 2}
+
+
+def _walk_json_strings(obj) -> list[str]:
+    """Flatten every string leaf in a (nested) JSON-like structure."""
+    if isinstance(obj, str):
+        return [obj]
+    if isinstance(obj, dict):
+        return [s for v in obj.values() for s in _walk_json_strings(v)]
+    if isinstance(obj, list):
+        return [s for v in obj for s in _walk_json_strings(v)]
+    return []
+
+
+def _load_gt_tokens(
+    stem: str,
+    inputs_dir: Path = INPUTS_DIR,
+    expected_dir: Path = EXPECTED_DIR,
+) -> set[str]:
+    """Combine tokens from ``inputs/<stem>.txt`` (plain transcript) and
+    ``expected/<stem>.json`` (structured reference: INN, OGRN, party names,
+    addresses, document numbers, phones, …). The JSON adds domain-specific
+    vocabulary that the plain transcript may truncate or miss.
+    """
+    tokens: set[str] = set()
     txt = inputs_dir / f"{stem}.txt"
-    if not txt.exists():
-        return set()
-    raw = txt.read_text(encoding="utf-8")
-    tokens = re.findall(r"[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9\-./,]{0,}", raw)
-    return {t.strip(".,").lower() for t in tokens if len(t) >= 2}
+    if txt.exists():
+        tokens |= _tokenize(txt.read_text(encoding="utf-8"))
+    json_path = expected_dir / f"{stem}.json"
+    if json_path.exists():
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            print(f"[bootstrap] WARN: {json_path.name} is not valid JSON: {e}",
+                  file=sys.stderr)
+        else:
+            for s in _walk_json_strings(data):
+                tokens |= _tokenize(s)
+    return tokens
 
 
 def _best_match(word: str, gt_tokens: set[str]) -> str | None:
@@ -78,7 +115,13 @@ def _split_bucket(key: str) -> str:
     return "validation" if int(h[:4], 16) % 5 == 0 else "training"
 
 
-def build_dataset(inputs_dir: Path, out_dir: Path, dpi: int = 300) -> int:
+def build_dataset(
+    inputs_dir: Path,
+    out_dir: Path,
+    dpi: int = 300,
+    gt_only: bool = True,
+    min_conf: float = 0.2,
+) -> int:
     import easyocr
 
     pdfs = sorted(inputs_dir.glob("*.pdf"))
@@ -101,10 +144,16 @@ def build_dataset(inputs_dir: Path, out_dir: Path, dpi: int = 300) -> int:
 
     print("[bootstrap] Loading EasyOCR reader (ru + en, CPU)…")
     reader = easyocr.Reader(["ru", "en"], gpu=False, verbose=False)
-    total = auto_corrected = 0
+    n_total = n_kept = n_dropped_lowconf = n_dropped_nogt = 0
+    n_exact = n_fuzzy = 0
 
     for pdf in pdfs:
         gt_tokens = _load_gt_tokens(pdf.stem, inputs_dir)
+        if not gt_tokens:
+            print(f"[bootstrap] WARN: no GT tokens for {pdf.stem} "
+                  f"(check inputs/{pdf.stem}.txt and expected/{pdf.stem}.json)",
+                  file=sys.stderr)
+        print(f"[bootstrap] {pdf.stem}: {len(gt_tokens)} GT tokens")
         doc = fitz.open(str(pdf))
         try:
             for page_idx in range(doc.page_count):
@@ -115,7 +164,9 @@ def build_dataset(inputs_dir: Path, out_dir: Path, dpi: int = 300) -> int:
                 for box_idx, (bbox, text, conf) in enumerate(
                     reader.readtext(arr, detail=1, paragraph=False)
                 ):
-                    if conf < 0.2 or not text.strip():
+                    n_total += 1
+                    if conf < min_conf or not text.strip():
+                        n_dropped_lowconf += 1
                         continue
                     xs = [p[0] for p in bbox]
                     ys = [p[1] for p in bbox]
@@ -124,16 +175,28 @@ def build_dataset(inputs_dir: Path, out_dir: Path, dpi: int = 300) -> int:
                     if x1 - x0 < MIN_CROP_W or y1 - y0 < MIN_CROP_H:
                         continue
 
-                    label = text.strip()
-                    corrected = _best_match(label, gt_tokens) if gt_tokens else None
-                    if corrected and corrected != label:
+                    raw_label = text.strip()
+                    corrected = (
+                        _best_match(raw_label, gt_tokens) if gt_tokens else None
+                    )
+                    if gt_only and corrected is None:
+                        # No GT token within Levenshtein budget → likely
+                        # a misread; strict mode drops these.
+                        n_dropped_nogt += 1
+                        continue
+                    if corrected is None:
+                        label = raw_label
+                    else:
                         label = corrected
-                        auto_corrected += 1
+                        if corrected.lower() == raw_label.lower():
+                            n_exact += 1
+                        else:
+                            n_fuzzy += 1
 
                     key = f"{pdf.stem}:{page_idx}:{box_idx}"
                     bucket = _split_bucket(key)
-                    total += 1
-                    filename = f"img_{total:08d}.jpg"
+                    n_kept += 1
+                    filename = f"img_{n_kept:08d}.jpg"
                     crop = arr[y0:y1, x0:x1]
                     Image.fromarray(crop).save(
                         out_dir / bucket / filename, quality=92,
@@ -152,8 +215,12 @@ def build_dataset(inputs_dir: Path, out_dir: Path, dpi: int = 300) -> int:
     train_csv.close()
     val_csv.close()
     print(
-        f"[bootstrap] Done: {total} crops written to {out_dir} "
-        f"({auto_corrected} labels auto-corrected from ground truth)"
+        f"[bootstrap] Done. "
+        f"seen={n_total}  kept={n_kept}  "
+        f"dropped_lowconf={n_dropped_lowconf}  "
+        f"dropped_nogt={n_dropped_nogt}  "
+        f"exact_match={n_exact}  fuzzy_match={n_fuzzy}  "
+        f"(gt_only={gt_only}, min_conf={min_conf})"
     )
     return 0
 
@@ -163,8 +230,22 @@ def main() -> int:
     parser.add_argument("--inputs", type=Path, default=INPUTS_DIR)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument(
+        "--keep-unverified", action="store_true",
+        help="Keep crops whose label has no GT match (old, lenient behaviour). "
+             "Default is strict: drop labels that aren't in inputs/*.txt or "
+             "expected/*.json within a Levenshtein-2 budget.",
+    )
+    parser.add_argument(
+        "--min-conf", type=float, default=0.2,
+        help="Drop EasyOCR boxes below this confidence (default: %(default)s).",
+    )
     args = parser.parse_args()
-    return build_dataset(args.inputs, args.out, args.dpi)
+    return build_dataset(
+        args.inputs, args.out, args.dpi,
+        gt_only=not args.keep_unverified,
+        min_conf=args.min_conf,
+    )
 
 
 if __name__ == "__main__":

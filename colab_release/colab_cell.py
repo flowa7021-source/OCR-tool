@@ -134,7 +134,7 @@ if _old in _tesrc:
 # 5. Write trainer YAML config
 import pathlib
 DATA = str(LOCAL_DATASET_DIR)
-EPOCHS = 100
+EPOCHS = 30
 BATCH = 32
 num_iter = EPOCHS * 1000
 
@@ -152,7 +152,7 @@ cfg = "\n".join([
     "workers: 2",
     f"batch_size: {BATCH}",
     f"num_iter: {num_iter}",
-    "valInterval: 500",
+    "valInterval: 100",
     f"saved_model: '{str(base_weights)}'",
     "FT: True",
     "optim: 'adam'",

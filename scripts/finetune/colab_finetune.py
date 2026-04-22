@@ -59,7 +59,8 @@ DATASET_ZIP_URL = (
 )
 # Output .pth goes to Drive so you can download it after the session ends.
 DRIVE_OUTPUT_DIR = "/content/drive/MyDrive/finetune_ru"
-EPOCHS = 100        # 100 ≈ 1.5h on T4; 300 = sweet spot for 2k crops
+EPOCHS = 30         # 30k iter on clean ~2k-crop dataset ≈ 500 real epochs,
+                    # ~25-30 min on T4. Raise to 60-100 for larger datasets.
 BATCH_SIZE = 32     # T4 has 16GB — 32 fits easily for imgH=64
 
 # === Don't edit below =======================================================
@@ -220,7 +221,7 @@ cfg = "\n".join([
     "workers: 2",
     f"batch_size: {BATCH}",
     f"num_iter: {num_iter}",
-    "valInterval: 500",
+    "valInterval: 100",
     f"saved_model: '{str(base_weights)}'",
     "FT: True",
     "optim: 'adam'",
