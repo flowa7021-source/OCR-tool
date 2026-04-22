@@ -742,11 +742,17 @@ class TextPostprocessor:
         # we validate is the number the user will see.
         if (
             getattr(config, "validate_identifiers", False)
-            and self._catalog is not None
-            and not self._catalog.is_empty
         ):
+            # Runs catalog-based fixup when a catalog is present, plus
+            # an OCR-confusion correction pass (via
+            # src.shared.requisite_validators) that works without a
+            # catalog — so the flag is meaningful even in profiles that
+            # don't load a doc catalog.
             current = self._validate_identifiers(current)
-            logger.debug("Postprocess: identifiers validated against catalog")
+            logger.debug("Postprocess: identifiers validated "
+                         "(catalog=%s)",
+                         "yes" if self._catalog and not self._catalog.is_empty
+                         else "no")
 
         # Entity validation — dates / amounts / phones. Independent
         # of ``validate_identifiers`` so profiles can pick and choose
@@ -849,6 +855,12 @@ class TextPostprocessor:
     # and ОГРН (13 / 15). ``\b`` anchors keep us from matching
     # sub-sequences of longer numbers (e.g. part of a 20-digit SWIFT).
     _IDENTIFIER_RE: Final[Pattern[str]] = re.compile(r"\b\d{10,15}\b")
+    # Matches 10-15 character runs of digits plus common OCR lookalikes
+    # (O, o, О, о, I, l, З, з, В, в, Ч, ч, |). Used by the OCR-confusion
+    # correction pass to catch tokens the strict digit-only regex misses.
+    _OCR_DIGITISH_RE: Final[Pattern[str]] = re.compile(
+        r"\b[0-9OoОоIlI|ЗзВвЧч!]{10,15}\b"
+    )
 
     def _validate_identifiers(self, text: str) -> str:
         """Replace catalog-1-edit-matched digit tokens with canonical.
@@ -873,10 +885,15 @@ class TextPostprocessor:
             validate_inn,
             validate_ogrn,
         )
+        from src.shared.requisite_validators import (
+            correct_inn as _ocr_fix_inn,
+        )
+        from src.shared.requisite_validators import (
+            correct_ogrn as _ocr_fix_ogrn,
+        )
 
         catalog = self._catalog
-        if catalog is None or catalog.is_empty:
-            return text
+        has_catalog = catalog is not None and not catalog.is_empty
 
         def _pick_catalog(token: str) -> frozenset[str]:
             # Route ИНН-shaped tokens to the INN set, ОГРН-shaped to
@@ -896,33 +913,72 @@ class TextPostprocessor:
                 return catalog.ogrns
             return frozenset()
 
+        def _ocr_confusion_fallback(token: str) -> str | None:
+            """Checksum-based OCR-confusion correction (O↔0, l↔1, З↔3 …).
+            Returns the canonical requisite or ``None`` if no valid
+            rescue exists within the substitution budget.
+            """
+            if len(token) in (10, 12):
+                return _ocr_fix_inn(token)
+            if len(token) in (13, 15):
+                return _ocr_fix_ogrn(token)
+            return None
+
         def _replace(match) -> str:
             token = match.group(0)
-            pool = _pick_catalog(token)
-            if not pool:
-                return token
-            # A token that's already in the catalog is canonical —
-            # do not rewrite. A token that VALIDATES but isn't in
-            # the catalog is probably a novel counterparty we've
-            # never seen before; also leave it alone.
-            if token in pool:
-                return token
-            already_valid = (
-                (len(token) in (10, 12) and validate_inn(token))
-                or (len(token) in (13, 15) and validate_ogrn(token))
-            )
-            if already_valid:
-                return token
-            fixed = catalog_assisted_fix(token, known_valid=pool)
-            if fixed is None:
-                return token
-            logger.info(
-                "validate_identifiers: %r → %r (catalog match)",
-                token, fixed,
-            )
-            return fixed
+            # 1. Catalog-based fix (preferred when catalog is available).
+            if has_catalog:
+                pool = _pick_catalog(token)
+                if pool:
+                    if token in pool:
+                        return token
+                    already_valid = (
+                        (len(token) in (10, 12) and validate_inn(token))
+                        or (len(token) in (13, 15) and validate_ogrn(token))
+                    )
+                    if already_valid:
+                        return token
+                    fixed = catalog_assisted_fix(token, known_valid=pool)
+                    if fixed is not None:
+                        logger.info(
+                            "validate_identifiers: %r → %r (catalog match)",
+                            token, fixed,
+                        )
+                        return fixed
+            # 2. OCR-confusion fallback — works even without a catalog.
+            #    Only replaces when the corrected version passes checksum.
+            ocr_fixed = _ocr_confusion_fallback(token)
+            if ocr_fixed is not None and ocr_fixed != token:
+                logger.info(
+                    "validate_identifiers: %r → %r (OCR-confusion fix)",
+                    token, ocr_fixed,
+                )
+                return ocr_fixed
+            return token
 
-        return self._IDENTIFIER_RE.sub(_replace, text)
+        # Pass 1: digit-only identifiers — catalog lookup + checksum fix.
+        text = self._IDENTIFIER_RE.sub(_replace, text)
+
+        # Pass 2: OCR-garbled identifiers — tokens of length 10/12/13/15
+        # made of digits + common OCR lookalikes (O, o, О, о, I, l, З, в …).
+        # These don't match the digit-only ``_IDENTIFIER_RE`` but are
+        # very likely corrupted requisites. Replace only when the
+        # checksum-corrected version differs from the raw token AND
+        # validates.
+        def _ocr_replace(match) -> str:
+            token = match.group(0)
+            if token.isdigit():
+                return token  # already handled by Pass 1
+            fixed = _ocr_confusion_fallback(token)
+            if fixed is not None and fixed != token:
+                logger.info(
+                    "validate_identifiers: %r → %r (OCR-confusion fix, pass 2)",
+                    token, fixed,
+                )
+                return fixed
+            return token
+
+        return self._OCR_DIGITISH_RE.sub(_ocr_replace, text)
 
     # Regex used by ``_validate_entities`` to FIND entity-shaped
     # tokens. Deliberately lenient on separators (dots, commas,
