@@ -128,9 +128,9 @@ train_data: '{data_dir.as_posix()}'
 valid_data: '{(data_dir / 'validation').as_posix()}'
 manualSeed: 1111
 workers: 2
-batch_size: 32
+batch_size: 16
 num_iter: {epochs * 1000}
-valInterval: 500
+valInterval: 100
 saved_model: '{BASE_WEIGHTS.as_posix()}'
 FT: True
 optim: 'adam'
@@ -212,7 +212,14 @@ def _swap_weights(trainer_root: Path) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA)
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument(
+        "--epochs", type=int, default=30,
+        help="Training 'epochs' = num_iter / 1000. Default 30 → 30k "
+             "iterations, ≈ 20-25 real epochs on 27k dataset at "
+             "batch=16. Enough for convergence on cleaned data without "
+             "overfitting. Raise to 60-100 only if val_accuracy is "
+             "still trending up at end of default run.",
+    )
     parser.add_argument("--skip-swap", action="store_true",
                         help="Train but don't overwrite bundled weights")
     args = parser.parse_args()

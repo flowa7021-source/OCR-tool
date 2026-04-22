@@ -94,23 +94,36 @@ def _load_gt_tokens(
 
 
 _NUMERIC_RE = re.compile(r"^[0-9][0-9.,\-/]*$")
+_DIGIT_RATIO_THRESHOLD = 0.6  # tokens with ≥ 60% digits → treat as numeric
+
+
+def _is_digit_dominated(s: str) -> bool:
+    """True if ``s`` is mostly digits — safer than :data:`_NUMERIC_RE` for
+    garbage-prefixed tokens like ``(109.2022`` or ``21},52`` where the
+    leading non-digit would bypass the strict regex but the content is
+    clearly a number with scan noise.
+    """
+    if not s:
+        return False
+    n_digits = sum(1 for c in s if c.isdigit())
+    return n_digits / len(s) >= _DIGIT_RATIO_THRESHOLD
 
 
 def _best_match(word: str, gt_tokens: set[str]) -> str | None:
     """Return the nearest GT token.
 
-    For TEXT tokens — length-adaptive Levenshtein budget (1 for short,
-    2 for long). For NUMERIC tokens (ИНН, даты, суммы, номера) — strict
-    exact-match only: fuzzy matching on numbers is the main source of
-    false-positive label noise (e.g. ``22,391`` → ``2239``, ``95ЗЗ/Б``
-    → ``9507/б`` from the audit) and the postprocess pipeline's
-    checksum validators (:mod:`src.shared.requisite_validators`) will
-    catch real requisite OCR errors at inference time anyway.
+    TEXT tokens — length-adaptive Levenshtein budget (1 for short,
+    2 for long). NUMERIC / digit-dominated tokens — strict exact-only:
+    fuzzy matching on numbers is the main source of false-positive
+    label noise (``22,391`` → ``2239``, ``(109.2022`` → ``01.09.2022``,
+    ``21},52`` → ``20,52`` from the audit). The postprocess pipeline's
+    checksum validators catch real ИНН/ОГРН OCR errors at inference
+    anyway.
     """
     lw = word.lower()
     if lw in gt_tokens:
         return lw
-    if _NUMERIC_RE.match(lw):
+    if _NUMERIC_RE.match(lw) or _is_digit_dominated(lw):
         return None
     budget = 1 if len(lw) < 6 else 2
     best: tuple[int, str] | None = None

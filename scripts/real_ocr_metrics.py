@@ -66,6 +66,11 @@ def main() -> int:
         "--fail-above", type=float, default=None,
         help="Exit 1 if mean CER (%%) exceeds this threshold",
     )
+    parser.add_argument(
+        "--output", type=Path, default=None,
+        help="Path for the JSON report (default: reports/ocr_metrics.json). "
+             "Useful for before-vs-after comparison runs that need distinct files.",
+    )
     args = parser.parse_args()
 
     pdfs = sorted(INPUTS_DIR.glob("*.pdf"))
@@ -114,16 +119,22 @@ def main() -> int:
         f"WER={avg_wer*100:>6.1f}%  conf={avg_conf:>5.1f}%"
     )
 
-    REPORTS_DIR.mkdir(exist_ok=True)
     report = {
         "engine": "easyocr",
         "average": {"cer": avg_cer, "wer": avg_wer, "mean_confidence": avg_conf},
+        # Flattened aliases for tooling that greps a single JSON
+        # without dict traversal (run_local.py uses these).
+        "avg_cer": avg_cer,
+        "avg_wer": avg_wer,
+        "avg_conf": avg_conf,
         "documents": rows,
     }
-    (REPORTS_DIR / "ocr_metrics.json").write_text(
+    out_path = args.output or (REPORTS_DIR / "ocr_metrics.json")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8",
     )
-    print(f"[metrics] Report: {REPORTS_DIR / 'ocr_metrics.json'}")
+    print(f"[metrics] Report: {out_path}")
 
     if args.fail_above is not None and avg_cer * 100.0 > args.fail_above:
         print(
