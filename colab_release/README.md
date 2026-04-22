@@ -5,13 +5,15 @@ fine-tune `cyrillic_g2.pth` в Google Colab без локальной подго
 
 ## Файлы
 
-- **`finetune_ru_colab.zip`** (~8 МБ) — датасет `finetune_ru/` с
-  **2929 GT-верифицированными word-crop'ами** (2366 train + 563 val).
-  Все лейблы сверены с `inputs/*.txt` **и** `expected/*.json`
-  (структурированные эталоны: ИНН, ОГРН, юрлица, адреса, БИК, даты,
-  номера документов) в пределах Левенштейна-2. Статистика прогона:
-  seen=8242, dropped_lowconf=2492, dropped_nogt=2815, exact=1223,
-  fuzzy=1706.
+- **`finetune_ru_colab.zip`** (~57 МБ) — датасет `finetune_ru/` с
+  **22 929 word-crop'ами** = 2929 real (GT-verified via Levenshtein-2 в
+  `inputs/*.txt` + `expected/*.json`) + **20 000 synth** (`synth_data.py`
+  в 9 шрифтах DejaVu/Liberation/FreeFont, размеры 18-36 px, degradation
+  intensity до 0.6). Split 80/20: 18296 train + 4635 val.
+  Real stats: seen=8242, dropped_lowconf=2492, dropped_nogt=2815,
+  exact=1223, fuzzy=1706. Synth weighting: ``freq^0.6`` flattens hot
+  words (цифры, ``ооо``, ``упд``) так что редкие слова получают
+  гарантированные 5-15 примеров.
 - **`colab_cell.py`** (~5.6 КБ) — единая ячейка для Colab notebook:
   mount Drive → pip install deps → clone EasyOCR trainer (sparse)
   → patch `dataset.py` для PyTorch 2.x / Python 3 → fetch stock
