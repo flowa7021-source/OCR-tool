@@ -69,10 +69,11 @@ def _build_pipeline():
     """Construct OCRPipeline with compute_confidence=True so the filter
     path runs even when drop_low_conf_words is off (we still want the
     numbers)."""
+    from src.infrastructure.tesseract_wrapper import TesseractWrapper
+
     from src.application.pipeline import OCRPipeline
     from src.core.image_preprocessor import ImagePreprocessor
     from src.core.text_postprocessor import TextPostprocessor
-    from src.infrastructure.tesseract_wrapper import TesseractWrapper
 
     # Register bundled Tesseract / Ghostscript on PATH, same as
     # ``src.cli.main`` does. Without this the script fails on a fresh

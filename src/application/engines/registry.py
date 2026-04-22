@@ -12,10 +12,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CACHE: dict[OCREngineKind, "OCREngine"] = {}
+_CACHE: dict[OCREngineKind, OCREngine] = {}
 
 
-def get_engine(kind: OCREngineKind) -> "OCREngine":
+def get_engine(kind: OCREngineKind) -> OCREngine:
     """Return the engine for ``kind``, constructing it lazily."""
     cached = _CACHE.get(kind)
     if cached is not None:
@@ -23,7 +23,7 @@ def get_engine(kind: OCREngineKind) -> "OCREngine":
 
     if kind is OCREngineKind.EASYOCR:
         from src.application.engines.easyocr_engine import EasyOCREngine
-        engine: "OCREngine" = EasyOCREngine()
+        engine: OCREngine = EasyOCREngine()
     else:  # pragma: no cover
         raise KeyError(f"Unknown engine kind: {kind}")
 

@@ -73,8 +73,8 @@ def main() -> int:
         print("[metrics] no PDFs in inputs/", file=sys.stderr)
         return 1
 
-    from jiwer import cer, wer
     import easyocr
+    from jiwer import cer, wer
     print("[metrics] loading EasyOCR reader (ru + en, CPU)…")
     reader = easyocr.Reader(["ru", "en"], gpu=False, verbose=False)
 

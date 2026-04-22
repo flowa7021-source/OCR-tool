@@ -23,7 +23,7 @@ def main() -> int:
     # both Cyrillic and Latin glyphs (EasyOCR's mixed-script combo).
     # That's the only recognizer we need at runtime; english_g2.pth
     # is a pure-Latin model we don't ship.
-    print(f"[prefetch] Loading ru+en EasyOCR reader…")
+    print("[prefetch] Loading ru+en EasyOCR reader…")
     reader = easyocr.Reader(["ru", "en"], gpu=False, verbose=False)
     cache = Path(reader.model_storage_directory)
     print(f"[prefetch] Cache dir: {cache}")

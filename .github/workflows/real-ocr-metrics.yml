@@ -1,9 +1,9 @@
 name: real-ocr-metrics
 
-# Runs the full test suite + real-OCR accuracy metrics on the golden
-# corpus. Produces a CER / WER / mean-confidence table per document
-# so a regression in preprocessing / postprocessing is caught before
-# release.
+# Runs the unit test suite + real-OCR accuracy metrics on the golden
+# corpus under Windows (the only platform the app targets). Produces a
+# CER / WER / mean-confidence table per document so a regression in
+# preprocessing / postprocessing is caught before release.
 
 on:
   push:
@@ -15,9 +15,9 @@ on:
 
 jobs:
   unit-tests:
-    name: Unit tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    name: Unit tests (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,9 +34,9 @@ jobs:
       - run: pytest tests/unit -q
 
   real-ocr-golden:
-    name: Real OCR accuracy (golden corpus)
+    name: Real OCR accuracy (Windows)
     needs: unit-tests
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4

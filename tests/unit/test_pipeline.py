@@ -6,11 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import fitz
-import pytest
 
 from src.application.engines.base import OCREngine, PageOCRResult
-from src.application.pipeline import OCRPipeline
-from src.application.pipeline import _word_boxes_to_tsv
+from src.application.pipeline import OCRPipeline, _word_boxes_to_tsv
 from src.core.image_preprocessor import ImagePreprocessor
 from src.core.models import (
     JobResult,

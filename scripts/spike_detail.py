@@ -1,12 +1,10 @@
 """Детальный разбор результатов spike: что именно читают движки vs ground truth."""
 
 from __future__ import annotations
+
 import re
-import sys
 import time
-import tempfile
 from pathlib import Path
-from collections import Counter
 
 import fitz
 import numpy as np
@@ -53,9 +51,9 @@ def easy_ocr(pdf_path: Path, reader) -> str:
 
 def load_gt(stem: str) -> str:
     txt = (INPUTS_DIR / f"{stem}.txt").read_text(encoding="utf-8")
-    lines = [l for l in txt.splitlines()
-             if not re.fullmatch(r"[=\-]{10,}", l.strip())
-             and not l.strip().startswith(("ФАЙЛ:", "СТРАНИЦ:"))]
+    lines = [line for line in txt.splitlines()
+             if not re.fullmatch(r"[=\-]{10,}", line.strip())
+             and not line.strip().startswith(("ФАЙЛ:", "СТРАНИЦ:"))]
     return "\n".join(lines)
 
 

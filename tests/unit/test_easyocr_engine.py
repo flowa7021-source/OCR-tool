@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import fitz
-import numpy as np
 import pytest
 
 from src.application.engines.base import PageOCRResult

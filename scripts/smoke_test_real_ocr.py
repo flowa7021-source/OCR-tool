@@ -159,13 +159,14 @@ def _run_pipeline(
 
     Returns ``(ok, message, elapsed_seconds)``.
     """
+    from src.infrastructure.tesseract_wrapper import TesseractWrapper
+
     from src.application.pipeline import OCRPipeline
     from src.application.profile_manager import ProfileManager
     from src.core.image_preprocessor import ImagePreprocessor
     from src.core.models import OCRJobConfig
     from src.core.text_postprocessor import TextPostprocessor
     from src.infrastructure.config_storage import ProfileStorage
-    from src.infrastructure.tesseract_wrapper import TesseractWrapper
     from src.shared.types import JobStatus
 
     storage = ProfileStorage()

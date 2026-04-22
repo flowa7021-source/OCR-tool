@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
-from src.core.models import OCRConfig, PROFILE_SCHEMA_VERSION, ProfileData
+from src.core.models import PROFILE_SCHEMA_VERSION, OCRConfig, ProfileData
 from src.shared.types import OCREngineKind
 
 

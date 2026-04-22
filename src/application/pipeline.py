@@ -20,11 +20,9 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
-from src.application.engines.base import EngineNotAvailableError
 from src.core.image_preprocessor import ImagePreprocessor
 from src.core.models import (
     JobResult,

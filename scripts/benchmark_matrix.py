@@ -153,10 +153,11 @@ def _build_pipeline():
     separately from the dev-iteration one and the duplication is
     shorter than a third shared module.
     """
+    from src.infrastructure.tesseract_wrapper import TesseractWrapper
+
     from src.application.pipeline import OCRPipeline
     from src.core.image_preprocessor import ImagePreprocessor
     from src.core.text_postprocessor import TextPostprocessor
-    from src.infrastructure.tesseract_wrapper import TesseractWrapper
 
     try:
         from src.infrastructure.external_tools import ensure_on_path
