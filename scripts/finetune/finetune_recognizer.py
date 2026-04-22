@@ -122,6 +122,7 @@ batch_max_length: 34
 imgH: 64
 imgW: 600
 rgb: False
+sensitive: True
 contrast_adjust: 0.0
 data_filtering_off: False
 PAD: True
@@ -134,7 +135,7 @@ input_channel: 1
 output_channel: 256
 hidden_size: 256
 decode: 'greedy'
-new_prediction: False
+new_prediction: True
 freeze_FeatureFxtraction: False
 freeze_SequenceModeling: False
 device: '{device}'
