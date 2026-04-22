@@ -161,11 +161,21 @@ _runner_lines = [
 ]
 _runner = pathlib.Path('/content/EasyOCR/trainer/_runner.py')
 _runner.write_text('\n'.join(_runner_lines) + '\n', encoding='utf-8')
-result = subprocess.run(
-    ['python', str(_runner), str(cfg_path)],
+
+# Stream stdout + stderr line-by-line into the Colab cell so a failing
+# train() call is actually visible (subprocess.run without capture swallows
+# output in notebook kernels). We also force -u (unbuffered) so progress
+# prints appear live, not after process exits.
+proc = subprocess.Popen(
+    ['python', '-u', str(_runner), str(cfg_path)],
     cwd='/content/EasyOCR/trainer',
+    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    text=True, bufsize=1,
 )
-print(f'Training finished with exit code {result.returncode}')
+for line in proc.stdout:
+    print(line, end='')
+rc = proc.wait()
+print(f'Training finished with exit code {rc}')
 
 # 7. Copy best checkpoint back to Drive
 import shutil, pathlib
