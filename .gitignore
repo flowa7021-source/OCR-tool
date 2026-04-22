@@ -43,6 +43,12 @@ installer/tmp/
 *.log
 logs/
 
+# OCR metrics / fine-tune run reports — regenerated locally, not versioned.
+# ``scripts/real_ocr_metrics.py`` and ``scripts/finetune/run_local.py``
+# write JSON / TXT reports here per-run; they're for local review and
+# change every time OCR or weights change.
+reports/
+
 # Temp files
 tmp/
 temp/
