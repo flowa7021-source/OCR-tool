@@ -5,16 +5,20 @@ fine-tune `cyrillic_g2.pth` в Google Colab без локальной подго
 
 ## Файлы
 
-- **`finetune_ru_colab.zip`** (~57 МБ) — датасет `finetune_ru/` с
-  **22 541 word-crop'ами** = 2539 real (GT-verified через Левенштейн-2
-  для ТЕКСТА, exact-only для ЧИСЕЛ) + **20 000 synth** (`synth_data.py`
-  в 9 шрифтах DejaVu/Liberation/FreeFont, размеры 18-36 px, degradation
-  intensity до 0.6). Split 80/20: 17969 train + 4571 val.
-  Real stats: seen=8242, dropped_lowconf=2492, dropped_nogt=3205,
-  exact=1223, fuzzy=1316. Numeric-strict фильтр (commit ca923f6)
-  выкинул ~390 false-positive подстановок типа `22,391 → 2239`.
-  Synth weighting: ``freq^0.6`` — редкие слова получают 5-15 примеров,
-  hot words (цифры, ``ооо``, ``упд``) не перекрывают хвост.
+- **`finetune_ru_colab.zip`** (~56 МБ) — датасет `finetune_ru/` с
+  **22 525 уникальных word-crop'ов** + **3× oversample** на real
+  (чтобы real-crops не подавлялись synth'ом) = **27 575 rows** в
+  `labels.csv` (22 014 training + 5 563 validation). Real: 2525
+  (1223 exact + 1302 fuzzy text-only). Synth: 20 000 (`synth_data.py`,
+  9 шрифтов, degradation до 0.6).
+  Фильтры: numeric-exact + **digit-ratio ≥ 60%** (блокирует
+  `(109.2022 → 01.09.2022`, `21},52 → 20,52` и подобные мусорные
+  матчи через embedded-скобки). False-positive rate на Lev-2
+  аудите ≈ 10% (было 15% после только numeric-exact, было 20%
+  без фильтров).
+  Real vs synth share в training: 27.5% (было 11% без oversample —
+  модель могла overfittить на synth-пиксели, не обобщая на реальные
+  сканы).
 - **`colab_cell.py`** (~5.6 КБ) — единая ячейка для Colab notebook:
   mount Drive → pip install deps → clone EasyOCR trainer (sparse)
   → patch `dataset.py` для PyTorch 2.x / Python 3 → fetch stock
