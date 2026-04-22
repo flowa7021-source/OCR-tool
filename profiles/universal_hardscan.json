@@ -1,0 +1,63 @@
+{
+  "name": "universal_hardscan",
+  "description": "Для сложных сканов: неровная экспозиция, тени от сгибов, пыль/грязь, просвечивающая оборотная сторона. Sauvola adaptive binarization вместо OTSU — window-based threshold ловит локальный контраст, не ломается на градиентах. Агрессивный denoise + CLAHE. Рекомендуется когда native DPI < 200 или universal_accurate даёт mean_conf < 70%.",
+  "schema_version": 13,
+  "preprocess": {
+    "auto_rotate": {"enabled": true, "min_confidence": 1.0},
+    "deskew": {"enabled": true, "auto_detect": true, "manual_angle": 0.0, "max_angle": 45.0},
+    "dewarp": {"enabled": false, "text_min_width": 15, "text_min_height": 2, "text_min_aspect": 1.5, "focal_length": 1.2},
+    "binarization": {"method": "sauvola", "adaptive_block_size": 31, "adaptive_c": 10, "sauvola_window": 51, "sauvola_k": 0.34},
+    "denoise": {"enabled": true, "steps": [{"method": "median", "strength": 3}, {"method": "morph_open", "strength": 2}]},
+    "contrast": {"clahe_enabled": true, "clahe_clip": 2.5, "clahe_tile": 8, "manual_enabled": false, "alpha": 1.0, "beta": 0},
+    "background": {"enabled": true, "blur_kernel": 55},
+    "border_removal": {"enabled": true, "min_line_length": 150}
+  },
+  "ocr": {
+    "engine": "easyocr",
+    "languages": ["ru", "en"],
+    "primary_language": "ru",
+    "dpi": 400,
+    "allowlist": "",
+    "confidence_threshold": 50.0,
+    "min_keep_confidence": 0.2,
+    "gpu": false,
+    "skip_text": true,
+    "max_pages": 0,
+    "drop_low_conf_words": true,
+    "soft_rescue_dropped_words": true,
+    "adaptive_confidence_threshold": true,
+    "user_words_fuzzy_rescue": true,
+    "craft_text_threshold": 0.6,
+    "craft_low_text": 0.35,
+    "craft_link_threshold": 0.35,
+    "craft_canvas_size": 3200,
+    "easyocr_contrast_ths": 0.1,
+    "easyocr_adjust_contrast": 0.7
+  },
+  "postprocess": {
+    "autocorrect_russian": true,
+    "autocorrect_english": true,
+    "merge_hyphenated": true,
+    "normalize_whitespace": true,
+    "normalize_unicode": true,
+    "remove_artifacts": true,
+    "fix_cyrillic_latin_confusion": true,
+    "garbage_filter_strictness": "lenient",
+    "mark_suspect_handwritten_blocks": true,
+    "validate_identifiers": true,
+    "validate_entities": true,
+    "fuzzy_correction_ru": true,
+    "custom_rules": []
+  },
+  "extract": {
+    "enabled": true,
+    "kind": "tn_upd",
+    "multi_document": true,
+    "low_text_threshold": 200,
+    "cache_enabled": true,
+    "org_lookup": true,
+    "llm_fallback": {"enabled": false, "min_confidence": 0.4, "model": "claude-opus-4-7", "max_text_chars": 20000}
+  },
+  "builtin": true,
+  "created_at": "2026-04-22T18:50:00+00:00"
+}
