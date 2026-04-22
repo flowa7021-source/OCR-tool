@@ -15,25 +15,25 @@ Sampled 30 crop(s) where the bootstrap's fuzzy match replaced the raw EasyOCR ou
 | 5 | <img src="crops/005_TN_k_UPD_41_ot_06.09.2022_p0_b21.jpg" height="40"> | `рузоотправнтель` | `грузоотправитель` | 2 | TN_k_UPD_41_ot_06.09.2022 p0 |
 | 6 | <img src="crops/006_TN_k_UPD_41_ot_06.09.2022_p0_b50.jpg" height="40"> | `~именование` | `наименование` | 2 | TN_k_UPD_41_ot_06.09.2022 p0 |
 | 7 | <img src="crops/007_TN_k_UPD_41_ot_06.09.2022_p0_b134.jpg" height="40"> | `Тягач с` | `тягач` | 2 | TN_k_UPD_41_ot_06.09.2022 p0 |
-| 8 | <img src="crops/008_TN_k_UPD_41_ot_06.09.2022_p1_b81.jpg" height="40"> | `01.09.26/22` | `01.09.2022` | 2 | TN_k_UPD_41_ot_06.09.2022 p1 |
-| 9 | <img src="crops/009_TN_k_UPD_41_ot_06.09.2022_p1_b136.jpg" height="40"> | `Отмстки` | `отметка` | 2 | TN_k_UPD_41_ot_06.09.2022 p1 |
-| 10 | <img src="crops/010_TN_k_UPD_41_ot_06.09.2022_p2_b21.jpg" height="40"> | `22,391` | `2239` | 2 | TN_k_UPD_41_ot_06.09.2022 p2 |
-| 11 | <img src="crops/011_TN_k_UPD_41_ot_06.09.2022_p2_b136.jpg" height="40"> | `Тягач c` | `тягач` | 2 | TN_k_UPD_41_ot_06.09.2022 p2 |
-| 12 | <img src="crops/012_TN_k_UPD_41_ot_06.09.2022_p3_b42.jpg" height="40"> | `Кладовщнк'` | `кладовщик` | 2 | TN_k_UPD_41_ot_06.09.2022 p3 |
-| 13 | <img src="crops/013_TN_k_UPD_41_ot_06.09.2022_p3_b67.jpg" height="40"> | `01,09,2022` | `01.09.2022` | 2 | TN_k_UPD_41_ot_06.09.2022 p3 |
-| 14 | <img src="crops/014_TN_k_UPD_41_ot_06.09.2022_p4_b47.jpg" height="40"> | `анменование` | `наименование` | 2 | TN_k_UPD_41_ot_06.09.2022 p4 |
-| 15 | <img src="crops/015_TN_k_UPD_41_ot_06.09.2022_p4_b92.jpg" height="40"> | `6 Перевозчик` | `перевозчик` | 2 | TN_k_UPD_41_ot_06.09.2022 p4 |
-| 16 | <img src="crops/016_TN_k_UPD_41_ot_06.09.2022_p4_b101.jpg" height="40"> | `Перевозчика)` | `перевозчик` | 2 | TN_k_UPD_41_ot_06.09.2022 p4 |
-| 17 | <img src="crops/017_TN_k_UPD_41_ot_06.09.2022_p4_b105.jpg" height="40"> | `Тягач c` | `тягач` | 2 | TN_k_UPD_41_ot_06.09.2022 p4 |
-| 18 | <img src="crops/018_TN_k_UPD_41_ot_06.09.2022_p5_b109.jpg" height="40"> | `(подпнсь` | `подпись` | 2 | TN_k_UPD_41_ot_06.09.2022 p5 |
-| 19 | <img src="crops/019_TN_k_UPD_41_ot_06.09.2022_p6_b10.jpg" height="40"> | `(109.2022` | `01.09.2022` | 2 | TN_k_UPD_41_ot_06.09.2022 p6 |
-| 20 | <img src="crops/020_TN_k_UPD_41_ot_06.09.2022_p6_b17.jpg" height="40"> | `Экземпляр N` | `экземпляр` | 2 | TN_k_UPD_41_ot_06.09.2022 p6 |
-| 21 | <img src="crops/021_TN_k_UPD_41_ot_06.09.2022_p6_b55.jpg" height="40"> | `трузон` | `грузов` | 2 | TN_k_UPD_41_ot_06.09.2022 p6 |
-| 22 | <img src="crops/022_TN_k_UPD_41_ot_06.09.2022_p6_b139.jpg" height="40"> | `Автопрафит"` | `автопрофит` | 2 | TN_k_UPD_41_ot_06.09.2022 p6 |
-| 23 | <img src="crops/023_TN_k_UPD_41_ot_06.09.2022_p6_b150.jpg" height="40"> | `Тягач c` | `тягач` | 2 | TN_k_UPD_41_ot_06.09.2022 p6 |
-| 24 | <img src="crops/024_TN_k_UPD_41_ot_06.09.2022_p8_b17.jpg" height="40"> | `95ЗЗ/Б` | `9507/б` | 2 | TN_k_UPD_41_ot_06.09.2022 p8 |
-| 25 | <img src="crops/025_TN_k_UPD_41_ot_06.09.2022_p8_b19.jpg" height="40"> | `(2,09.2022` | `02.09.2022` | 2 | TN_k_UPD_41_ot_06.09.2022 p8 |
-| 26 | <img src="crops/026_TN_k_UPD_41_ot_06.09.2022_p8_b145.jpg" height="40"> | `Тягач c` | `тягач` | 2 | TN_k_UPD_41_ot_06.09.2022 p8 |
-| 27 | <img src="crops/027_TN_k_UPD_41_ot_06.09.2022_p9_b15.jpg" height="40"> | `02,09,2022` | `02.09.2022` | 2 | TN_k_UPD_41_ot_06.09.2022 p9 |
-| 28 | <img src="crops/028_TN_k_UPD_41_ot_06.09.2022_p9_b87.jpg" height="40"> | `(2.09.20/22` | `02.09.2022` | 2 | TN_k_UPD_41_ot_06.09.2022 p9 |
-| 29 | <img src="crops/029_TN_k_UPD_41_ot_06.09.2022_p10_b9.jpg" height="40"> | `зявка)` | `заявка` | 2 | TN_k_UPD_41_ot_06.09.2022 p10 |
+| 8 | <img src="crops/008_TN_k_UPD_41_ot_06.09.2022_p1_b136.jpg" height="40"> | `Отмстки` | `отметка` | 2 | TN_k_UPD_41_ot_06.09.2022 p1 |
+| 9 | <img src="crops/009_TN_k_UPD_41_ot_06.09.2022_p2_b136.jpg" height="40"> | `Тягач c` | `тягач` | 2 | TN_k_UPD_41_ot_06.09.2022 p2 |
+| 10 | <img src="crops/010_TN_k_UPD_41_ot_06.09.2022_p3_b42.jpg" height="40"> | `Кладовщнк'` | `кладовщик` | 2 | TN_k_UPD_41_ot_06.09.2022 p3 |
+| 11 | <img src="crops/011_TN_k_UPD_41_ot_06.09.2022_p4_b47.jpg" height="40"> | `анменование` | `наименование` | 2 | TN_k_UPD_41_ot_06.09.2022 p4 |
+| 12 | <img src="crops/012_TN_k_UPD_41_ot_06.09.2022_p4_b92.jpg" height="40"> | `6 Перевозчик` | `перевозчик` | 2 | TN_k_UPD_41_ot_06.09.2022 p4 |
+| 13 | <img src="crops/013_TN_k_UPD_41_ot_06.09.2022_p4_b101.jpg" height="40"> | `Перевозчика)` | `перевозчики` | 2 | TN_k_UPD_41_ot_06.09.2022 p4 |
+| 14 | <img src="crops/014_TN_k_UPD_41_ot_06.09.2022_p4_b105.jpg" height="40"> | `Тягач c` | `тягач` | 2 | TN_k_UPD_41_ot_06.09.2022 p4 |
+| 15 | <img src="crops/015_TN_k_UPD_41_ot_06.09.2022_p5_b109.jpg" height="40"> | `(подпнсь` | `подпись` | 2 | TN_k_UPD_41_ot_06.09.2022 p5 |
+| 16 | <img src="crops/016_TN_k_UPD_41_ot_06.09.2022_p6_b10.jpg" height="40"> | `(109.2022` | `01.09.2022` | 2 | TN_k_UPD_41_ot_06.09.2022 p6 |
+| 17 | <img src="crops/017_TN_k_UPD_41_ot_06.09.2022_p6_b17.jpg" height="40"> | `Экземпляр N` | `экземпляр` | 2 | TN_k_UPD_41_ot_06.09.2022 p6 |
+| 18 | <img src="crops/018_TN_k_UPD_41_ot_06.09.2022_p6_b55.jpg" height="40"> | `трузон` | `грузов` | 2 | TN_k_UPD_41_ot_06.09.2022 p6 |
+| 19 | <img src="crops/019_TN_k_UPD_41_ot_06.09.2022_p6_b139.jpg" height="40"> | `Автопрафит"` | `автопрофит` | 2 | TN_k_UPD_41_ot_06.09.2022 p6 |
+| 20 | <img src="crops/020_TN_k_UPD_41_ot_06.09.2022_p6_b150.jpg" height="40"> | `Тягач c` | `тягач` | 2 | TN_k_UPD_41_ot_06.09.2022 p6 |
+| 21 | <img src="crops/021_TN_k_UPD_41_ot_06.09.2022_p8_b17.jpg" height="40"> | `95ЗЗ/Б` | `9508/б` | 2 | TN_k_UPD_41_ot_06.09.2022 p8 |
+| 22 | <img src="crops/022_TN_k_UPD_41_ot_06.09.2022_p8_b19.jpg" height="40"> | `(2,09.2022` | `02.09.2022` | 2 | TN_k_UPD_41_ot_06.09.2022 p8 |
+| 23 | <img src="crops/023_TN_k_UPD_41_ot_06.09.2022_p8_b145.jpg" height="40"> | `Тягач c` | `тягач` | 2 | TN_k_UPD_41_ot_06.09.2022 p8 |
+| 24 | <img src="crops/024_TN_k_UPD_41_ot_06.09.2022_p9_b87.jpg" height="40"> | `(2.09.20/22` | `02.09.2022` | 2 | TN_k_UPD_41_ot_06.09.2022 p9 |
+| 25 | <img src="crops/025_TN_k_UPD_41_ot_06.09.2022_p10_b9.jpg" height="40"> | `зявка)` | `заявка` | 2 | TN_k_UPD_41_ot_06.09.2022 p10 |
+| 26 | <img src="crops/026_TN_k_UPD_41_ot_06.09.2022_p10_b11.jpg" height="40"> | `(2,09.2022` | `02.09.2022` | 2 | TN_k_UPD_41_ot_06.09.2022 p10 |
+| 27 | <img src="crops/027_TN_k_UPD_41_ot_06.09.2022_p11_b85.jpg" height="40"> | `12.09.2(22` | `02.09.2022` | 2 | TN_k_UPD_41_ot_06.09.2022 p11 |
+| 28 | <img src="crops/028_TN_k_UPD_41_ot_06.09.2022_p11_b100.jpg" height="40"> | `21},52` | `20,52` | 2 | TN_k_UPD_41_ot_06.09.2022 p11 |
+| 29 | <img src="crops/029_TN_k_UPD_47_ot_09.01.2023_p0_b40.jpg" height="40"> | `3.Груз` | `груз` | 2 | TN_k_UPD_47_ot_09.01.2023 p0 |

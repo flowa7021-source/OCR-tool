@@ -6,14 +6,15 @@ fine-tune `cyrillic_g2.pth` в Google Colab без локальной подго
 ## Файлы
 
 - **`finetune_ru_colab.zip`** (~57 МБ) — датасет `finetune_ru/` с
-  **22 929 word-crop'ами** = 2929 real (GT-verified via Levenshtein-2 в
-  `inputs/*.txt` + `expected/*.json`) + **20 000 synth** (`synth_data.py`
+  **22 541 word-crop'ами** = 2539 real (GT-verified через Левенштейн-2
+  для ТЕКСТА, exact-only для ЧИСЕЛ) + **20 000 synth** (`synth_data.py`
   в 9 шрифтах DejaVu/Liberation/FreeFont, размеры 18-36 px, degradation
-  intensity до 0.6). Split 80/20: 18296 train + 4635 val.
-  Real stats: seen=8242, dropped_lowconf=2492, dropped_nogt=2815,
-  exact=1223, fuzzy=1706. Synth weighting: ``freq^0.6`` flattens hot
-  words (цифры, ``ооо``, ``упд``) так что редкие слова получают
-  гарантированные 5-15 примеров.
+  intensity до 0.6). Split 80/20: 17969 train + 4571 val.
+  Real stats: seen=8242, dropped_lowconf=2492, dropped_nogt=3205,
+  exact=1223, fuzzy=1316. Numeric-strict фильтр (commit ca923f6)
+  выкинул ~390 false-positive подстановок типа `22,391 → 2239`.
+  Synth weighting: ``freq^0.6`` — редкие слова получают 5-15 примеров,
+  hot words (цифры, ``ооо``, ``упд``) не перекрывают хвост.
 - **`colab_cell.py`** (~5.6 КБ) — единая ячейка для Colab notebook:
   mount Drive → pip install deps → clone EasyOCR trainer (sparse)
   → patch `dataset.py` для PyTorch 2.x / Python 3 → fetch stock
