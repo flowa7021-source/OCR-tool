@@ -108,6 +108,29 @@ if 'weights_only=False' not in _tsrc:
     _tr.write_text(_tsrc, encoding='utf-8')
     print('Patched trainer/train.py (torch.load weights_only=False)')
 
+# 4d. Patch test.py: validation calls criterion() with CPU target/length
+#     tensors while preds live on CUDA. PyTorch ≥ 2.x raises
+#     "Expected all tensors to be on the same device" — move the three
+#     CPU tensors to model.device before the CTC loss call.
+_te = pathlib.Path('/content/EasyOCR/trainer/test.py')
+_tesrc = _te.read_text(encoding='utf-8')
+_old = (
+    "            preds_size = torch.IntTensor([preds.size(1)] * batch_size)\n"
+    "            # permute 'preds' to use CTCloss format\n"
+    "            cost = criterion(preds.log_softmax(2).permute(1, 0, 2), "
+    "text_for_loss, preds_size, length_for_loss)"
+)
+_new = (
+    "            preds_size = torch.IntTensor([preds.size(1)] * batch_size).to(device)\n"
+    "            # permute 'preds' to use CTCloss format\n"
+    "            cost = criterion(preds.log_softmax(2).permute(1, 0, 2), "
+    "text_for_loss.to(device), preds_size, length_for_loss.to(device))"
+)
+if _old in _tesrc:
+    _tesrc = _tesrc.replace(_old, _new)
+    _te.write_text(_tesrc, encoding='utf-8')
+    print('Patched trainer/test.py (CTC-loss device mismatch)')
+
 # 5. Write trainer YAML config
 import pathlib
 DATA = str(LOCAL_DATASET_DIR)

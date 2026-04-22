@@ -58,6 +58,27 @@ def _patch_trainer(trainer_root: Path) -> None:
     """Apply compatibility patches for PyTorch ≥ 2.0 and Python 3. Idempotent."""
     _patch_dataset(trainer_root / "dataset.py")
     _patch_train(trainer_root / "train.py")
+    _patch_test(trainer_root / "test.py")
+
+
+def _patch_test(te: Path) -> None:
+    src = te.read_text(encoding="utf-8")
+    old = (
+        "            preds_size = torch.IntTensor([preds.size(1)] * batch_size)\n"
+        "            # permute 'preds' to use CTCloss format\n"
+        "            cost = criterion(preds.log_softmax(2).permute(1, 0, 2), "
+        "text_for_loss, preds_size, length_for_loss)"
+    )
+    new = (
+        "            preds_size = torch.IntTensor([preds.size(1)] * batch_size).to(device)\n"
+        "            # permute 'preds' to use CTCloss format\n"
+        "            cost = criterion(preds.log_softmax(2).permute(1, 0, 2), "
+        "text_for_loss.to(device), preds_size, length_for_loss.to(device))"
+    )
+    if old not in src:
+        return  # already patched (or upstream changed the lines)
+    te.write_text(src.replace(old, new), encoding="utf-8")
+    print("[finetune] Patched trainer/test.py (CTC-loss device mismatch)")
 
 
 def _patch_dataset(ds: Path) -> None:
