@@ -99,6 +99,26 @@ if not base_weights.exists():
         raise RuntimeError('Could not download cyrillic_g2.pth — check network.')
 print('Base weights:', base_weights)
 
+# 4b. Patch trainer for PyTorch 2.x / Python 3 compatibility
+# - torch._utils._accumulate removed in PyTorch 2.x → itertools.accumulate
+# - iterator.next() → next(iterator) (Python 3)
+import pathlib
+_ds = pathlib.Path('/content/EasyOCR/trainer/dataset.py')
+_src = _ds.read_text(encoding='utf-8')
+if 'from itertools import accumulate as _accumulate' not in _src:
+    _src = _src.replace(
+        'from torch._utils import _accumulate',
+        'try:\n    from torch._utils import _accumulate\n'
+        'except ImportError:\n    from itertools import accumulate as _accumulate'
+    )
+    _src = _src.replace('data_loader_iter.next()', 'next(data_loader_iter)')
+    _src = _src.replace(
+        'self.dataloader_iter_list[i].next()',
+        'next(self.dataloader_iter_list[i])'
+    )
+    _ds.write_text(_src, encoding='utf-8')
+    print('Patched trainer/dataset.py (PyTorch 2.x / Python 3 compat)')
+
 # 5. Write trainer YAML config
 import pathlib
 DATA = r"__DRIVE_DATASET_DIR__"
