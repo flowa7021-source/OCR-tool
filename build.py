@@ -35,7 +35,11 @@ APP_NAME = "OCRStudio"
 #: Bundled verbatim so offline first-run works on any fresh machine.
 EASYOCR_REQUIRED_MODELS = (
     "craft_mlt_25k.pth",   # CRAFT text detector (shared, ~83 MB)
-    "cyrillic_g2.pth",     # ru+en recognizer (~15 MB)
+    # ru+en recognizer (~15 MB). If ``scripts/finetune/finetune_recognizer.py``
+    # has been run, this file is the fine-tuned checkpoint and the stock
+    # version is kept next to it as ``cyrillic_g2.pth.stock`` for rollback.
+    # PyInstaller bundles the current file as-is — no special casing needed.
+    "cyrillic_g2.pth",
 )
 
 
