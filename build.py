@@ -20,6 +20,7 @@ Prerequisites:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
 import subprocess
@@ -53,10 +54,8 @@ def clean() -> None:
             print(f"[build] removing {path}")
             shutil.rmtree(path, ignore_errors=True)
     for spec in PROJECT_ROOT.glob("*.spec"):
-        try:
+        with contextlib.suppress(OSError):
             spec.unlink()
-        except OSError:
-            pass
 
 
 def ensure_resources() -> None:
@@ -79,6 +78,14 @@ def ensure_resources() -> None:
             "(git checkout -- resources/ru_lexicon.txt)."
         )
 
+    font = PROJECT_ROOT / "resources" / "DejaVuSans.ttf"
+    if not font.exists():
+        raise SystemExit(
+            f"[build] ERROR: {font} missing. Copy DejaVuSans.ttf to "
+            "resources/ — required for Cyrillic invisible text layer in "
+            "searchable PDFs."
+        )
+
 
 def build_pyinstaller(onefile: bool = False) -> int:
     sep = _sep()
@@ -93,6 +100,7 @@ def build_pyinstaller(onefile: bool = False) -> int:
         # Bundled assets
         f"--add-data=resources/easyocr_models{sep}resources/easyocr_models",
         f"--add-data=resources/ru_lexicon.txt{sep}resources",
+        f"--add-data=resources/DejaVuSans.ttf{sep}resources",
         f"--add-data=resources/icons{sep}resources/icons",
         f"--add-data=resources/styles{sep}resources/styles",
         f"--add-data=profiles{sep}profiles",
