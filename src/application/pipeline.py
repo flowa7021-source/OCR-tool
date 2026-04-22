@@ -80,6 +80,70 @@ def _resolve_stage_parallelism(
     return value
 
 
+def _warn_on_low_dpi(job_id: str, ocr_cfg, page_infos: list[dict]) -> None:  # noqa: ANN001
+    """Log a one-line advisory when render or source DPI is low.
+
+    Thresholds:
+      * render DPI < 200 — noticeable quality drop on 8–10 pt fields
+        (ИНН/КПП). Suggest 300.
+      * native source DPI < 150 (median over pages with an embedded
+        raster) — the scan itself is low-res, re-scan to fix.
+    """
+    render_dpi = int(getattr(ocr_cfg, "dpi", 300) or 300)
+    if render_dpi < 200:
+        logger.warning(
+            "Job %s: render DPI = %d is below 200. Small fields "
+            "(ИНН, КПП, мелкий шрифт полей) will be under-sampled. "
+            "Consider raising profile.ocr.dpi to 300 for better accuracy.",
+            job_id, render_dpi,
+        )
+    source_dpis = [
+        p["native_image_dpi"] for p in page_infos
+        if p.get("native_image_dpi")
+    ]
+    if source_dpis:
+        median_src = sorted(source_dpis)[len(source_dpis) // 2]
+        if median_src < 150:
+            logger.warning(
+                "Job %s: source PDF embeds images at ~%d DPI (median). "
+                "Rendering at %d DPI cannot recover detail that is not in "
+                "the source. Expected OCR confidence ceiling ~60-70%%; "
+                "re-scan at ≥300 DPI to reach 85-95%% target.",
+                job_id, median_src, render_dpi,
+            )
+
+
+def _estimate_page_source_dpi(page) -> int | None:  # noqa: ANN001
+    """Return the pixel density of the largest embedded image on ``page``.
+
+    For image-only scans this equals the scan DPI. We use it to warn the
+    user that rendering at 300 DPI from a 100-DPI scan is wasted work:
+    the output has 300 pixels per inch but no additional image detail
+    versus the source. EasyOCR accuracy is bounded by the source.
+    Returns ``None`` when the page is pure vector / text (no embedded
+    raster) or when we cannot determine the image geometry.
+    """
+    try:
+        info_list = page.get_image_info() or []
+    except Exception:  # noqa: BLE001 — PyMuPDF metadata can be flaky
+        return None
+    if not info_list:
+        return None
+    # Use the largest image on the page — main scan, not the logo.
+    biggest = max(info_list, key=lambda d: int(d.get("width", 0))
+                  * int(d.get("height", 0)))
+    img_w = int(biggest.get("width") or 0)
+    img_h = int(biggest.get("height") or 0)
+    bbox = biggest.get("bbox") or (0, 0, 0, 0)
+    page_w_pt = max(1.0, float(bbox[2]) - float(bbox[0]))
+    page_h_pt = max(1.0, float(bbox[3]) - float(bbox[1]))
+    if img_w <= 0 or img_h <= 0:
+        return None
+    dpi_x = img_w * 72.0 / page_w_pt
+    dpi_y = img_h * 72.0 / page_h_pt
+    return int(round(min(dpi_x, dpi_y)))
+
+
 class PipelineError(RuntimeError):
     """Base class for pipeline-level failures surfaced to the UI."""
 
@@ -252,6 +316,13 @@ class OCRPipeline:
                 "(document has %d total)",
                 job_id, time.time() - t_stage, total_pages, full_page_count,
             )
+
+            # DPI advisory. Render DPI is the raster density we feed
+            # EasyOCR; source DPI is the embedded image density in the
+            # PDF. Warn when either is low — accuracy is bounded by the
+            # source, and render-DPI < 200 under-samples even clean
+            # scans.
+            _warn_on_low_dpi(job_id, job.profile.ocr, page_infos)
 
             # Text-layer bypass. If skip_text=True AND every page
             # already carries a substantial digital text layer, skip
@@ -587,6 +658,7 @@ class OCRPipeline:
                     {
                         "page_number": i + 1,
                         "has_text": bool(text.strip()),
+                        "native_image_dpi": _estimate_page_source_dpi(page),
                     }
                 )
             return infos

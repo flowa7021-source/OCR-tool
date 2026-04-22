@@ -3,6 +3,31 @@
 Инструментарий для дообучения recognizer'а EasyOCR (`cyrillic_g2.pth`)
 на корпусе `inputs/*.pdf` + `inputs/*.txt`.
 
+**Быстрый старт (бесплатный T4 GPU в Colab — рекомендуется):**
+
+```bash
+# 1. Подготовить dataset локально (CPU, ~10-15 мин на 5 PDF):
+python scripts/finetune/bootstrap_dataset.py
+
+# 2. Залить datasets/finetune_ru/ в Google Drive
+#    (прямо архивом из UI — ~100 МБ)
+
+# 3. Открыть новый Colab notebook, выбрать T4 GPU
+#    (Runtime → Change runtime type → GPU → T4), вставить
+#    содержимое scripts/finetune/colab_finetune.py единой ячейкой и Run.
+#    ~1.5h на 100 эпох, 4h на 300 (рекомендуется для 2k crop'ов).
+
+# 4. Скачать best_accuracy.pth с Google Drive
+#    ({DRIVE_DATASET_DIR}/out/) и положить в
+#    resources/easyocr_models/cyrillic_g2.pth → python build.py
+```
+
+Альтернатива Colab — Kaggle Notebook (тоже T4/P100, 30ч/нед бесплатно).
+Workflow идентичен, только Drive заменяется на `/kaggle/input/*.zip`.
+
+На production-CPU-машине без GPU fine-tune занимает 50-100× дольше —
+не рекомендуется даже для smoke-run; используйте Colab/Kaggle.
+
 ## Зачем
 
 Stock-модель EasyOCR `cyrillic_g2.pth` обучена на смешанном

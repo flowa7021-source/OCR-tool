@@ -88,8 +88,16 @@ def build_dataset(inputs_dir: Path, out_dir: Path, dpi: int = 300) -> int:
 
     (out_dir / "training").mkdir(parents=True, exist_ok=True)
     (out_dir / "validation").mkdir(parents=True, exist_ok=True)
+    # EasyOCR trainer expects ``labels.csv`` with header ``filename,words``
+    # (pandas.read_csv), so that's the primary format. ``gt.txt`` is also
+    # written for human inspection and for tools that follow the
+    # deep-text-recognition-benchmark convention.
     train_gt = (out_dir / "training" / "gt.txt").open("w", encoding="utf-8")
     val_gt = (out_dir / "validation" / "gt.txt").open("w", encoding="utf-8")
+    train_csv = (out_dir / "training" / "labels.csv").open("w", encoding="utf-8")
+    val_csv = (out_dir / "validation" / "labels.csv").open("w", encoding="utf-8")
+    train_csv.write("filename,words\n")
+    val_csv.write("filename,words\n")
 
     print("[bootstrap] Loading EasyOCR reader (ru + en, CPU)…")
     reader = easyocr.Reader(["ru", "en"], gpu=False, verbose=False)
@@ -132,11 +140,17 @@ def build_dataset(inputs_dir: Path, out_dir: Path, dpi: int = 300) -> int:
                     )
                     target = train_gt if bucket == "training" else val_gt
                     target.write(f"{filename}\t{label}\n")
+                    csv_target = train_csv if bucket == "training" else val_csv
+                    # Escape embedded commas / quotes for CSV round-trip.
+                    safe_label = label.replace('"', '""')
+                    csv_target.write(f'{filename},"{safe_label}"\n')
         finally:
             doc.close()
 
     train_gt.close()
     val_gt.close()
+    train_csv.close()
+    val_csv.close()
     print(
         f"[bootstrap] Done: {total} crops written to {out_dir} "
         f"({auto_corrected} labels auto-corrected from ground truth)"

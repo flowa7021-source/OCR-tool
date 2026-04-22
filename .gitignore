@@ -80,6 +80,17 @@ tests/fixtures/nightly/
 tests/fixtures/accuracy_corpus/*.pdf
 tests/fixtures/accuracy_corpus/*.txt
 
+# Fine-tune training crops — produced by
+# scripts/finetune/bootstrap_dataset.py from inputs/*.pdf + inputs/*.txt.
+# Typically 1-2 GB of crop jpegs. Regenerate locally with the bootstrap
+# script; upload to Colab/Kaggle Drive for actual GPU training.
+datasets/
+
+# EasyOCR trainer clone — created on first invocation of
+# scripts/finetune/finetune_recognizer.py; ~20 MB checkout. Regenerated
+# on demand, not versioned with our repo.
+.finetune_trainer/
+
 # OS
 Thumbs.db
 desktop.ini

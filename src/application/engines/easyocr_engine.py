@@ -78,14 +78,39 @@ class EasyOCREngine(OCREngine):
         return True, "EasyOCR доступен."
 
     def _get_reader(self, languages: list[str], gpu: bool):
-        """Lazy-load ``easyocr.Reader`` once per (langs, gpu) combo."""
-        import easyocr
+        """Lazy-load ``easyocr.Reader`` once per (langs, resolved_gpu) combo.
 
-        key = (tuple(sorted(languages)), gpu)
+        ``gpu=True`` from the profile means "use accelerator if one is
+        present"; we resolve it against ``torch.cuda.is_available()``
+        here so that a profile carried between a GPU workstation and a
+        CPU-only laptop does not explode with a CUDA error on the
+        laptop. Also respects the ``OCR_STUDIO_FORCE_CPU=1`` env var for
+        debugging / benchmarking parity.
+        """
+        import os
+
+        import easyocr
+        import torch
+
+        forced_cpu = os.environ.get("OCR_STUDIO_FORCE_CPU") == "1"
+        cuda_ok = bool(
+            not forced_cpu
+            and gpu
+            and torch.cuda.is_available()
+        )
+        key = (tuple(sorted(languages)), cuda_ok)
         if self._reader is not None and self._reader_key == key:
             return self._reader
-        logger.info("Loading EasyOCR model: langs=%s gpu=%s", languages, gpu)
-        self._reader = easyocr.Reader(languages, gpu=gpu, verbose=False)
+        if gpu and not cuda_ok:
+            logger.info(
+                "EasyOCR: CUDA unavailable (forced_cpu=%s) — falling back to CPU",
+                forced_cpu,
+            )
+        logger.info(
+            "Loading EasyOCR model: langs=%s gpu=%s (resolved=%s)",
+            languages, gpu, cuda_ok,
+        )
+        self._reader = easyocr.Reader(languages, gpu=cuda_ok, verbose=False)
         self._reader_key = key
         return self._reader
 
