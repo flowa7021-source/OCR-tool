@@ -705,21 +705,24 @@ class TextPostprocessor:
             )
 
             # Широкий fuzzy-корректор через reference-словарь
-            # ~17 000 русских словоформ (resources/ru_lexicon.txt).
-            # Opt-in через ``postprocess.fuzzy_correction_ru`` —
-            # применяется к ВСЕМ русским токенам ≥ 6 chars и может
-            # менять legitimate word-forms (организация↔организации,
-            # оформил↔оформи). Полезно на heavy-mangled OCR-выходах
-            # типичных ТН-сканов, но на clean synthetic corpus'е
-            # снижает CER/WER из-за form-mismatch с ground-truth.
-            # Включайте явно в профиле только для scan-corpus'а.
+            # ~2 000 000 русских словоформ (resources/ru_lexicon.txt,
+            # OpenCorpora 5-12 chars). Opt-in через
+            # ``postprocess.fuzzy_correction_ru`` — применяется к ВСЕМ
+            # русским токенам ≥ 6 chars и может менять legitimate
+            # word-forms (организация↔организации, оформил↔оформи).
+            # Pymorphy3 proper-noun guard отсекает геоимена/фамилии
+            # от превращения в функциональные слова. Полезно на
+            # heavy-mangled OCR-выходах типичных ТН-сканов, но на
+            # clean synthetic corpus'е может снижать CER/WER из-за
+            # form-mismatch с ground-truth. Включайте явно в профиле
+            # только для scan-corpus'а.
             if getattr(config, "fuzzy_correction_ru", False):
                 from src.core.fuzzy_corrector import (
                     correct as _fuzzy_correct,
                 )
                 current = _fuzzy_correct(current)
                 logger.debug(
-                    "Postprocess: fuzzy-corrector applied (~17k ref dict)"
+                    "Postprocess: fuzzy-corrector applied (2M ref dict)"
                 )
 
         if config.autocorrect_english:

@@ -341,13 +341,14 @@ class PostprocessConfig:
     #: opt in. Implemented in :mod:`src.core.entity_validators`;
     #: skips tokens that aren't entity-shaped so prose isn't affected.
     validate_entities: bool = False
-    #: Fuzzy-corrector (~17k ru_lexicon.txt forms). Opt-in, off by
-    #: default: применяется ко ВСЕМ русским токенам ≥ 6 chars и
-    #: может менять legitimate word-forms (организация↔организации).
-    #: Полезен на heavily-mangled scan corpus'е (≥ 30 % CER на OCR),
-    #: снижает WER/CER на clean synthetic fixtures из-за form-
-    #: mismatch с ground-truth. Включайте явно только для
-    #: scan-heavy workflow'ов. Декабрь 2026.
+    #: Fuzzy-corrector (~2M ru_lexicon.txt forms, OpenCorpora 5-12).
+    #: Opt-in, off by default: применяется ко ВСЕМ русским токенам
+    #: ≥ 6 chars и может менять legitimate word-forms
+    #: (организация↔организации). Pymorphy3 proper-noun guard
+    #: отсекает геоимена/фамилии. Полезен на heavily-mangled scan
+    #: corpus'е (≥ 30 % CER на OCR), может снижать WER/CER на clean
+    #: synthetic fixtures из-за form-mismatch с ground-truth.
+    #: Включайте явно только для scan-heavy workflow'ов.
     fuzzy_correction_ru: bool = False
     custom_rules: list[RegexRule] = field(default_factory=list)
 
