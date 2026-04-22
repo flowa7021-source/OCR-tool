@@ -110,6 +110,14 @@ class EasyOCREngine(OCREngine):
         dpi = int(config.dpi)
         allowlist = config.allowlist or None
         min_conf = max(0.0, min(1.0, config.min_keep_confidence))
+        craft_kwargs = {
+            "text_threshold": float(getattr(config, "craft_text_threshold", 0.7)),
+            "low_text": float(getattr(config, "craft_low_text", 0.4)),
+            "link_threshold": float(getattr(config, "craft_link_threshold", 0.4)),
+            "canvas_size": int(getattr(config, "craft_canvas_size", 2560)),
+            "contrast_ths": float(getattr(config, "easyocr_contrast_ths", 0.1)),
+            "adjust_contrast": float(getattr(config, "easyocr_adjust_contrast", 0.5)),
+        }
 
         doc = fitz.open(str(preprocessed_pdf))
         try:
@@ -140,6 +148,7 @@ class EasyOCREngine(OCREngine):
             raw = reader.readtext(
                 arr, detail=1, paragraph=False,
                 allowlist=allowlist,
+                **craft_kwargs,
             )
             words: list[tuple[float, float, float, float, float, str]] = []
             texts: list[str] = []

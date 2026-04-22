@@ -1,12 +1,12 @@
 {
   "name": "universal_clean",
-  "description": "Минимальная предобработка для чистых сканов / digital-экспортов / уже OCR'нутых PDF. Только deskew + OTSU + EasyOCR. Выгоднее universal_accurate когда на входе high-contrast скан: предобработка экономит ~10 sec и не портит исходный raster.",
+  "description": "Минимальная предобработка для чистых сканов / digital-экспортов / уже OCR'нутых PDF. deskew без бинаризации + EasyOCR. Выгоднее universal_accurate когда на входе high-contrast скан: предобработка экономит ~10 sec и не портит исходный raster.",
   "schema_version": 13,
   "preprocess": {
     "auto_rotate": {"enabled": true, "min_confidence": 1.0},
     "deskew": {"enabled": true, "auto_detect": true, "manual_angle": 0.0, "max_angle": 45.0},
     "dewarp": {"enabled": false, "text_min_width": 15, "text_min_height": 2, "text_min_aspect": 1.5, "focal_length": 1.2},
-    "binarization": {"method": "otsu", "adaptive_block_size": 31, "adaptive_c": 10, "sauvola_window": 25, "sauvola_k": 0.2},
+    "binarization": {"method": "none", "adaptive_block_size": 31, "adaptive_c": 10, "sauvola_window": 25, "sauvola_k": 0.2},
     "denoise": {"enabled": false, "steps": []},
     "contrast": {"clahe_enabled": false, "clahe_clip": 2.0, "clahe_tile": 8, "manual_enabled": false, "alpha": 1.0, "beta": 0},
     "background": {"enabled": false, "blur_kernel": 55},
@@ -19,14 +19,20 @@
     "dpi": 300,
     "allowlist": "",
     "confidence_threshold": 60.0,
-    "min_keep_confidence": 0.1,
+    "min_keep_confidence": 0.2,
     "gpu": false,
     "skip_text": true,
     "max_pages": 0,
     "drop_low_conf_words": false,
     "soft_rescue_dropped_words": false,
     "adaptive_confidence_threshold": false,
-    "user_words_fuzzy_rescue": false
+    "user_words_fuzzy_rescue": false,
+    "craft_text_threshold": 0.7,
+    "craft_low_text": 0.4,
+    "craft_link_threshold": 0.4,
+    "craft_canvas_size": 2560,
+    "easyocr_contrast_ths": 0.1,
+    "easyocr_adjust_contrast": 0.5
   },
   "postprocess": {
     "autocorrect_russian": true,

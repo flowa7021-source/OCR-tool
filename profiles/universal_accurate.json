@@ -1,14 +1,14 @@
 {
   "name": "universal_accurate",
-  "description": "Универсальный default (апрель 2026, EasyOCR): минимальная предобработка + EasyOCR CRAFT+CRNN ru+en на 300 DPI. drop_low_conf_words + adaptive threshold + soft_rescue + user_words_fuzzy_rescue — полный postprocess и tn_upd парсер.",
+  "description": "Универсальный default (апрель 2026, EasyOCR): CLAHE без бинаризации + EasyOCR CRAFT+CRNN ru+en на 300 DPI. CRAFT text_threshold=0.75 для подавления шума форм. drop_low_conf_words + adaptive threshold + soft_rescue + user_words_fuzzy_rescue — полный postprocess и tn_upd парсер.",
   "schema_version": 13,
   "preprocess": {
     "auto_rotate": {"enabled": true, "min_confidence": 1.0},
     "deskew": {"enabled": true, "auto_detect": true, "manual_angle": 0.0, "max_angle": 45.0},
     "dewarp": {"enabled": false, "text_min_width": 15, "text_min_height": 2, "text_min_aspect": 1.5, "focal_length": 1.2},
-    "binarization": {"method": "otsu", "adaptive_block_size": 31, "adaptive_c": 10, "sauvola_window": 51, "sauvola_k": 0.34},
+    "binarization": {"method": "none", "adaptive_block_size": 31, "adaptive_c": 10, "sauvola_window": 51, "sauvola_k": 0.34},
     "denoise": {"enabled": false, "steps": []},
-    "contrast": {"clahe_enabled": false, "clahe_clip": 1.5, "clahe_tile": 8, "manual_enabled": false, "alpha": 1.0, "beta": 0},
+    "contrast": {"clahe_enabled": true, "clahe_clip": 1.5, "clahe_tile": 8, "manual_enabled": false, "alpha": 1.0, "beta": 0},
     "background": {"enabled": false, "blur_kernel": 55},
     "border_removal": {"enabled": false, "min_line_length": 150}
   },
@@ -19,14 +19,20 @@
     "dpi": 300,
     "allowlist": "",
     "confidence_threshold": 60.0,
-    "min_keep_confidence": 0.1,
+    "min_keep_confidence": 0.25,
     "gpu": false,
     "skip_text": true,
     "max_pages": 0,
     "drop_low_conf_words": true,
     "soft_rescue_dropped_words": true,
     "adaptive_confidence_threshold": true,
-    "user_words_fuzzy_rescue": true
+    "user_words_fuzzy_rescue": true,
+    "craft_text_threshold": 0.75,
+    "craft_low_text": 0.45,
+    "craft_link_threshold": 0.4,
+    "craft_canvas_size": 2560,
+    "easyocr_contrast_ths": 0.15,
+    "easyocr_adjust_contrast": 0.5
   },
   "postprocess": {
     "autocorrect_russian": true,

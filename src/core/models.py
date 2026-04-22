@@ -228,6 +228,35 @@ class OCRConfig:
     #: dictionary entry within Levenshtein distance 1–2 and swap in
     #: the canonical spelling. Pure dict + edit-distance lookup.
     user_words_fuzzy_rescue: bool = False
+    # --- CRAFT detector parameters (EasyOCR internals) -------------------
+    #: CRAFT text-region confidence threshold (0..1). Regions where
+    #: CRAFT's score map peaks above this value are proposed as text.
+    #: Default 0.7 is EasyOCR's built-in value; raising to 0.75–0.80
+    #: reduces false detections on form borders, stamps, and ruled lines,
+    #: which are the main source of low-confidence noise on ТН/УПД scans.
+    craft_text_threshold: float = 0.7
+    #: CRAFT low-boundary threshold (0..1). Controls how far from the
+    #: text-region peak the bounding box extends. Raising slightly above
+    #: the default (0.4) tightens boxes on blurry glyphs.
+    craft_low_text: float = 0.4
+    #: CRAFT affinity / link threshold (0..1). Merges nearby characters
+    #: into a single word box when their CRAFT affinity score exceeds
+    #: this value.  Default 0.4 works well for Latin+Cyrillic mixed text.
+    craft_link_threshold: float = 0.4
+    #: Maximum image dimension (px) before CRAFT downscales the input.
+    #: 2560 is EasyOCR's default. Increase to 3840 on high-DPI inputs
+    #: with very small text (e.g. 8-pt ИНН fields at 400+ DPI) so CRAFT
+    #: sees full-resolution glyphs.
+    craft_canvas_size: int = 2560
+    # --- EasyOCR built-in contrast enhancement ----------------------------
+    #: If a text-region patch has ``std(pixel_values) < contrast_ths * 255``
+    #: EasyOCR applies a contrast boost to it before CRNN inference. This
+    #: catches pale / faded ink that CRAFT detects but CRNN misreads.
+    easyocr_contrast_ths: float = 0.1
+    #: Strength of the contrast boost (0.0 = none, 1.0 = maximum). The
+    #: default 0.5 lifts mid-tones enough to recover faded ink without
+    #: blowing out already-saturated regions.
+    easyocr_adjust_contrast: float = 0.5
 
 
 # ---------------------------------------------------------------------------
