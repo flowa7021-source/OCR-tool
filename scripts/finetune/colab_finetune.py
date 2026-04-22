@@ -79,25 +79,34 @@ subprocess.check_call(['bash', '-c',
     'cd /content/EasyOCR && '
     'git sparse-checkout set trainer'])
 
-# 4. Fetch stock cyrillic_g2 weights
-import urllib.request, pathlib
+# 4. Fetch stock cyrillic_g2 weights (shipped as a ZIP in EasyOCR releases)
+import urllib.request, pathlib, zipfile, io
 base_weights = pathlib.Path('/content/base_weights/cyrillic_g2.pth')
 base_weights.parent.mkdir(parents=True, exist_ok=True)
 if not base_weights.exists():
     urls = [
-        'https://www.jaided.ai/read_download_model/cyrillic_g2.pth',
-        'https://github.com/JaidedAI/EasyOCR/releases/download/v1.6.2/cyrillic_g2.pth',
+        'https://github.com/JaidedAI/EasyOCR/releases/download/v1.6.1/cyrillic_g2.zip',
+        'https://github.com/JaidedAI/EasyOCR/releases/download/pre-v1.1.6/cyrillic_g2.zip',
     ]
     for url in urls:
         try:
             print(f'Downloading weights from {url} …')
-            urllib.request.urlretrieve(url, base_weights)
+            req = urllib.request.Request(url, headers={'User-Agent': 'easyocr-colab'})
+            with urllib.request.urlopen(req) as r:
+                blob = r.read()
+            with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+                # ZIP contains a single .pth at its root.
+                members = [n for n in zf.namelist() if n.endswith('.pth')]
+                if not members:
+                    raise RuntimeError(f'No .pth inside {url}')
+                with zf.open(members[0]) as src, open(base_weights, 'wb') as dst:
+                    dst.write(src.read())
             break
         except Exception as e:
             print(f'  failed: {e}')
     else:
         raise RuntimeError('Could not download cyrillic_g2.pth — check network.')
-print('Base weights:', base_weights)
+print('Base weights:', base_weights, f'({base_weights.stat().st_size / 1e6:.1f} MB)')
 
 # 4b. Patch trainer for PyTorch 2.x / Python 3 compatibility
 # - torch._utils._accumulate removed in PyTorch 2.x → itertools.accumulate
