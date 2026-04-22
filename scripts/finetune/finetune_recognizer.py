@@ -40,18 +40,57 @@ BASE_WEIGHTS = MODEL_DIR / "cyrillic_g2.pth"
 
 def _clone_trainer() -> Path:
     trainer_root = TRAINER_DIR / "trainer"
-    if trainer_root.exists():
-        return trainer_root
-    TRAINER_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"[finetune] Cloning EasyOCR trainer into {TRAINER_DIR} …")
-    subprocess.check_call([
-        "git", "clone", "--depth", "1", "--filter=blob:none",
-        "--sparse", TRAINER_REPO, str(TRAINER_DIR),
-    ])
-    subprocess.check_call(
-        ["git", "sparse-checkout", "set", "trainer"], cwd=str(TRAINER_DIR),
-    )
+    if not trainer_root.exists():
+        TRAINER_DIR.mkdir(parents=True, exist_ok=True)
+        print(f"[finetune] Cloning EasyOCR trainer into {TRAINER_DIR} …")
+        subprocess.check_call([
+            "git", "clone", "--depth", "1", "--filter=blob:none",
+            "--sparse", TRAINER_REPO, str(TRAINER_DIR),
+        ])
+        subprocess.check_call(
+            ["git", "sparse-checkout", "set", "trainer"], cwd=str(TRAINER_DIR),
+        )
+    _patch_trainer(trainer_root)
     return trainer_root
+
+
+def _patch_trainer(trainer_root: Path) -> None:
+    """Apply compatibility patches for PyTorch ≥ 2.0 and Python 3. Idempotent."""
+    _patch_dataset(trainer_root / "dataset.py")
+    _patch_train(trainer_root / "train.py")
+
+
+def _patch_dataset(ds: Path) -> None:
+    src = ds.read_text(encoding="utf-8")
+    if "from itertools import accumulate as _accumulate" in src:
+        return  # already patched
+    patched = src.replace(
+        "from torch._utils import _accumulate",
+        "try:\n    from torch._utils import _accumulate\n"
+        "except ImportError:\n    from itertools import accumulate as _accumulate",
+    ).replace(
+        "data_loader_iter.next()", "next(data_loader_iter)"
+    ).replace(
+        "self.dataloader_iter_list[i].next()",
+        "next(self.dataloader_iter_list[i])",
+    )
+    if patched != src:
+        ds.write_text(patched, encoding="utf-8")
+        print("[finetune] Patched trainer/dataset.py for PyTorch 2.x / Python 3")
+
+
+def _patch_train(tr: Path) -> None:
+    src = tr.read_text(encoding="utf-8")
+    if "map_location=" in src:
+        return  # already patched
+    # Add map_location so CPU machines can load CUDA-serialised weights.
+    patched = src.replace(
+        "pretrained_dict = torch.load(opt.saved_model)",
+        "pretrained_dict = torch.load(opt.saved_model, map_location='cpu')",
+    )
+    if patched != src:
+        tr.write_text(patched, encoding="utf-8")
+        print("[finetune] Patched trainer/train.py: torch.load map_location=cpu")
 
 
 def _write_config(trainer_root: Path, data_dir: Path, epochs: int) -> Path:
@@ -108,9 +147,25 @@ device: '{device}'
 
 
 def _run_training(trainer_root: Path, config_path: Path) -> int:
+    # The EasyOCR trainer has no argparse main block — it's designed to be
+    # called from a notebook (trainer.ipynb). We drive it via a small runner.
+    runner = (
+        "import os, sys, yaml, torch.backends.cudnn as cudnn\n"
+        "sys.path.insert(0, os.getcwd())\n"
+        "from train import train\n"
+        "from utils import AttrDict\n"
+        "with open(sys.argv[1], encoding='utf-8') as f:\n"
+        "    opt = AttrDict(yaml.safe_load(f))\n"
+        "opt.character = opt.number + opt.symbol + opt.lang_char\n"
+        "os.makedirs(f'./saved_models/{opt.experiment_name}', exist_ok=True)\n"
+        "cudnn.benchmark = True\n"
+        "cudnn.deterministic = False\n"
+        "train(opt, amp=False)\n"
+    )
+    runner_path = trainer_root / "_runner.py"
+    runner_path.write_text(runner, encoding="utf-8")
     return subprocess.call(
-        [sys.executable, "train.py", "--config_name",
-         config_path.stem],
+        [sys.executable, str(runner_path), str(config_path)],
         cwd=str(trainer_root),
     )
 

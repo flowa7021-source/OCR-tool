@@ -90,6 +90,12 @@ Stock-веса сохраняются в `cyrillic_g2.pth.stock` (на случ�
   epoch'ов).
 - Диск: ~1–2 GB под crops, ~500 MB под EasyOCR trainer repo clone.
 - RAM: 4+ GB.
+- Python-пакеты для запуска trainer'а (не входят в основной
+  `requirements.txt` — нужны только для fine-tune):
+
+  ```bash
+  pip install pandas natsort lmdb nltk fire
+  ```
 
 ## Ограничения
 

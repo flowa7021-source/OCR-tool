@@ -159,10 +159,26 @@ cfg_path.parent.mkdir(parents=True, exist_ok=True)
 cfg_path.write_text(cfg, encoding='utf-8')
 print('Config written:', cfg_path)
 
-# 6. Train
-import subprocess, os
+# 6. Train (EasyOCR trainer has no argparse __main__ — drive via notebook-style runner)
+import subprocess, pathlib
+_runner_lines = [
+    'import os, sys, yaml',
+    'import torch.backends.cudnn as cudnn',
+    'sys.path.insert(0, os.getcwd())',
+    'from train import train',
+    'from utils import AttrDict',
+    "with open(sys.argv[1], encoding='utf-8') as f:",
+    '    opt = AttrDict(yaml.safe_load(f))',
+    'opt.character = opt.number + opt.symbol + opt.lang_char',
+    "os.makedirs(f'./saved_models/{opt.experiment_name}', exist_ok=True)",
+    'cudnn.benchmark = True',
+    'cudnn.deterministic = False',
+    'train(opt, amp=False)',
+]
+_runner = pathlib.Path('/content/EasyOCR/trainer/_runner.py')
+_runner.write_text('\n'.join(_runner_lines) + '\n', encoding='utf-8')
 result = subprocess.run(
-    ['python', 'train.py', '--config_name', 'ru_finetune'],
+    ['python', str(_runner), str(cfg_path)],
     cwd='/content/EasyOCR/trainer',
 )
 print(f'Training finished with exit code {result.returncode}')
