@@ -83,10 +83,13 @@ def _patch_train(tr: Path) -> None:
     src = tr.read_text(encoding="utf-8")
     if "map_location=" in src:
         return  # already patched
-    # Add map_location so CPU machines can load CUDA-serialised weights.
+    # map_location='cpu' → CPU machines can load CUDA-serialised weights.
+    # weights_only=False → needed on PyTorch ≥ 2.6 (default flipped to True and
+    # blocks arbitrary pickled state_dicts).
     patched = src.replace(
         "pretrained_dict = torch.load(opt.saved_model)",
-        "pretrained_dict = torch.load(opt.saved_model, map_location='cpu')",
+        "pretrained_dict = torch.load(opt.saved_model, "
+        "map_location='cpu', weights_only=False)",
     )
     if patched != src:
         tr.write_text(patched, encoding="utf-8")

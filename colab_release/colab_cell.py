@@ -5,12 +5,12 @@
 from google.colab import drive
 drive.mount('/content/drive')
 
-# 2. Install deps
+# 2. Install deps (use Colab's pre-installed torch/torchvision/numpy — only add
+#    the trainer's extras. Pinning torch==2.0.1 fails on modern Colab Python.)
 import subprocess, sys
 subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q',
-    'torch==2.0.1', 'torchvision==0.15.2',
-    'natsort', 'lmdb', 'nltk', 'fire',
-    'opencv-python-headless', 'Pillow', 'numpy==1.24.4'])
+    'natsort', 'lmdb', 'nltk', 'fire', 'pandas',
+    'opencv-python-headless', 'Pillow', 'PyYAML'])
 
 # 3. Clone trainer (sparse checkout — only trainer/ subfolder)
 import subprocess
@@ -60,6 +60,18 @@ if 'from itertools import accumulate as _accumulate' not in _src:
     )
     _ds.write_text(_src, encoding='utf-8')
     print('Patched trainer/dataset.py (PyTorch 2.x / Python 3 compat)')
+
+# 4c. Patch train.py for PyTorch ≥ 2.6 (weights_only=True default rejects
+#     arbitrary pickled state_dicts).
+_tr = pathlib.Path('/content/EasyOCR/trainer/train.py')
+_tsrc = _tr.read_text(encoding='utf-8')
+if 'weights_only=False' not in _tsrc:
+    _tsrc = _tsrc.replace(
+        'pretrained_dict = torch.load(opt.saved_model)',
+        'pretrained_dict = torch.load(opt.saved_model, weights_only=False)'
+    )
+    _tr.write_text(_tsrc, encoding='utf-8')
+    print('Patched trainer/train.py (torch.load weights_only=False)')
 
 # 5. Write trainer YAML config
 import pathlib
