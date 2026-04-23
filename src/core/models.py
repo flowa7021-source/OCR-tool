@@ -271,6 +271,14 @@ class OCRConfig:
     #: Levenshtein budget. See :mod:`src.shared.domain_lm`.
     domain_lm_correction_enabled: bool = False
     domain_lm_skip_conf: float = 0.85
+    #: Auto-upscale pages whose SOURCE DPI (the native resolution of
+    #: the embedded image, not our render DPI) is below
+    #: ``auto_upscale_threshold``. Applies bicubic + unsharp mask
+    #: preprocessing via :mod:`src.core.super_resolution`. Rescues
+    #: OCR accuracy on low-DPI scans without rendering the whole page
+    #: larger.
+    auto_upscale_low_dpi: bool = False
+    auto_upscale_threshold: int = 200
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +477,7 @@ class ExtractConfig:
 # field that would make a newer JSON unreadable by an older binary —
 # the reader uses ``_migrate_profile_dict`` to apply compatibility
 # shims for every version below the current one.
-PROFILE_SCHEMA_VERSION: int = 14
+PROFILE_SCHEMA_VERSION: int = 15
 
 
 @dataclass
@@ -717,7 +725,17 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         data["schema_version"] = 14
         version = 14
 
-    # Future migrations go here: `if version < 15: ...`
+    # v14 → v15: add auto-upscale for low-DPI source images. Default-off
+    # so existing profiles preserve behaviour; universal_accurate and
+    # universal_hardscan builders opt in explicitly.
+    if version < 15:
+        ocr = data.setdefault("ocr", {})
+        ocr.setdefault("auto_upscale_low_dpi", False)
+        ocr.setdefault("auto_upscale_threshold", 200)
+        data["schema_version"] = 15
+        version = 15
+
+    # Future migrations go here: `if version < 16: ...`
 
     return data
 

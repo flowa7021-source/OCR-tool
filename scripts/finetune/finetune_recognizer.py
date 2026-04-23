@@ -59,6 +59,50 @@ def _patch_trainer(trainer_root: Path) -> None:
     _patch_dataset(trainer_root / "dataset.py")
     _patch_train(trainer_root / "train.py")
     _patch_test(trainer_root / "test.py")
+    _patch_model_dropout(trainer_root / "model.py")
+
+
+def _patch_model_dropout(mp: Path) -> None:
+    """Inject dropout hooks into the CRNN forward pass for regularisation.
+
+    Adds ``self._dropout_p = getattr(opt, 'dropout', 0.0)`` in __init__
+    and applies ``F.dropout(..., self._dropout_p, self.training)`` on
+    contextual_feature (after BiLSTM) and on visual_feature (after
+    AdaptiveAvgPool) when the config sets ``dropout > 0``.
+
+    Checkpoint structure is unchanged — we don't add nn.Module layers
+    so state_dict keys still match the pretrained cyrillic_g2.pth. Drop-
+    in-compatible with ``new_prediction=True``.
+    """
+    src = mp.read_text(encoding="utf-8")
+    if "_dropout_p = getattr" in src:
+        return  # already patched
+    patched = src
+    # 1. Ensure torch.nn.functional is imported
+    if "import torch.nn.functional as F" not in patched:
+        patched = patched.replace(
+            "import torch.nn as nn",
+            "import torch.nn as nn\nimport torch.nn.functional as F",
+        )
+    # 2. Add _dropout_p attribute at the end of __init__. Hook is right
+    #    before the end-of-init (identified by the sentinel "'Prediction'"
+    #    raise clause which is the last statement in __init__).
+    patched = patched.replace(
+        "            raise Exception('Prediction is neither CTC or Attn')\n",
+        "            raise Exception('Prediction is neither CTC or Attn')\n"
+        "\n        self._dropout_p = float(getattr(opt, 'dropout', 0.0))\n",
+    )
+    # 3. Inject F.dropout in forward after SequenceModeling.
+    patched = patched.replace(
+        "contextual_feature = self.SequenceModeling(visual_feature)",
+        "contextual_feature = self.SequenceModeling(visual_feature)\n"
+        "            if self._dropout_p > 0:\n"
+        "                contextual_feature = F.dropout("
+        "contextual_feature, p=self._dropout_p, training=self.training)",
+    )
+    if patched != src:
+        mp.write_text(patched, encoding="utf-8")
+        print("[finetune] Patched trainer/model.py (dropout regularisation)")
 
 
 def _patch_test(te: Path) -> None:
@@ -162,6 +206,7 @@ decode: 'greedy'
 new_prediction: True
 freeze_FeatureFxtraction: False
 freeze_SequenceModeling: False
+dropout: 0.2
 device: '{device}'
 """
     cfg_path = trainer_root / "saved_models" / "ru_finetune.yaml"

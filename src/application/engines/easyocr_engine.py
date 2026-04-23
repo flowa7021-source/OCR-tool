@@ -152,6 +152,10 @@ class EasyOCREngine(OCREngine):
             getattr(config, "domain_lm_correction_enabled", False),
         )
         lm_skip_conf = float(getattr(config, "domain_lm_skip_conf", 0.85))
+        auto_upscale = bool(getattr(config, "auto_upscale_low_dpi", False))
+        upscale_threshold = int(
+            getattr(config, "auto_upscale_threshold", 200),
+        )
         lm_instance = None
         if lm_enabled:
             try:
@@ -177,11 +181,17 @@ class EasyOCREngine(OCREngine):
                 with contextlib.suppress(Exception):
                     progress_callback(0, page_count, "ocr")
 
-            page_inputs: list[tuple[int, bytes, int, int]] = []
+            page_inputs: list[tuple[int, bytes, int, int, int | None]] = []
+            # Detect source DPI per page so low-resolution scans can be
+            # auto-upscaled before OCR. None when the page has no
+            # embedded raster (pure vector / text-only PDFs).
+            from src.shared.dpi_utils import estimate_page_source_dpi
             for i in range(page_count):
-                pix = doc[i].get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+                page = doc[i]
+                pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+                src_dpi = estimate_page_source_dpi(page) if auto_upscale else None
                 page_inputs.append((i, pix.tobytes("png"),
-                                    pix.width, pix.height))
+                                    pix.width, pix.height, src_dpi))
         finally:
             doc.close()
 
@@ -189,10 +199,35 @@ class EasyOCREngine(OCREngine):
         results: list[PageOCRResult | None] = [None] * page_count
         workers = _resolve_workers(page_count)
 
-        def _run_one(idx: int, png: bytes, w: int, h: int):
+        def _run_one(idx: int, png: bytes, w: int, h: int,
+                     src_dpi: int | None = None):
             arr = np.frombuffer(
                 fitz.Pixmap(png).samples, dtype=np.uint8,
             ).reshape(h, w)
+            # Auto-upscale low-DPI pages before the OCR pass (opt-in
+            # via config.auto_upscale_low_dpi). Skip when no source DPI
+            # is known (pure text/vector PDFs) or when above threshold.
+            # ``bbox_scale_back`` restores OCR'd bbox coordinates to the
+            # original (pre-upscale) page space so downstream consumers
+            # (searchable-PDF builder, post-processors) see coords in
+            # the same frame as ``w × h``.
+            bbox_scale_back = 1.0
+            if auto_upscale and src_dpi is not None and src_dpi < upscale_threshold:
+                from src.core.super_resolution import upscale_for_ocr
+                arr_up, sr_stats = upscale_for_ocr(
+                    arr, source_dpi=src_dpi,
+                    target_dpi=max(dpi, 300),
+                    mode="bicubic_sharpen",
+                )
+                if sr_stats.applied:
+                    logger.info(
+                        "EasyOCR page %d: auto-upscaled %d→%d DPI "
+                        "(scale=%.2fx, %.0f ms)",
+                        idx, sr_stats.input_dpi, sr_stats.output_dpi,
+                        sr_stats.scale, sr_stats.elapsed_ms,
+                    )
+                    arr = arr_up
+                    bbox_scale_back = 1.0 / sr_stats.scale
             raw = reader.readtext(
                 arr, detail=1, paragraph=False,
                 allowlist=allowlist,
@@ -247,8 +282,8 @@ class EasyOCREngine(OCREngine):
             for bbox, text, conf in raw:
                 if conf < min_conf or not text.strip():
                     continue
-                xs = [p[0] for p in bbox]
-                ys = [p[1] for p in bbox]
+                xs = [p[0] * bbox_scale_back for p in bbox]
+                ys = [p[1] * bbox_scale_back for p in bbox]
                 x, y = min(xs), min(ys)
                 bw, bh = max(xs) - x, max(ys) - y
                 words.append((float(x), float(y), float(bw), float(bh),

@@ -1,7 +1,7 @@
 {
   "name": "universal_clean",
   "description": "Минимальная предобработка для чистых сканов / digital-экспортов / уже OCR'нутых PDF. deskew без бинаризации + EasyOCR. Выгоднее universal_accurate когда на входе high-contrast скан: предобработка экономит ~10 sec и не портит исходный raster.",
-  "schema_version": 14,
+  "schema_version": 15,
   "preprocess": {
     "auto_rotate": {"enabled": true, "min_confidence": 1.0},
     "deskew": {"enabled": true, "auto_detect": true, "manual_angle": 0.0, "max_angle": 45.0},
@@ -36,7 +36,9 @@
     "low_conf_retry_enabled": false,
     "low_conf_retry_threshold": 0.5,
     "domain_lm_correction_enabled": false,
-    "domain_lm_skip_conf": 0.85
+    "domain_lm_skip_conf": 0.85,
+    "auto_upscale_low_dpi": false,
+    "auto_upscale_threshold": 200
   },
   "postprocess": {
     "autocorrect_russian": true,

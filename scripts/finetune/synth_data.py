@@ -94,19 +94,47 @@ def _render_word(
     padding: int = 6,
     bg: int = 255,
     fg: int = 0,
+    char_spacing_jitter: float = 0.0,
 ) -> Image.Image:
-    """Render ``word`` centered on a white-ish canvas using ``font_path``."""
+    """Render ``word`` centered on a white-ish canvas using ``font_path``.
+
+    When ``char_spacing_jitter > 0``, characters are drawn individually
+    with randomised horizontal offsets in [−j × W, +j × W] where W is
+    the glyph advance. Simulates variable kerning seen on aged printed
+    forms where the scanner's sub-pixel sampling bleeds character
+    boundaries unevenly. Matches one of the hardest-to-learn artefacts
+    on real ТН/УПД scans.
+    """
     font = ImageFont.truetype(str(font_path), font_size)
-    # Pillow ≥ 10: textbbox replaces the old textsize.
     tmp = Image.new("L", (1, 1), bg)
-    bbox = ImageDraw.Draw(tmp).textbbox((0, 0), word, font=font)
+    draw_tmp = ImageDraw.Draw(tmp)
+    bbox = draw_tmp.textbbox((0, 0), word, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    canvas_w = tw + padding * 2
+    # Add a small extra margin when per-char jitter is active so the
+    # accumulated offset doesn't clip.
+    jitter_pad = int(font_size * char_spacing_jitter * len(word)) if char_spacing_jitter else 0
+    canvas_w = tw + padding * 2 + jitter_pad
     canvas_h = th + padding * 2
     img = Image.new("L", (canvas_w, canvas_h), bg)
     draw = ImageDraw.Draw(img)
-    # Offset so glyph top-left lands at padding (textbbox may have non-0 origin).
-    draw.text((padding - bbox[0], padding - bbox[1]), word, fill=fg, font=font)
+
+    if char_spacing_jitter <= 0.0:
+        # Fast path — no per-char jitter, draw whole string at once.
+        draw.text((padding - bbox[0], padding - bbox[1]),
+                  word, fill=fg, font=font)
+        return img
+
+    # Per-character draw with random horizontal offset. Y stays the same
+    # so baseline alignment is preserved (critical for OCR).
+    rng = random.Random(hash(word) & 0xFFFFFFFF)
+    x = padding - bbox[0]
+    y = padding - bbox[1]
+    for ch in word:
+        ch_bbox = draw_tmp.textbbox((0, 0), ch, font=font)
+        ch_w = ch_bbox[2] - ch_bbox[0]
+        draw.text((x, y), ch, fill=fg, font=font)
+        jitter = rng.uniform(-char_spacing_jitter, char_spacing_jitter) * ch_w
+        x += ch_w + jitter
     return img
 
 
@@ -114,7 +142,8 @@ def _augment(img: Image.Image, intensity: float, rng: random.Random) -> Image.Im
     """Apply randomised degradation proportional to ``intensity`` in [0, 1].
 
     Simulates what scanning does to printed text: blur, JPEG blockiness,
-    salt-and-pepper speckle, mild rotation, stroke erosion.
+    salt-and-pepper speckle, mild rotation, stroke erosion, ink bleed,
+    horizontal stretch/squish (simulates non-uniform scanner sampling).
     """
     # 1. Rotation ±2° × intensity
     max_deg = 2.0 * intensity
@@ -122,6 +151,21 @@ def _augment(img: Image.Image, intensity: float, rng: random.Random) -> Image.Im
         angle = rng.uniform(-max_deg, max_deg)
         img = img.rotate(angle, resample=Image.BICUBIC, fillcolor=255,
                          expand=True)
+
+    # 1b. Horizontal stretch/squish (simulates scanner sub-pixel sampling
+    #     errors): scale W by factor in [1 − 0.15×intensity, 1 + 0.15×intensity].
+    stretch = 1.0 + rng.uniform(-0.15, 0.15) * intensity
+    if abs(stretch - 1.0) > 0.02:
+        w, h = img.size
+        new_w = max(4, int(round(w * stretch)))
+        img = img.resize((new_w, h), Image.BICUBIC)
+
+    # 1c. Ink bleed / stroke thickening — dilate dark pixels so adjacent
+    #     glyphs merge (common on overinked forms or heavy scan pressure).
+    #     PIL's MinFilter applied to grayscale extends dark regions
+    #     (equivalent to dilating the ink).
+    if intensity > 0.4 and rng.random() < 0.25:
+        img = img.filter(ImageFilter.MinFilter(3))
 
     # 2. Gaussian blur σ in [0, 1.5 × intensity]
     sigma = rng.uniform(0, 1.5 * intensity)
@@ -170,8 +214,11 @@ def build(
     n_samples: int,
     out_dir: Path,
     max_degradation: float = 0.6,
-    min_font_size: int = 18,
-    max_font_size: int = 36,
+    min_font_size: int = 14,
+    max_font_size: int = 48,
+    multi_dpi: bool = True,
+    char_jitter_prob: float = 0.25,
+    char_jitter_max: float = 0.08,
     seed: int = 1337,
     start_index: int = 1_000_000,
 ) -> int:
@@ -211,13 +258,33 @@ def build(
     val_csv_f = val_csv.open("a", encoding="utf-8")
 
     generated = 0
+    # Multi-DPI size buckets — biased distribution so model sees mostly
+    # mid-range with enough tails to handle 150-dpi and 600-dpi extremes.
+    size_pool: list[int] = []
+    if multi_dpi:
+        size_pool = (
+            list(range(min_font_size, 22)) * 1       # tiny (low-DPI scans)
+            + list(range(22, 32)) * 3                # mid (default 300-DPI)
+            + list(range(32, 40)) * 2                # large (high-DPI)
+            + list(range(40, max_font_size + 1)) * 1 # extra-large (zoomed)
+        )
     try:
         for i in range(n_samples):
             word = rng.choices(vocab_words, weights=probs, k=1)[0]
             font = rng.choice(fonts)
-            size = rng.randint(min_font_size, max_font_size)
+            size = (
+                rng.choice(size_pool) if size_pool
+                else rng.randint(min_font_size, max_font_size)
+            )
+            # Per-char horizontal jitter — applied stochastically so only
+            # some crops show the artefact, not all. Prevents training
+            # from locking onto a consistent "shifted" representation.
+            jitter = (rng.uniform(0.02, char_jitter_max)
+                      if rng.random() < char_jitter_prob else 0.0)
             try:
-                crop = _render_word(word, font, size)
+                crop = _render_word(
+                    word, font, size, char_spacing_jitter=jitter,
+                )
             except OSError as e:
                 print(f"[synth] skip {word!r} on {font.name}: {e}",
                       file=sys.stderr)
@@ -266,8 +333,21 @@ def main() -> int:
                         help="Number of synthetic crops (default: %(default)s)")
     parser.add_argument("--max-degradation", type=float, default=0.6,
                         help="Upper bound on augmentation intensity in [0, 1]")
-    parser.add_argument("--min-font-size", type=int, default=18)
-    parser.add_argument("--max-font-size", type=int, default=36)
+    parser.add_argument("--min-font-size", type=int, default=14,
+                        help="Smallest rendered font (px). Default 14 — "
+                             "exercises model on low-DPI scan equivalents.")
+    parser.add_argument("--max-font-size", type=int, default=48,
+                        help="Largest rendered font (px). Default 48 — "
+                             "covers zoomed-in / high-DPI crops.")
+    parser.add_argument("--no-multi-dpi", action="store_true",
+                        help="Disable DPI-weighted size bucketing "
+                             "(use uniform random in [min, max] instead).")
+    parser.add_argument("--char-jitter-prob", type=float, default=0.25,
+                        help="Fraction of crops that get per-character "
+                             "horizontal jitter applied (default: 0.25).")
+    parser.add_argument("--char-jitter-max", type=float, default=0.08,
+                        help="Max per-character horizontal offset as a "
+                             "fraction of glyph width (default: 0.08).")
     parser.add_argument("--seed", type=int, default=1337)
     args = parser.parse_args()
 
@@ -293,6 +373,9 @@ def main() -> int:
         max_degradation=args.max_degradation,
         min_font_size=args.min_font_size,
         max_font_size=args.max_font_size,
+        multi_dpi=not args.no_multi_dpi,
+        char_jitter_prob=args.char_jitter_prob,
+        char_jitter_max=args.char_jitter_max,
         seed=args.seed,
     )
 
