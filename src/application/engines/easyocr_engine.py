@@ -156,6 +156,9 @@ class EasyOCREngine(OCREngine):
         upscale_threshold = int(
             getattr(config, "auto_upscale_threshold", 200),
         )
+        structured_retry_enabled = bool(
+            getattr(config, "structured_retry_enabled", False),
+        )
         lm_instance = None
         if lm_enabled:
             try:
@@ -253,6 +256,29 @@ class EasyOCREngine(OCREngine):
                         "%d/%d words (unchanged=%d, failed=%d)",
                         idx, retry_stats.improved, retry_stats.attempted,
                         retry_stats.unchanged, retry_stats.failed,
+                    )
+            # Structured-validator retry — run BEFORE the domain-LM pass
+            # so that validated requisites don't get fuzzy-rewritten by
+            # the LM. Only touches words that look like ИНН/ОГРН/КПП/
+            # date and fail their validator.
+            if structured_retry_enabled:
+                from src.application.structured_retry import validate_and_retry
+
+                def _recognise2(crop_arr):
+                    return reader.readtext(
+                        crop_arr, detail=1, paragraph=False,
+                        allowlist=allowlist,
+                        **craft_kwargs,
+                    )
+
+                raw, sv_stats = validate_and_retry(arr, raw, _recognise2)
+                if sv_stats.fixed_offline or sv_stats.fixed_via_retry:
+                    logger.info(
+                        "EasyOCR page %d: structured-validator rescued "
+                        "%d requisites (%d offline, %d via retry)",
+                        idx,
+                        sv_stats.fixed_offline + sv_stats.fixed_via_retry,
+                        sv_stats.fixed_offline, sv_stats.fixed_via_retry,
                     )
             if lm_instance is not None:
                 corrected_raw = []

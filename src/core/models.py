@@ -279,6 +279,12 @@ class OCRConfig:
     #: larger.
     auto_upscale_low_dpi: bool = False
     auto_upscale_threshold: int = 200
+    #: Validate each requisite-shaped word (ИНН / ОГРН / КПП / date)
+    #: against its domain validator; re-OCR the crop with alt
+    #: preprocessing when the word fails. Complements low_conf_retry:
+    #: that one targets uncertain words, this one targets confident-
+    #: but-wrong ones (letter O instead of digit 0, etc.).
+    structured_retry_enabled: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -725,13 +731,14 @@ def _migrate_profile_dict(data: dict[str, Any]) -> dict[str, Any]:
         data["schema_version"] = 14
         version = 14
 
-    # v14 → v15: add auto-upscale for low-DPI source images. Default-off
-    # so existing profiles preserve behaviour; universal_accurate and
-    # universal_hardscan builders opt in explicitly.
+    # v14 → v15: add auto-upscale for low-DPI source images + structured
+    # requisite-retry. Default-off; universal_accurate and hardscan
+    # builders opt in explicitly.
     if version < 15:
         ocr = data.setdefault("ocr", {})
         ocr.setdefault("auto_upscale_low_dpi", False)
         ocr.setdefault("auto_upscale_threshold", 200)
+        ocr.setdefault("structured_retry_enabled", False)
         data["schema_version"] = 15
         version = 15
 

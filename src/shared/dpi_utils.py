@@ -42,10 +42,12 @@ def estimate_page_source_dpi(page) -> int | None:  # noqa: ANN001
     bbox = biggest.get("bbox") or (0, 0, 0, 0)
     if len(bbox) != 4:
         return None
-    page_w_pt = max(1.0, float(bbox[2]) - float(bbox[0]))
-    page_h_pt = max(1.0, float(bbox[3]) - float(bbox[1]))
-    if img_w <= 0 or img_h <= 0:
+    bbox_w = float(bbox[2]) - float(bbox[0])
+    bbox_h = float(bbox[3]) - float(bbox[1])
+    if bbox_w <= 0 or bbox_h <= 0 or img_w <= 0 or img_h <= 0:
         return None
+    page_w_pt = max(1.0, bbox_w)
+    page_h_pt = max(1.0, bbox_h)
     dpi_x = img_w * 72.0 / page_w_pt
     dpi_y = img_h * 72.0 / page_h_pt
     # Use the SMALLER of the two axes — more conservative, matches the

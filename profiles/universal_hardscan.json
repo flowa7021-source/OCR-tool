@@ -38,7 +38,8 @@
     "domain_lm_correction_enabled": true,
     "domain_lm_skip_conf": 0.85,
     "auto_upscale_low_dpi": true,
-    "auto_upscale_threshold": 220
+    "auto_upscale_threshold": 220,
+    "structured_retry_enabled": true
   },
   "postprocess": {
     "autocorrect_russian": true,

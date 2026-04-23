@@ -60,9 +60,19 @@ jobs:
       - name: Run accuracy metrics
         run: python scripts/real_ocr_metrics.py --fail-above 180
 
+      - name: Run per-field metrics (INN/OGRN/KPP/dates)
+        run: python scripts/per_field_metrics.py
+
+      - name: Run confusion-matrix analysis
+        run: python scripts/confusion_matrix.py --top-k 30
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ocr-metrics-report
-          path: reports/ocr_metrics.json
+          name: ocr-reports
+          path: |
+            reports/ocr_metrics.json
+            reports/per_field_metrics.json
+            reports/confusion_matrix.json
+            reports/confusion_matrix.txt
           retention-days: 30
